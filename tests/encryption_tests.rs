@@ -7,7 +7,7 @@ use tempfile::TempDir;
 // Helper to create a temporary test file
 fn temp_test_file() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
-    let path = dir.path().join("test_storage.dat");
+    let path = dir.path().join("rcypher_test");
     (dir, path)
 }
 

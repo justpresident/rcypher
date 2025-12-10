@@ -38,8 +38,6 @@ struct Version6Header {
     iv: [u8; BLOCK_SIZE],
 }
 
-pub const STORE_VERSION: u16 = StoreVersion::Version4 as u16;
-
 const READ_BUF_SIZE: usize = 4096;
 const BLOCK_SIZE: usize = 16;
 
@@ -349,7 +347,8 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
     let mut result = Vec::new();
 
     // Version
-    result.extend_from_slice(&STORE_VERSION.to_be_bytes());
+    let version = StoreVersion::Version4 as u16;
+    result.extend_from_slice(&version.to_be_bytes());
 
     // Count elements
     let count: u32 = storage.data.values().map(|v| v.len()).sum::<usize>() as u32;
@@ -378,7 +377,7 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
     }
 
     let version = u16::from_be_bytes([data[0], data[1]]);
-    if version != STORE_VERSION && version != 3 {
+    if version != StoreVersion::Version4 as u16 {
         bail!("Unsupported storage version: {}", version);
     }
 
@@ -413,7 +412,7 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
         let value = String::from_utf8(data[pos..pos + val_len].to_vec())?;
         pos += val_len;
 
-        let timestamp = if version == 4 {
+        let timestamp = {
             if pos + 4 > data.len() {
                 bail!("Corrupted file: timestamp missing");
             }
@@ -421,8 +420,6 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
                 u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as u64;
             pos += 4;
             ts
-        } else {
-            0
         };
 
         storage

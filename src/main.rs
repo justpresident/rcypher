@@ -28,6 +28,13 @@ struct Cli {
     #[arg(short, long, action)]
     decrypt: bool,
 
+    // This is only for automated testing
+    #[arg(long, hide(true))]
+    password: Option<String>,
+
+    #[arg(long, default_value = "cypher > ")]
+    prompt: String,
+
     /// File to encrypt/decrypt or use as storage
     filename: PathBuf,
 }
@@ -117,7 +124,7 @@ impl Validator for CypherCompleter {}
 
 impl Helper for CypherCompleter {}
 
-fn run_interactive(cypher: Cypher, filename: PathBuf) -> Result<()> {
+fn run_interactive(cypher: Cypher, filename: PathBuf, prompt: String) -> Result<()> {
     let storage = Arc::new(Mutex::new(load_storage(&cypher, &filename)?));
 
     let config = Config::builder()
@@ -140,7 +147,7 @@ fn run_interactive(cypher: Cypher, filename: PathBuf) -> Result<()> {
             break;
         }
 
-        let readline = rl.readline("cypher > ");
+        let readline = rl.readline(&prompt);
         match readline {
             Ok(line) => {
                 let line = line.trim();
@@ -257,8 +264,12 @@ fn print_help() {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let password =
-        rpassword::prompt_password(format!("Enter Password for {}: ", cli.filename.display()))?;
+    let password = match cli.password {
+        Some(passwd) => passwd.clone(),
+        None => {
+            rpassword::prompt_password(format!("Enter Password for {}: ", cli.filename.display()))?
+        }
+    };
     let cypher = Cypher::new(&password);
 
     if cli.encrypt {
@@ -266,7 +277,7 @@ fn main() -> Result<()> {
     } else if cli.decrypt {
         cypher.decrypt_file(&cli.filename, &mut io::stdout())?;
     } else {
-        run_interactive(cypher, cli.filename)?;
+        run_interactive(cypher, cli.filename, cli.prompt)?;
     }
 
     Ok(())
