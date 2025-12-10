@@ -1,5 +1,6 @@
 use rcypher::*;
 use std::fs;
+use std::io::{Read as _, Seek as _, SeekFrom};
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -73,6 +74,24 @@ fn test_decrypt_corrupted_data() {
     assert!(result.is_err());
 }
 
+fn encrypt_decrypt(input_path: &PathBuf, output_path: &PathBuf) -> Vec<u8> {
+    let cypher = Cypher::new("file_password");
+
+    // Encrypt
+    let mut file = fs::File::create(&output_path).unwrap();
+    cypher.encrypt_file(&input_path, &mut file).unwrap();
+
+    // Decrypt
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    cypher.decrypt_file(&output_path, &mut buffer).unwrap();
+    buffer.seek(SeekFrom::Start(0)).unwrap();
+
+    let mut decrypted = Vec::new();
+    buffer.read_to_end(&mut decrypted).unwrap();
+
+    decrypted
+}
+
 #[test]
 fn test_encrypt_decrypt_file() {
     let (_dir, input_path) = temp_test_file();
@@ -82,14 +101,7 @@ fn test_encrypt_decrypt_file() {
     let test_data = b"This is test file content\nWith multiple lines\nAnd some more";
     fs::write(&input_path, test_data).unwrap();
 
-    let cypher = Cypher::new("file_password");
-
-    // Encrypt
-    let encrypted = cypher.encrypt_file(&input_path).unwrap();
-    fs::write(&output_path, &encrypted).unwrap();
-
-    // Decrypt
-    let decrypted = cypher.decrypt_file(&output_path).unwrap();
+    let decrypted = encrypt_decrypt(&input_path, &output_path);
 
     assert_eq!(decrypted.as_slice(), test_data);
 }
@@ -106,12 +118,7 @@ fn test_encrypt_decrypt_large_file() {
     }
     fs::write(&input_path, &test_data).unwrap();
 
-    let cypher = Cypher::new("file_password");
-
-    let encrypted = cypher.encrypt_file(&input_path).unwrap();
-    fs::write(&output_path, &encrypted).unwrap();
-
-    let decrypted = cypher.decrypt_file(&output_path).unwrap();
+    let decrypted = encrypt_decrypt(&input_path, &output_path);
 
     assert_eq!(decrypted.len(), test_data.len());
     assert_eq!(decrypted, test_data);
@@ -124,12 +131,7 @@ fn test_encrypt_decrypt_empty_file() {
 
     fs::write(&input_path, b"").unwrap();
 
-    let cypher = Cypher::new("file_password");
-
-    let encrypted = cypher.encrypt_file(&input_path).unwrap();
-    fs::write(&output_path, &encrypted).unwrap();
-
-    let decrypted = cypher.decrypt_file(&output_path).unwrap();
+    let decrypted = encrypt_decrypt(&input_path, &output_path);
 
     assert_eq!(decrypted.len(), 0);
 }

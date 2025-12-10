@@ -7,7 +7,7 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Editor, Helper};
-use std::io::{self, Write};
+use std::io::{self};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -262,11 +262,9 @@ fn main() -> Result<()> {
     let cypher = Cypher::new(&password);
 
     if cli.encrypt {
-        let encrypted = cypher.encrypt_file(&cli.filename)?;
-        io::stdout().write_all(&encrypted)?;
+        cypher.encrypt_file(&cli.filename, &mut io::stdout())?;
     } else if cli.decrypt {
-        let decrypted = cypher.decrypt_file(&cli.filename)?;
-        io::stdout().write_all(&decrypted)?;
+        cypher.decrypt_file(&cli.filename, &mut io::stdout())?;
     } else {
         run_interactive(cypher, cli.filename)?;
     }
