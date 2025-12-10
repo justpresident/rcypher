@@ -71,6 +71,10 @@ impl Storage {
             .unwrap()
             .as_secs();
 
+        self.put_ts(key, value, timestamp);
+    }
+
+    pub fn put_ts(&mut self, key: String, value: String, timestamp: u64) {
         self.data
             .entry(key)
             .or_default()

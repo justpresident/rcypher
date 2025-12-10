@@ -1,5 +1,6 @@
 use rcypher::*;
 use std::fs;
+use std::ops::Add;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -168,19 +169,22 @@ fn test_storage_delete() {
 
 #[test]
 fn test_storage_history() {
+    use std::time::{SystemTime, UNIX_EPOCH};
     let mut storage = Storage::new();
     storage.put("key1".to_string(), "v1".to_string());
-    std::thread::sleep(std::time::Duration::from_millis(1001));
-    storage.put("key1".to_string(), "v2".to_string());
-    std::thread::sleep(std::time::Duration::from_millis(1001));
-    storage.put("key1".to_string(), "v3".to_string());
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    storage.put_ts("key1".to_string(), "v2".to_string(), timestamp.add(1));
+    storage.put_ts("key1".to_string(), "v3".to_string(), timestamp.add(2));
 
     let history = storage.history("key1").unwrap();
     assert_eq!(history.len(), 3);
 
     // Timestamps should be in ascending order
-    assert!(history[0].timestamp < history[1].timestamp);
-    assert!(history[1].timestamp < history[2].timestamp);
+    assert!(history[0].timestamp + 1 == history[1].timestamp);
+    assert!(history[1].timestamp + 1 == history[2].timestamp);
 
     // Values should be in order
     assert_eq!(history[0].value, "v1");
