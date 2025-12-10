@@ -143,7 +143,7 @@ impl Cypher {
 
         let mut header = Version6Header {
             version: (CypherVersion::Version6 as u16).to_be_bytes(),
-            pad_len: (BLOCK_SIZE - (data.len() as usize % BLOCK_SIZE)) as u8,
+            pad_len: (BLOCK_SIZE - (data.len() % BLOCK_SIZE)) as u8,
             _reserved: 0,
             iv: [0u8; BLOCK_SIZE],
         };
@@ -154,7 +154,7 @@ impl Cypher {
 
         // Pad data to block size
         let mut padded = data.to_vec();
-        padded.extend(vec![header.pad_len as u8; header.pad_len as usize]);
+        padded.extend(vec![header.pad_len; header.pad_len as usize]);
 
         // Encrypt
         let cipher = Aes256CbcEnc::new(&self.key.into(), &header.iv.into());
@@ -193,7 +193,7 @@ impl Cypher {
                 Ok(result)
             }
             Ok(CypherVersion::Version6) => {
-                let header: Version6Header = bincode::deserialize(&data[..])?;
+                let header: Version6Header = bincode::deserialize(data)?;
                 let pos = size_of_val(&header);
                 let mut encrypted = data[pos..].to_vec();
 
@@ -312,10 +312,10 @@ impl Cypher {
                 let pos = size_of_val(&header);
                 let cipher = Aes256CbcDec::new(&self.key.into(), &header.iv.into());
 
-                let mut encrypted = &mut data[pos..];
+                let encrypted = &mut data[pos..];
                 let encrypted_len = encrypted.len();
                 let decrypted = cipher
-                    .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
+                    .decrypt_padded_mut::<cipher::block_padding::NoPadding>(encrypted)
                     .map_err(|e| {
                         anyhow::anyhow!("File decryption failed: {e}, size={}", encrypted_len)
                     })?;
