@@ -15,7 +15,7 @@ fn test_encrypt_decrypt_basic() {
     let cypher = Cypher::new("test_password");
     let data = b"Hello, World!";
 
-    let encrypted = cypher.encrypt(data);
+    let encrypted = cypher.encrypt(data).unwrap();
     assert_ne!(encrypted.as_slice(), data);
     assert!(encrypted.len() > data.len()); // Should be larger due to padding and metadata
 
@@ -28,7 +28,7 @@ fn test_encrypt_decrypt_empty() {
     let cypher = Cypher::new("test_password");
     let data = b"";
 
-    let encrypted = cypher.encrypt(data);
+    let encrypted = cypher.encrypt(data).unwrap();
     let decrypted = cypher.decrypt(&encrypted).unwrap();
     assert_eq!(decrypted.as_slice(), data);
 }
@@ -38,7 +38,7 @@ fn test_encrypt_decrypt_large_data() {
     let cypher = Cypher::new("test_password");
     let data = vec![42u8; 10000]; // 10KB of data
 
-    let encrypted = cypher.encrypt(&data);
+    let encrypted = cypher.encrypt(&data).unwrap();
     let decrypted = cypher.decrypt(&encrypted).unwrap();
     assert_eq!(decrypted, data);
 }
@@ -49,7 +49,7 @@ fn test_decrypt_wrong_password() {
     let cypher2 = Cypher::new("password2");
     let data = b"Secret data";
 
-    let encrypted = cypher1.encrypt(data);
+    let encrypted = cypher1.encrypt(data).unwrap();
     let decrypted = cypher2.decrypt(&encrypted);
 
     // Should either fail or return garbage (not original data)
@@ -67,7 +67,7 @@ fn test_decrypt_corrupted_data() {
     assert!(result.is_err());
 
     // Wrong version
-    let mut encrypted = cypher.encrypt(b"test");
+    let mut encrypted = cypher.encrypt(b"test").unwrap();
     encrypted[0] = 99; // Invalid version
     let result = cypher.decrypt(&encrypted);
     assert!(result.is_err());
@@ -366,17 +366,6 @@ fn test_format_timestamp() {
     // Test zero timestamp
     let formatted_zero = format_timestamp(0);
     assert_eq!(formatted_zero, "N/A");
-}
-
-#[test]
-fn test_cypher_version_compatibility() {
-    let cypher = Cypher::new("test");
-    let data = b"test data";
-    let encrypted = cypher.encrypt(data);
-
-    // Check version in encrypted data
-    let version = u16::from_be_bytes([encrypted[0], encrypted[1]]);
-    assert_eq!(version, CYPHER_VERSION);
 }
 
 #[test]
