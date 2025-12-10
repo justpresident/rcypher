@@ -1,5 +1,5 @@
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::Result;
+use clap::{ArgGroup, Parser};
 use rcypher::*; // Import from lib
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -15,27 +15,21 @@ use std::time::SystemTime;
 const STANDBY_TIMEOUT: u64 = 300;
 
 #[derive(Parser)]
+#[command(group(
+    ArgGroup::new("mode")
+        .args(&["encrypt", "decrypt"])
+        .multiple(false)
+))]
 #[command(name = "cypher")]
 #[command(about = "Command line cypher tool for encrypted key-value storage")]
 struct Cli {
-    #[command(subcommand)]
-    command: Option<Commands>,
+    #[arg(short, long, action)]
+    encrypt: bool,
+    #[arg(short, long, action)]
+    decrypt: bool,
 
     /// File to encrypt/decrypt or use as storage
-    filename: Option<PathBuf>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Encrypt a file
-    #[command(alias = "enc")]
-    #[command(alias = "e")]
-    Encrypt { filename: PathBuf },
-
-    /// Decrypt a file
-    #[command(alias = "dec")]
-    #[command(alias = "d")]
-    Decrypt { filename: PathBuf },
+    filename: PathBuf,
 }
 
 struct CypherCompleter {
@@ -263,28 +257,18 @@ fn print_help() {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    match cli.command {
-        Some(Commands::Encrypt { filename }) => {
-            let password =
-                rpassword::prompt_password(format!("Enter Password for {}: ", filename.display()))?;
-            let cypher = Cypher::new(&password);
-            let encrypted = cypher.encrypt_file(&filename)?;
-            io::stdout().write_all(&encrypted)?;
-        }
-        Some(Commands::Decrypt { filename }) => {
-            let password =
-                rpassword::prompt_password(format!("Enter Password for {}: ", filename.display()))?;
-            let cypher = Cypher::new(&password);
-            let decrypted = cypher.decrypt_file(&filename)?;
-            io::stdout().write_all(&decrypted)?;
-        }
-        None => {
-            let filename = cli.filename.context("File parameter is required")?;
-            let password =
-                rpassword::prompt_password(format!("Enter Password for {}: ", filename.display()))?;
-            let cypher = Cypher::new(&password);
-            run_interactive(cypher, filename)?;
-        }
+    let password =
+        rpassword::prompt_password(format!("Enter Password for {}: ", cli.filename.display()))?;
+    let cypher = Cypher::new(&password);
+
+    if cli.encrypt {
+        let encrypted = cypher.encrypt_file(&cli.filename)?;
+        io::stdout().write_all(&encrypted)?;
+    } else if cli.decrypt {
+        let decrypted = cypher.decrypt_file(&cli.filename)?;
+        io::stdout().write_all(&decrypted)?;
+    } else {
+        run_interactive(cypher, cli.filename)?;
     }
 
     Ok(())
