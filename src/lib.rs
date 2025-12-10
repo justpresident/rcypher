@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
 use chrono::{Local, TimeZone};
+use rand::TryRngCore;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -16,7 +17,9 @@ type Aes256CbcDec = Decryptor<Aes256>;
 
 pub const STORE_VERSION: u16 = 4;
 pub const CYPHER_VERSION: u16 = 2;
-pub const ENCRYPTED_FILE_VER: u16 = 5;
+pub const ENCRYPTED_FILE_VER: u16 = 6;
+
+const BLOCK_SIZE: usize = 16;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ValueEntry {
@@ -95,6 +98,15 @@ pub struct Cypher {
     key: [u8; 32],
 }
 
+#[repr(C)]
+#[derive(Serialize, Deserialize, Default)]
+struct Version6Header {
+    version: [u8; 2],
+    pad_len: u8,
+    _reserved: u8,
+    iv: [u8; BLOCK_SIZE],
+}
+
 impl Cypher {
     pub fn new(password: &str) -> Self {
         let mut key = [b'~'; 32];
@@ -111,15 +123,15 @@ impl Cypher {
         result.extend_from_slice(&CYPHER_VERSION.to_be_bytes());
 
         // Pad data to block size
-        let pad_len = 16 - (data.len() % 16);
+        let pad_len = BLOCK_SIZE - (data.len() % BLOCK_SIZE);
         let mut padded = data.to_vec();
-        padded.extend(vec![b'~'; pad_len]);
+        padded.extend(vec![pad_len as u8; pad_len]);
 
         // Add padding length
         result.push(pad_len as u8);
 
         // Encrypt
-        let iv = [0u8; 16];
+        let iv = [0u8; BLOCK_SIZE];
         let cipher = Aes256CbcEnc::new(&self.key.into(), &iv.into());
         let len = padded.len();
         let encrypted = cipher
@@ -143,7 +155,7 @@ impl Cypher {
         let pad_len = data[2] as usize;
         let mut encrypted = data[3..].to_vec();
 
-        let iv = [0u8; 16];
+        let iv = [0u8; BLOCK_SIZE];
         let cipher = Aes256CbcDec::new(&self.key.into(), &iv.into());
         let decrypted = cipher
             .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
@@ -161,18 +173,21 @@ impl Cypher {
         let mut file = fs::File::open(path)?;
         let mut out = Vec::new();
 
-        // Write file version
-        out.extend_from_slice(&ENCRYPTED_FILE_VER.to_be_bytes());
+        let mut header = Version6Header {
+            version: ENCRYPTED_FILE_VER.to_be_bytes(),
+            pad_len: (BLOCK_SIZE - (file.metadata()?.len() as usize % BLOCK_SIZE)) as u8,
+            _reserved: 0,
+            iv: [0u8; BLOCK_SIZE],
+        };
+        rand::rngs::OsRng.try_fill_bytes(&mut header.iv)?;
 
-        // TODO: Generate random IV
-        let iv = [0u8; 16];
-        // rand::rngs::OsRng.fill_bytes(&mut iv);
-        // out.extend_from_slice(&iv);
+        // Write the header first
+        let bytes = bincode::serialize(&header)?;
+        out.extend_from_slice(&bytes[..]);
 
-        let mut cipher = Aes256CbcEnc::new(&self.key.into(), &iv.into());
+        let mut cipher = Aes256CbcEnc::new(&self.key.into(), &header.iv.into());
 
-        const READ_BUF_SIZE: usize = 1024;
-        const BLOCK_SIZE: usize = 16;
+        const READ_BUF_SIZE: usize = 4096;
         let mut buffer = [0u8; READ_BUF_SIZE];
 
         // All read data goes into this vec
@@ -201,11 +216,9 @@ impl Cypher {
             pos = 0;
         }
 
-        let mut pad_len: u8 = 0;
         if !file_data.is_empty() {
-            pad_len = (BLOCK_SIZE - (file_data.len() % BLOCK_SIZE)) as u8;
-            while file_data.len() % BLOCK_SIZE != 0 {
-                file_data.push(b'~');
+            for _ in 0..header.pad_len {
+                file_data.push(header.pad_len);
             }
 
             // encrypt final padded block
@@ -213,39 +226,62 @@ impl Cypher {
             cipher.encrypt_block_mut(&mut block);
             out.extend_from_slice(&block);
         }
-        out.push(pad_len);
         Ok(out)
     }
 
     pub fn decrypt_file(&self, input_path: &PathBuf) -> Result<Vec<u8>> {
-        let data = fs::read(input_path)?;
+        let mut data = fs::read(input_path)?;
 
         if data.len() < 3 {
             bail!("File too short");
         }
 
         let version = u16::from_be_bytes([data[0], data[1]]);
-        if version != ENCRYPTED_FILE_VER {
-            bail!("Unsupported file encryption format: {}", version);
+
+        match version {
+            5 => {
+                let pad_len = *data.last().unwrap() as usize;
+                let mut encrypted = data[2..data.len() - 1].to_vec();
+
+                let iv = [0u8; BLOCK_SIZE];
+                let cipher = Aes256CbcDec::new(&self.key.into(), &iv.into());
+
+                let encrypted_len = encrypted.len();
+                let decrypted = cipher
+                    .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
+                    .map_err(|e| {
+                        anyhow::anyhow!("File decryption failed: {e}, size={}", encrypted_len)
+                    })?;
+
+                let mut result = decrypted.to_vec();
+                if pad_len > 0 && pad_len <= result.len() {
+                    result.truncate(result.len() - pad_len);
+                }
+
+                Ok(result)
+            }
+            ENCRYPTED_FILE_VER => {
+                let header: Version6Header = bincode::deserialize(&data[..])?;
+                let pos = size_of_val(&header);
+                let cipher = Aes256CbcDec::new(&self.key.into(), &header.iv.into());
+
+                let mut encrypted = &mut data[pos..];
+                let encrypted_len = encrypted.len();
+                let decrypted = cipher
+                    .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
+                    .map_err(|e| {
+                        anyhow::anyhow!("File decryption failed: {e}, size={}", encrypted_len)
+                    })?;
+
+                let mut result = decrypted.to_vec();
+                if header.pad_len > 0 && header.pad_len as usize <= result.len() {
+                    result.truncate(result.len() - header.pad_len as usize);
+                }
+
+                Ok(result)
+            }
+            _ => bail!("Unsupported file encryption format: {}", version),
         }
-
-        let pad_len = *data.last().unwrap() as usize;
-        let mut encrypted = data[2..data.len() - 1].to_vec();
-
-        let iv = [0u8; 16];
-        let cipher = Aes256CbcDec::new(&self.key.into(), &iv.into());
-
-        let encrypted_len = encrypted.len();
-        let decrypted = cipher
-            .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
-            .map_err(|e| anyhow::anyhow!("File decryption failed: {e}, size={}", encrypted_len))?;
-
-        let mut result = decrypted.to_vec();
-        if pad_len > 0 && pad_len <= result.len() {
-            result.truncate(result.len() - pad_len);
-        }
-
-        Ok(result)
     }
 }
 
