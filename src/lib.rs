@@ -28,10 +28,11 @@ use rand::TryRngCore;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{Read, Seek};
+use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
+use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
 type Aes256CbcEnc = Encryptor<Aes256>;
@@ -501,9 +502,14 @@ pub fn load_storage(cypher: &Cypher, path: &Path) -> Result<Storage> {
 }
 
 pub fn save_storage(cypher: &Cypher, storage: &Storage, path: &Path) -> Result<()> {
+    let dir = path.parent().expect("Can't get parent dir of a file");
+    let mut temp = NamedTempFile::new_in(dir)?;
+
     let serialized = serialize_storage(storage);
     let encrypted = cypher.encrypt(&serialized)?;
-    fs::write(path, encrypted)?;
+    temp.write_all(&encrypted)?;
+    temp.persist(path)?;
+
     Ok(())
 }
 
