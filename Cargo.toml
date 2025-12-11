@@ -2,6 +2,12 @@
 name = "rcypher"
 version = "0.1.0"
 edition = "2024"
+description = "A CLI for secure password management"
+repository = "https://github.com/justpresident/rcypher"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+keywords = ["password", "security", "cli"]
+categories = ["security", "command-line-utilities"]
 
 [dependencies]
 aes = "0.8"

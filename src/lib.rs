@@ -1,3 +1,22 @@
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::dbg_macro,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate
+)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::multiple_crate_versions,
+    clippy::missing_panics_doc
+)]
+
 use aes::{Aes256, Block};
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
@@ -55,7 +74,7 @@ pub struct Storage {
 
 impl Storage {
     pub fn new() -> Self {
-        Storage {
+        Self {
             data: HashMap::new(),
         }
     }
@@ -63,7 +82,7 @@ impl Storage {
     pub fn put(&mut self, key: String, value: String) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("time should go forward")
             .as_secs();
 
         self.put_ts(key, value, timestamp);
@@ -77,7 +96,7 @@ impl Storage {
     }
 
     pub fn get(&self, pattern: &str) -> Result<Vec<(String, String)>> {
-        let re = Regex::new(&format!("^{}$", pattern))?;
+        let re = Regex::new(&format!("^{pattern}$"))?;
         let mut results = Vec::new();
 
         for (key, entries) in &self.data {
@@ -143,8 +162,8 @@ pub struct Cypher {
 }
 
 impl Cypher {
-    pub fn new(key: EncryptionKey) -> Self {
-        Cypher { key }
+    pub const fn new(key: EncryptionKey) -> Self {
+        Self { key }
     }
 
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
@@ -152,6 +171,7 @@ impl Cypher {
 
         let mut header = Version6Header {
             version: (CypherVersion::Version6 as u16).to_be_bytes(),
+            #[allow(clippy::cast_possible_truncation)]
             pad_len: (BLOCK_SIZE - (data.len() % BLOCK_SIZE)) as u8,
             _reserved: 0,
             iv: [0u8; BLOCK_SIZE],
@@ -217,7 +237,7 @@ impl Cypher {
                 cipher
                     .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
                     .map_err(|e| {
-                        anyhow::anyhow!("File decryption failed: {e}, size={}", encrypted_len)
+                        anyhow::anyhow!("File decryption failed: {e}, size={encrypted_len}")
                     })?;
 
                 // decryption is done in place, so "encrypted" vector now contains decrypted data
@@ -236,6 +256,7 @@ impl Cypher {
 
         let mut header = Version6Header {
             version: (CypherVersion::Version6 as u16).to_be_bytes(),
+            #[allow(clippy::cast_possible_truncation)]
             pad_len: (BLOCK_SIZE - (file.metadata()?.len() as usize % BLOCK_SIZE)) as u8,
             _reserved: 0,
             iv: [0u8; BLOCK_SIZE],
@@ -296,7 +317,8 @@ impl Cypher {
 
     pub fn decrypt_file<T: io::Write>(&self, input_path: &PathBuf, out: &mut T) -> Result<()> {
         let mut file = fs::File::open(input_path)?;
-        let file_size = file.metadata()?.len() as usize;
+        let file_size = usize::try_from(file.metadata()?.len())
+            .expect("Can't process files larger than 4Gb on a 32-bit platform");
 
         if file_size < 3 {
             bail!("File is too small");
@@ -334,6 +356,9 @@ impl Cypher {
                     } else if file_data.len() < BLOCK_SIZE {
                         bail!("Incorrect file size");
                     }
+
+                    // We checked the file size earlier, so it is safe to ignore truncation errors
+                    #[allow(clippy::cast_possible_truncation)]
                     let file_end = (file.stream_position()? as usize) >= file_size;
 
                     while file_data.len() >= pos + BLOCK_SIZE {
@@ -366,7 +391,8 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
     result.extend_from_slice(&version.to_be_bytes());
 
     // Count elements
-    let count: u32 = storage.data.values().map(|v| v.len()).sum::<usize>() as u32;
+    let count: u32 = u32::try_from(storage.data.values().map(Vec::len).sum::<usize>())
+        .expect("Power user detected with > 4 billion keys");
     result.extend_from_slice(&count.to_be_bytes());
 
     // Serialize each entry
@@ -375,10 +401,16 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
             let key_bytes = key.as_bytes();
             let val_bytes = entry.value.as_bytes();
 
-            result.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+            result.extend_from_slice(
+                &(u16::try_from(key_bytes.len()).expect("key is too long")).to_be_bytes(),
+            );
             result.extend_from_slice(key_bytes);
-            result.extend_from_slice(&(val_bytes.len() as u32).to_be_bytes());
+            result.extend_from_slice(
+                &(u32::try_from(val_bytes.len()).expect("value is too long")).to_be_bytes(),
+            );
             result.extend_from_slice(val_bytes);
+            // We store only seconds
+            #[allow(clippy::cast_possible_truncation)]
             result.extend_from_slice(&(entry.timestamp as u32).to_be_bytes());
         }
     }
@@ -393,7 +425,7 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
 
     let version = u16::from_be_bytes([data[0], data[1]]);
     if version != StoreVersion::Version4 as u16 {
-        bail!("Unsupported storage version: {}", version);
+        bail!("Unsupported storage version: {version}");
     }
 
     let count = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
@@ -431,8 +463,12 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
             if pos + 4 > data.len() {
                 bail!("Corrupted file: timestamp missing");
             }
-            let ts =
-                u32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]) as u64;
+            let ts = u64::from(u32::from_be_bytes([
+                data[pos],
+                data[pos + 1],
+                data[pos + 2],
+                data[pos + 3],
+            ]));
             pos += 4;
             ts
         };
@@ -473,6 +509,8 @@ pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return "N/A".to_string();
     }
-    let dt = Local.timestamp_opt(ts as i64, 0).unwrap();
+    let dt = Local
+        .timestamp_opt(ts.try_into().expect("invalid timestamp"), 0)
+        .unwrap();
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
