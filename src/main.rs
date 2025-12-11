@@ -11,6 +11,7 @@ use std::io::{self};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use zeroize::Zeroize;
 
 const STANDBY_TIMEOUT: u64 = 300;
 
@@ -264,13 +265,14 @@ fn print_help() {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let password = match cli.password {
+    let mut password = match cli.password {
         Some(passwd) => passwd.clone(),
         None => {
             rpassword::prompt_password(format!("Enter Password for {}: ", cli.filename.display()))?
         }
     };
-    let cypher = Cypher::new(&password);
+    let cypher = Cypher::new(EncryptionKey::from_password(&password));
+    Zeroize::zeroize(&mut password);
 
     if cli.encrypt {
         cypher.encrypt_file(&cli.filename, &mut io::stdout())?;

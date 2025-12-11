@@ -13,6 +13,7 @@ use std::io::{Read, Seek};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
+use zeroize::Zeroizing;
 
 type Aes256CbcEnc = Encryptor<Aes256>;
 type Aes256CbcDec = Decryptor<Aes256>;
@@ -119,16 +120,30 @@ impl Default for Storage {
 }
 
 const KEY_LEN: usize = 32;
-pub struct Cypher {
-    key: [u8; KEY_LEN],
-}
+type KeyBytes = [u8; KEY_LEN];
+#[derive(Clone)]
+pub struct EncryptionKey(Zeroizing<KeyBytes>);
 
-impl Cypher {
-    pub fn new(password: &str) -> Self {
+impl EncryptionKey {
+    pub fn from_password(password: &str) -> Self {
         let mut key = [b'~'; KEY_LEN];
         let bytes = password.as_bytes();
         let len = bytes.len().min(KEY_LEN);
         key[..len].copy_from_slice(&bytes[..len]);
+        Self(Zeroizing::new(key))
+    }
+
+    pub fn as_bytes(&self) -> &KeyBytes {
+        &self.0
+    }
+}
+
+pub struct Cypher {
+    key: EncryptionKey,
+}
+
+impl Cypher {
+    pub fn new(key: EncryptionKey) -> Self {
         Cypher { key }
     }
 
@@ -156,7 +171,7 @@ impl Cypher {
         padded.extend(vec![header.pad_len; header.pad_len as usize]);
 
         // Encrypt
-        let cipher = Aes256CbcEnc::new(&self.key.into(), &header.iv.into());
+        let cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
         let len = padded.len();
         let encrypted = cipher
             .encrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut padded, len)
@@ -179,7 +194,7 @@ impl Cypher {
                 let mut encrypted = data[3..].to_vec();
 
                 let iv = [0u8; BLOCK_SIZE];
-                let cipher = Aes256CbcDec::new(&self.key.into(), &iv.into());
+                let cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &iv.into());
                 let decrypted = cipher
                     .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
                     .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
@@ -197,7 +212,7 @@ impl Cypher {
                 let pos = size_of_val(&header);
                 let mut encrypted = data[pos..].to_vec();
 
-                let cipher = Aes256CbcDec::new(&self.key.into(), &header.iv.into());
+                let cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
                 let encrypted_len = encrypted.len();
                 cipher
                     .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
@@ -236,7 +251,7 @@ impl Cypher {
         )?;
         out.write_all(&header_bytes[..])?;
 
-        let mut cipher = Aes256CbcEnc::new(&self.key.into(), &header.iv.into());
+        let mut cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
 
         let mut buffer = [0u8; READ_BUF_SIZE];
 
@@ -299,7 +314,7 @@ impl Cypher {
                 }
                 let header: Version6Header =
                     bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
-                let mut cipher = Aes256CbcDec::new(&self.key.into(), &header.iv.into());
+                let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
 
                 let mut buffer = [0u8; READ_BUF_SIZE];
 

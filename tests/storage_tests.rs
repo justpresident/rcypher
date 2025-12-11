@@ -195,7 +195,7 @@ fn test_deserialize_corrupted_data() {
 #[test]
 fn test_load_save_storage() {
     let (_dir, path) = temp_test_file();
-    let cypher = Cypher::new("test_password");
+    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
 
     let mut storage = Storage::new();
     storage.put("key1".to_string(), "value1".to_string());
@@ -213,7 +213,7 @@ fn test_load_save_storage() {
 #[test]
 fn test_load_nonexistent_file() {
     let (_dir, path) = temp_test_file();
-    let cypher = Cypher::new("test_password");
+    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
 
     let storage = load_storage(&cypher, &path).unwrap();
     assert_eq!(storage.data.len(), 0);
@@ -222,8 +222,8 @@ fn test_load_nonexistent_file() {
 #[test]
 fn test_load_with_wrong_password() {
     let (_dir, path) = temp_test_file();
-    let cypher1 = Cypher::new("password1");
-    let cypher2 = Cypher::new("password2");
+    let cypher1 = Cypher::new(EncryptionKey::from_password("password1"));
+    let cypher2 = Cypher::new(EncryptionKey::from_password("password2"));
 
     let mut storage = Storage::new();
     storage.put("key1".to_string(), "value1".to_string());
@@ -303,7 +303,7 @@ fn test_concurrent_operations() {
 #[test]
 fn test_storage_persistence_across_sessions() {
     let (_dir, path) = temp_test_file();
-    let cypher = Cypher::new("test_password");
+    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
 
     // Session 1: Create and save
     {
