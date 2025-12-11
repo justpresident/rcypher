@@ -211,6 +211,7 @@ impl Cypher {
         match CypherVersion::try_from(version) {
             Ok(CypherVersion::Version2) => {
                 let pad_len = data[2] as usize;
+                assert!(pad_len <= BLOCK_SIZE);
                 let mut encrypted = data[3..].to_vec();
 
                 let iv = [0u8; BLOCK_SIZE];
@@ -336,6 +337,7 @@ impl Cypher {
                 }
                 let header: Version6Header =
                     bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+                assert!(usize::from(header.pad_len) <= BLOCK_SIZE);
                 let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
 
                 let mut buffer = [0u8; READ_BUF_SIZE];
