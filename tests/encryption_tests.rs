@@ -1,6 +1,7 @@
 use rcypher::*;
 use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom};
+use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
@@ -74,7 +75,7 @@ fn test_decrypt_corrupted_data() {
     assert!(result.is_err());
 }
 
-fn encrypt_decrypt(input_path: &PathBuf, output_path: &PathBuf) -> Vec<u8> {
+fn encrypt_decrypt(input_path: &Path, output_path: &Path) -> Vec<u8> {
     let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
 
     // Encrypt

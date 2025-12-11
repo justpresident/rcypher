@@ -29,7 +29,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{Read, Seek};
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{fs, io};
 use zeroize::Zeroizing;
@@ -251,7 +251,7 @@ impl Cypher {
         }
     }
 
-    pub fn encrypt_file<T: io::Write>(&self, path: &PathBuf, out: &mut T) -> Result<()> {
+    pub fn encrypt_file<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
         let mut file = fs::File::open(path)?;
 
         let mut header = Version6Header {
@@ -315,7 +315,7 @@ impl Cypher {
         Ok(())
     }
 
-    pub fn decrypt_file<T: io::Write>(&self, input_path: &PathBuf, out: &mut T) -> Result<()> {
+    pub fn decrypt_file<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {
         let mut file = fs::File::open(input_path)?;
         let file_size = usize::try_from(file.metadata()?.len())
             .expect("Can't process files larger than 4Gb on a 32-bit platform");
@@ -488,7 +488,7 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
     Ok(storage)
 }
 
-pub fn load_storage(cypher: &Cypher, path: &PathBuf) -> Result<Storage> {
+pub fn load_storage(cypher: &Cypher, path: &Path) -> Result<Storage> {
     if !path.exists() {
         return Ok(Storage::new());
     }
@@ -498,7 +498,7 @@ pub fn load_storage(cypher: &Cypher, path: &PathBuf) -> Result<Storage> {
     deserialize_storage(&decrypted)
 }
 
-pub fn save_storage(cypher: &Cypher, storage: &Storage, path: &PathBuf) -> Result<()> {
+pub fn save_storage(cypher: &Cypher, storage: &Storage, path: &Path) -> Result<()> {
     let serialized = serialize_storage(storage);
     let encrypted = cypher.encrypt(&serialized)?;
     fs::write(path, encrypted)?;

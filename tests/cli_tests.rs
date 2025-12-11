@@ -1,4 +1,5 @@
 use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 
 use assert_cmd::Command;
@@ -72,7 +73,7 @@ fn test_encrypt_decrypt_file() {
     assert_eq!(output.stdout, test_data);
 }
 
-fn run_commands(file_path: &PathBuf, commands: Vec<u8>) -> Vec<String> {
+fn run_commands(file_path: &Path, commands: Vec<u8>) -> Vec<String> {
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
         .arg("--password")
