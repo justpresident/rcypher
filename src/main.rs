@@ -125,8 +125,8 @@ impl Validator for CypherCompleter {}
 
 impl Helper for CypherCompleter {}
 
-fn run_interactive(cypher: Cypher, filename: PathBuf, prompt: String) -> Result<()> {
-    let storage = Arc::new(Mutex::new(load_storage(&cypher, &filename)?));
+fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> Result<()> {
+    let storage = Arc::new(Mutex::new(load_storage(&password, &filename)?));
 
     let config = Config::builder()
         .completion_type(CompletionType::List)
@@ -139,6 +139,11 @@ fn run_interactive(cypher: Cypher, filename: PathBuf, prompt: String) -> Result<
     let completer = CypherCompleter::new(Arc::clone(&storage));
     let mut rl = Editor::with_config(config)?;
     rl.set_helper(Some(completer));
+
+    let key = Cypher::encryption_key_for_file(&password, &filename)?;
+    Zeroize::zeroize(&mut password);
+
+    let cypher = Cypher::new(key);
 
     let start_time = SystemTime::now();
 
@@ -271,15 +276,22 @@ fn main() -> Result<()> {
             rpassword::prompt_password(format!("Enter Password for {}: ", cli.filename.display()))?
         }
     };
-    let cypher = Cypher::new(EncryptionKey::from_password(&password));
-    Zeroize::zeroize(&mut password);
 
     if cli.encrypt {
+        let key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
+        Zeroize::zeroize(&mut password);
+        let cypher = Cypher::new(key);
+
         cypher.encrypt_file(&cli.filename, &mut io::stdout())?;
     } else if cli.decrypt {
+        let key = Cypher::encryption_key_for_file(&password, &cli.filename)?;
+        Zeroize::zeroize(&mut password);
+
+        let cypher = Cypher::new(key);
+
         cypher.decrypt_file(&cli.filename, &mut io::stdout())?;
     } else {
-        run_interactive(cypher, cli.filename, cli.prompt)?;
+        run_interactive(password, cli.filename, cli.prompt)?;
     }
 
     Ok(())

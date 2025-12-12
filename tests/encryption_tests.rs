@@ -14,7 +14,9 @@ fn temp_test_file() -> (TempDir, PathBuf) {
 
 #[test]
 fn test_encrypt_decrypt_basic() {
-    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
+    let cypher = Cypher::new(
+        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+    );
     let data = b"Hello, World!";
 
     let encrypted = cypher.encrypt(data).unwrap();
@@ -27,7 +29,9 @@ fn test_encrypt_decrypt_basic() {
 
 #[test]
 fn test_encrypt_decrypt_empty() {
-    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
+    let cypher = Cypher::new(
+        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+    );
     let data = b"";
 
     let encrypted = cypher.encrypt(data).unwrap();
@@ -37,7 +41,9 @@ fn test_encrypt_decrypt_empty() {
 
 #[test]
 fn test_encrypt_decrypt_large_data() {
-    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
+    let cypher = Cypher::new(
+        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+    );
     let data = vec![42u8; 10000]; // 10KB of data
 
     let encrypted = cypher.encrypt(&data).unwrap();
@@ -47,8 +53,10 @@ fn test_encrypt_decrypt_large_data() {
 
 #[test]
 fn test_decrypt_wrong_password() {
-    let cypher1 = Cypher::new(EncryptionKey::from_password("password1"));
-    let cypher2 = Cypher::new(EncryptionKey::from_password("password2"));
+    let cypher1 =
+        Cypher::new(EncryptionKey::from_password(CypherVersion::V7WithKdf, "password1").unwrap());
+    let cypher2 =
+        Cypher::new(EncryptionKey::from_password(CypherVersion::V7WithKdf, "password2").unwrap());
     let data = b"Secret data";
 
     let encrypted = cypher1.encrypt(data).unwrap();
@@ -62,7 +70,9 @@ fn test_decrypt_wrong_password() {
 
 #[test]
 fn test_decrypt_corrupted_data() {
-    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
+    let cypher = Cypher::new(
+        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+    );
 
     // Too short
     let result = cypher.decrypt(&[0, 1]);
@@ -76,7 +86,9 @@ fn test_decrypt_corrupted_data() {
 }
 
 fn encrypt_decrypt(input_path: &Path, output_path: &Path) -> Vec<u8> {
-    let cypher = Cypher::new(EncryptionKey::from_password("test_password"));
+    let cypher = Cypher::new(
+        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+    );
 
     // Encrypt
     let mut file = fs::File::create(&output_path).unwrap();

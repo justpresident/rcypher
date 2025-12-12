@@ -19,14 +19,17 @@
 
 use aes::{Aes256, Block};
 use anyhow::{Result, bail};
+use argon2::{Algorithm, Argon2, Params, Version};
 use bincode::{Decode, Encode};
 use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use cbc::{Decryptor, Encryptor};
 use chrono::{Local, TimeZone};
+use hmac::{Hmac, Mac};
 use num_enum::TryFromPrimitive;
 use rand::TryRngCore;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
@@ -35,32 +38,53 @@ use std::{fs, io};
 use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
+const READ_BUF_SIZE: usize = 4096;
+const BLOCK_SIZE: usize = 16;
+const SALT_SIZE: usize = 32;
+const HMAC_SIZE: usize = 32;
+const KEY_LEN: usize = 32;
+
+type HmacSha256 = Hmac<Sha256>;
 type Aes256CbcEnc = Encryptor<Aes256>;
 type Aes256CbcDec = Decryptor<Aes256>;
+
+type KeyBytes = [u8; KEY_LEN];
+type SaltBytes = [u8; SALT_SIZE];
+type BlockBytes = [u8; BLOCK_SIZE];
 
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]
 enum StoreVersion {
     Version4 = 4u16,
 }
-#[derive(Debug, TryFromPrimitive)]
+#[derive(Clone, Debug, TryFromPrimitive, Default)]
 #[repr(u16)]
-enum CypherVersion {
-    Version2 = 2u16,
-    Version6 = 6u16,
+pub enum CypherVersion {
+    /// Legacy version with simple password padding (no KDF)
+    LegacyWithoutKdf = 2u16,
+    /// Modern version with Argon2id KDF and HMAC
+    #[default]
+    V7WithKdf = 7u16,
 }
 
 #[repr(C)]
 #[derive(Serialize, Deserialize, Default, Decode, Encode)]
-struct Version6Header {
+struct Version7Header {
     version: [u8; 2],
     pad_len: u8,
     _reserved: u8,
-    iv: [u8; BLOCK_SIZE],
+    salt: SaltBytes,
+    iv: BlockBytes,
 }
 
-const READ_BUF_SIZE: usize = 4096;
-const BLOCK_SIZE: usize = 16;
+impl Version7Header {
+    fn validate(&self) -> Result<()> {
+        if usize::from(self.pad_len) > BLOCK_SIZE {
+            bail!("Incorrect pad length");
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ValueEntry {
@@ -139,22 +163,70 @@ impl Default for Storage {
     }
 }
 
-const KEY_LEN: usize = 32;
-type KeyBytes = [u8; KEY_LEN];
-#[derive(Clone)]
-pub struct EncryptionKey(Zeroizing<KeyBytes>);
+#[derive(Clone, Default)]
+pub struct EncryptionKey {
+    version: CypherVersion,
+    key: Zeroizing<KeyBytes>,
+    salt: SaltBytes,
+}
 
 impl EncryptionKey {
-    pub fn from_password(password: &str) -> Self {
-        let mut key = [b'~'; KEY_LEN];
-        let bytes = password.as_bytes();
-        let len = bytes.len().min(KEY_LEN);
-        key[..len].copy_from_slice(&bytes[..len]);
-        Self(Zeroizing::new(key))
+    /// Creates a key from password without KDF (for backward compatibility)
+    pub fn from_password(version: CypherVersion, password: &str) -> Result<Self> {
+        match version {
+            CypherVersion::LegacyWithoutKdf => {
+                let mut key = [b'~'; KEY_LEN];
+                let bytes = password.as_bytes();
+                let len = bytes.len().min(KEY_LEN);
+
+                key[..len].copy_from_slice(&bytes[..len]);
+
+                Ok(Self {
+                    version,
+                    key: Zeroizing::new(key),
+                    ..Default::default()
+                })
+            }
+            CypherVersion::V7WithKdf => {
+                let mut salt = SaltBytes::default();
+                rand::rngs::OsRng.try_fill_bytes(&mut salt)?;
+                Self::from_password_with_salt(version, password, &salt)
+            }
+        }
+    }
+
+    /// Derives a key from password and salt using Argon2id
+    pub fn from_password_with_salt(
+        version: CypherVersion,
+        password: &str,
+        salt: &SaltBytes,
+    ) -> Result<Self> {
+        // Argon2id parameters: memory=64MB, iterations=3, parallelism=1
+        let params = Params::new(65536, 3, 1, Some(KEY_LEN))
+            .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
+
+        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
+        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        argon2
+            .hash_password_into(password.as_bytes(), salt, key.as_mut())
+            .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+
+        Ok(Self {
+            version,
+            key,
+            salt: *salt,
+        })
     }
 
     pub fn as_bytes(&self) -> &KeyBytes {
-        &self.0
+        &self.key
+    }
+    pub const fn salt(&self) -> &SaltBytes {
+        &self.salt
+    }
+    pub const fn version(&self) -> &CypherVersion {
+        &self.version
     }
 }
 
@@ -167,37 +239,134 @@ impl Cypher {
         Self { key }
     }
 
+    pub fn encryption_key_for_file(password: &str, path: &Path) -> Result<EncryptionKey> {
+        let version = Self::probe_version(path, CypherVersion::V7WithKdf)?;
+
+        let key = match version {
+            CypherVersion::LegacyWithoutKdf => EncryptionKey::from_password(version, password)?,
+            CypherVersion::V7WithKdf => {
+                if !fs::exists(path)? {
+                    return EncryptionKey::from_password(version, password);
+                }
+                let mut file = fs::File::open(path)?;
+                if file.metadata()?.len() < u64::try_from(size_of::<Version7Header>())? {
+                    bail!("file size is too small");
+                }
+                let header: Version7Header =
+                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+                header.validate()?;
+                EncryptionKey::from_password_with_salt(version, password, &header.salt)?
+            }
+        };
+
+        Ok(key)
+    }
+
+    /// Probes a file to determine its encryption version
+    fn probe_version(path: &Path, default: CypherVersion) -> Result<CypherVersion> {
+        if !path.exists() {
+            return Ok(default);
+        }
+        let mut file = fs::File::open(path)?;
+        let mut version_bytes = [0u8; 2];
+        file.read_exact(&mut version_bytes)?;
+
+        Self::probe_data_version(&version_bytes)
+    }
+
+    /// Probes data to determine its encryption version
+    fn probe_data_version(data: &[u8]) -> Result<CypherVersion> {
+        if data.len() < 2 {
+            bail!("Data too short to determine version");
+        }
+
+        let version = u16::from_be_bytes([data[0], data[1]]);
+        Ok(CypherVersion::try_from(version)?)
+    }
+
+    // TODO: initialize HMAC from a separate key derived from master key
+    fn hmac_start(&self) -> HmacSha256 {
+        HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC can take key of any size")
+    }
+
+    fn compute_hmac(&self, header: &[u8], encrypted_data: &[u8]) -> [u8; HMAC_SIZE] {
+        let mut mac = self.hmac_start();
+        Mac::update(&mut mac, header);
+        Mac::update(&mut mac, encrypted_data);
+        let result = mac.finalize();
+        result.into_bytes().into()
+    }
+
+    fn compute_file_hmac(&self, file: &mut fs::File, from: u64, to: u64) -> Result<HmacSha256> {
+        let mut mac = self.hmac_start();
+        // Go to the starting position
+        file.seek(std::io::SeekFrom::Start(from))?;
+
+        let mut remaining = usize::try_from(to - from)?;
+        let mut buf = [0u8; READ_BUF_SIZE];
+
+        while remaining > 0 {
+            let read_len = buf.len().min(remaining);
+            let n = file.read(&mut buf[..read_len])?;
+
+            if n == 0 {
+                return Err(anyhow::anyhow!("unexpected EOF while computing HMAC"));
+            }
+
+            mac.update(&buf[..n]);
+            remaining -= n;
+        }
+
+        Ok(mac)
+    }
+
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        match self.key.version() {
+            CypherVersion::LegacyWithoutKdf => {
+                bail!("Encryption with legacy version is not supported")
+            }
+            CypherVersion::V7WithKdf => self.encrypt_v7(data),
+        }
+    }
+
+    fn encrypt_v7(&self, data: &[u8]) -> Result<Vec<u8>> {
         let mut result = Vec::new();
 
-        let mut header = Version6Header {
-            version: (CypherVersion::Version6 as u16).to_be_bytes(),
-            #[allow(clippy::cast_possible_truncation)]
-            pad_len: (BLOCK_SIZE - (data.len() % BLOCK_SIZE)) as u8,
+        // Pad data first
+        #[allow(clippy::cast_possible_truncation)]
+        let pad_len = (BLOCK_SIZE - (data.len() % BLOCK_SIZE)) as u8;
+
+        // Generate random IV and salt
+        let mut iv = BlockBytes::default();
+        rand::rngs::OsRng.try_fill_bytes(&mut iv)?;
+
+        let header = Version7Header {
+            version: (CypherVersion::V7WithKdf as u16).to_be_bytes(),
+            salt: *self.key.salt(),
+            pad_len,
             _reserved: 0,
-            iv: [0u8; BLOCK_SIZE],
+            iv,
         };
-        rand::rngs::OsRng.try_fill_bytes(&mut header.iv)?;
-        // Write the header first
-        let mut header_bytes = [0u8; size_of::<Version6Header>()];
-        bincode::encode_into_slice(
-            &header,
-            header_bytes.as_mut_slice(),
-            bincode::config::standard(),
-        )?;
-        result.extend_from_slice(&header_bytes[..]);
+        let mut header_bytes = [0u8; size_of::<Version7Header>()];
+        bincode::encode_into_slice(&header, &mut header_bytes, bincode::config::standard())?;
+        result.extend_from_slice(&header_bytes);
 
         // Pad data to block size
         let mut padded = data.to_vec();
-        padded.extend(vec![header.pad_len; header.pad_len as usize]);
-
-        // Encrypt
-        let cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
+        padded.extend(vec![pad_len; pad_len as usize]);
         let len = padded.len();
+
+        // Encrypt data
+        let cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
         let encrypted = cipher
             .encrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut padded, len)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+
         result.extend_from_slice(encrypted);
+
+        let hmac = self.compute_hmac(&header_bytes, encrypted);
+
+        result.extend_from_slice(&hmac);
 
         Ok(result)
     }
@@ -210,12 +379,12 @@ impl Cypher {
         let version = u16::from_be_bytes([data[0], data[1]]);
 
         match CypherVersion::try_from(version) {
-            Ok(CypherVersion::Version2) => {
+            Ok(CypherVersion::LegacyWithoutKdf) => {
                 let pad_len = data[2] as usize;
                 assert!(pad_len <= BLOCK_SIZE);
                 let mut encrypted = data[3..].to_vec();
 
-                let iv = [0u8; BLOCK_SIZE];
+                let iv = BlockBytes::default();
                 let cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &iv.into());
                 let decrypted = cipher
                     .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
@@ -228,21 +397,39 @@ impl Cypher {
 
                 Ok(result)
             }
-            Ok(CypherVersion::Version6) => {
-                let (header, _): (Version6Header, _) =
-                    bincode::decode_from_slice(data, bincode::config::standard())?;
-                let pos = size_of_val(&header);
-                let mut encrypted = data[pos..].to_vec();
+            Ok(CypherVersion::V7WithKdf) => {
+                if data.len() < size_of::<Version7Header>() + BLOCK_SIZE + HMAC_SIZE {
+                    bail!("File is too small");
+                }
 
+                // First thing we do is to verify HMAC to make sure the file is correct and hasn't
+                // been tampered. If it doesn't match we immediately exit to minimize exposure of
+                // the code to the potential attacker.
+                let header_bytes = &data[0..size_of::<Version7Header>()];
+                let pos = size_of::<Version7Header>();
+                let encrypted_data = &data[pos..data.len() - HMAC_SIZE];
+                let hmac = &data[data.len() - HMAC_SIZE..];
+
+                let mut mac = self.hmac_start();
+                Mac::update(&mut mac, header_bytes);
+                Mac::update(&mut mac, encrypted_data);
+                if mac.verify_slice(hmac).is_err() {
+                    bail!("Decryption failed");
+                }
+
+                // Read header
+                let (header, _): (Version7Header, _) =
+                    bincode::decode_from_slice(header_bytes, bincode::config::standard())?;
+                header.validate()?;
+
+                // Decrypt
+                let mut encrypted = encrypted_data.to_vec();
                 let cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
                 let encrypted_len = encrypted.len();
                 cipher
                     .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
-                    .map_err(|e| {
-                        anyhow::anyhow!("File decryption failed: {e}, size={encrypted_len}")
-                    })?;
+                    .map_err(|e| anyhow::anyhow!("Decryption failed: {e}, size={encrypted_len}"))?;
 
-                // decryption is done in place, so "encrypted" vector now contains decrypted data
                 if header.pad_len > 0 && header.pad_len as usize <= encrypted_len {
                     encrypted.truncate(encrypted_len - header.pad_len as usize);
                 }
@@ -254,24 +441,39 @@ impl Cypher {
     }
 
     pub fn encrypt_file<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
+        match self.key.version() {
+            CypherVersion::LegacyWithoutKdf => {
+                bail!("Encryption with legacy version is not supported")
+            }
+            CypherVersion::V7WithKdf => self.encrypt_file_v7(path, out),
+        }
+    }
+
+    fn encrypt_file_v7<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
         let mut file = fs::File::open(path)?;
+        let file_len = file.metadata()?.len();
 
-        let mut header = Version6Header {
-            version: (CypherVersion::Version6 as u16).to_be_bytes(),
-            #[allow(clippy::cast_possible_truncation)]
-            pad_len: (BLOCK_SIZE - (file.metadata()?.len() as usize % BLOCK_SIZE)) as u8,
+        #[allow(clippy::cast_possible_truncation)]
+        let pad_len = (BLOCK_SIZE - (file_len as usize % BLOCK_SIZE)) as u8;
+
+        // Generate random IV
+        let mut iv = BlockBytes::default();
+        rand::rngs::OsRng.try_fill_bytes(&mut iv)?;
+
+        // Prepare header without HMAC
+        let header = Version7Header {
+            version: (CypherVersion::V7WithKdf as u16).to_be_bytes(),
+            salt: self.key.salt,
+            pad_len,
             _reserved: 0,
-            iv: [0u8; BLOCK_SIZE],
+            iv,
         };
-        rand::rngs::OsRng.try_fill_bytes(&mut header.iv)?;
 
-        // Write the header first
-        let mut header_bytes = [0u8; size_of::<Version6Header>()];
-        bincode::encode_into_slice(
-            &header,
-            header_bytes.as_mut_slice(),
-            bincode::config::standard(),
-        )?;
+        let mut mac = self.hmac_start();
+
+        let mut header_bytes = [0u8; size_of::<Version7Header>()];
+        bincode::encode_into_slice(&header, &mut header_bytes, bincode::config::standard())?;
+        Mac::update(&mut mac, &header_bytes);
         out.write_all(&header_bytes[..])?;
 
         let mut cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
@@ -298,6 +500,7 @@ impl Cypher {
                 pos += BLOCK_SIZE;
 
                 cipher.encrypt_block_mut(&mut block);
+                Mac::update(&mut mac, &block);
                 out.write_all(&block)?;
             }
             file_data = file_data[pos..].to_vec();
@@ -312,8 +515,12 @@ impl Cypher {
             // encrypt final padded block
             let mut block = Block::clone_from_slice(&file_data[pos..]);
             cipher.encrypt_block_mut(&mut block);
+            Mac::update(&mut mac, &block);
             out.write_all(&block)?;
         }
+        let computed_hmac = mac.finalize();
+        out.write_all(&computed_hmac.into_bytes())?;
+
         Ok(())
     }
 
@@ -332,50 +539,78 @@ impl Cypher {
         let version = u16::from_be_bytes([version_bytes[0], version_bytes[1]]);
 
         match CypherVersion::try_from(version) {
-            Ok(CypherVersion::Version6) => {
-                if file_size < size_of::<Version6Header>() {
+            Ok(CypherVersion::V7WithKdf) => {
+                if file_size < size_of::<Version7Header>() + HMAC_SIZE {
                     bail!("File is too small");
                 }
-                let header: Version6Header =
-                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
-                assert!(usize::from(header.pad_len) <= BLOCK_SIZE);
-                let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
 
+                // First thing we do is to verify HMAC to make sure the file is correct and hasn't
+                // been tampered. If it doesn't match we immediately exit to minimize exposure of
+                // the code to the potential attacker.
+                file.seek(std::io::SeekFrom::End(-i64::try_from(HMAC_SIZE)?))?;
+                let mut hmac = [0u8; HMAC_SIZE];
+                file.read_exact(&mut hmac)?;
+
+                let computed_hmac =
+                    self.compute_file_hmac(&mut file, 0, u64::try_from(file_size - HMAC_SIZE)?)?;
+
+                computed_hmac.verify_slice(&hmac)?;
+
+                // Read header
+                file.seek(std::io::SeekFrom::Start(0))?;
+                let header: Version7Header =
+                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+                header.validate()?;
+
+                // Proceed with decryption
+                let data_end = u64::try_from(file_size - HMAC_SIZE)?;
+                let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
                 let mut buffer = [0u8; READ_BUF_SIZE];
 
                 // All read data goes into this vec
                 let mut file_data = Vec::new();
                 let mut pos: usize = 0;
                 loop {
+                    // Read only until data_end, not full file
                     while file_data.len() < READ_BUF_SIZE {
-                        let n = file.read(&mut buffer)?;
+                        let current = file.stream_position()?;
+                        if current >= data_end {
+                            break;
+                        }
+
+                        let remaining = usize::try_from(data_end - current)?;
+                        let to_read = remaining.min(READ_BUF_SIZE);
+
+                        let n = file.read(&mut buffer[..to_read])?;
                         if n == 0 {
                             break;
                         }
-                        file_data.extend_from_slice(&buffer[0..n]);
+
+                        file_data.extend_from_slice(&buffer[..n]);
                     }
+
                     if file_data.is_empty() {
                         break;
                     } else if file_data.len() < BLOCK_SIZE {
                         bail!("Incorrect file size");
                     }
 
-                    // We checked the file size earlier, so it is safe to ignore truncation errors
-                    #[allow(clippy::cast_possible_truncation)]
-                    let file_end = (file.stream_position()? as usize) >= file_size;
+                    let file_end = file.stream_position()? >= data_end;
 
                     while file_data.len() >= pos + BLOCK_SIZE {
                         let mut block = Block::clone_from_slice(&file_data[pos..pos + BLOCK_SIZE]);
                         pos += BLOCK_SIZE;
 
                         cipher.decrypt_block_mut(&mut block);
+
                         if file_end && file_data.len() == pos {
                             let last_block_len = BLOCK_SIZE - header.pad_len as usize;
-                            out.write_all(&block[0..last_block_len])?;
+                            out.write_all(&block[..last_block_len])?;
                         } else {
                             out.write_all(&block)?;
                         }
                     }
+
                     file_data = file_data[pos..].to_vec();
                     pos = 0;
                 }
@@ -491,13 +726,19 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
     Ok(storage)
 }
 
-pub fn load_storage(cypher: &Cypher, path: &Path) -> Result<Storage> {
+pub fn load_storage(password: &str, path: &Path) -> Result<Storage> {
     if !path.exists() {
         return Ok(Storage::new());
     }
 
     let encrypted = fs::read(path)?;
+
+    let key = Cypher::encryption_key_for_file(password, path)?;
+
+    let cypher = Cypher::new(key);
+
     let decrypted = cypher.decrypt(&encrypted)?;
+
     deserialize_storage(&decrypted)
 }
 
