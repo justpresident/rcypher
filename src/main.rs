@@ -52,9 +52,11 @@ impl CypherCompleter {
     }
 }
 
+// Prints directly to tty to avoid
+// - snooping passwords from process stdout
+// - lingering passwords in memory
 fn secure_print(what: impl AsRef<str>) -> Result<()> {
     let tty = OpenOptions::new().write(true).open("/dev/tty")?;
-    // Flock::lock(tty, FlockArg::LockExclusive);
     let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
         Ok(l) => l,
         Err((_, e)) => bail!(e),
@@ -63,6 +65,10 @@ fn secure_print(what: impl AsRef<str>) -> Result<()> {
     lock.write_all(b"\n")?;
     lock.flush()?;
     Ok(())
+}
+
+fn clear_screen() {
+    print!("\x1B[2J\x1B[1;1H"); // Clear screen
 }
 
 impl Completer for CypherCompleter {
@@ -148,7 +154,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
         .auto_add_history(true)
         .history_ignore_space(true)
         .history_ignore_dups(true)?
-        .max_history_size(1000)?
+        .max_history_size(5)?
         .build();
 
     let completer = CypherCompleter::new(Arc::clone(&storage));
@@ -162,6 +168,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
 
     let start_time = SystemTime::now();
 
+    rl.clear_screen()?;
     loop {
         // Check timeout
         if start_time.elapsed().unwrap().as_secs() > STANDBY_TIMEOUT {
@@ -183,6 +190,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
 
                 match cmd {
                     "put" => {
+                        rl.clear_screen()?;
                         if parts.len() < 3 {
                             println!("syntax: put KEY VAL");
                             continue;
@@ -192,6 +200,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                         save_storage(&cypher, &storage_guard, &filename)?;
                     }
                     "get" => {
+                        rl.clear_screen()?;
                         if parts.len() < 2 {
                             println!("syntax: get REGEXP");
                             continue;
@@ -210,6 +219,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                         }
                     }
                     "history" => {
+                        rl.clear_screen()?;
                         if parts.len() < 2 {
                             println!("syntax: history KEY");
                             continue;
@@ -227,17 +237,19 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                         }
                     }
                     "search" => {
+                        rl.clear_screen()?;
                         let pattern = if parts.len() > 1 { parts[1] } else { "" };
                         match storage_guard.search(pattern) {
                             Ok(keys) => {
                                 for key in keys {
-                                    secure_print(format!("{}", key))?;
+                                    secure_print(key)?;
                                 }
                             }
                             Err(e) => println!("Error: {}", e),
                         }
                     }
                     "del" | "rm" => {
+                        rl.clear_screen()?;
                         if parts.len() < 2 {
                             println!("syntax: del KEY");
                             continue;
@@ -268,7 +280,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
         }
     }
 
-    print!("\x1B[2J\x1B[1;1H"); // Clear screen
+    clear_screen();
     Ok(())
 }
 
