@@ -38,13 +38,12 @@ fn test_encrypt_decrypt_file() {
         .arg("--encrypt")
         .arg("--insecure-password")
         .arg("test_password")
+        .arg("--output")
+        .arg(&output_path)
         .arg(&input_path)
         .output()
         .unwrap();
     assert!(output.status.success());
-
-    // write stdout to file
-    fs::write(&output_path, &output.stdout).unwrap();
 
     // Run decryption with wrong password
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));

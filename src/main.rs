@@ -9,7 +9,7 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Editor, Helper};
 use std::fs::OpenOptions;
-use std::io::{self, Write as _};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -36,6 +36,11 @@ struct CliParams {
     /// Decrypt a full file
     #[arg(short, long, action)]
     decrypt: bool,
+
+    /// Output file for encypt/decrypt operation.
+    /// If not specified, output will go to stdout
+    #[arg(short, long, default_value = "-")]
+    output: String,
 
     /// Don't prompt for password, use provided as a parameeter.
     /// This is only for automated testing
@@ -213,7 +218,7 @@ impl InteractiveCli {
                             }
                             storage_guard.put(parts[1].to_string(), parts[2].to_string());
                             self.secure_print(format!("{} stored", parts[1]))?;
-                            save_storage(&cypher, &storage_guard, &filename)?;
+                            save_storage(cypher, &storage_guard, &filename)?;
                         }
                         "get" => {
                             rl.clear_screen()?;
@@ -272,7 +277,7 @@ impl InteractiveCli {
                             }
                             if storage_guard.delete(parts[1]) {
                                 self.secure_print(format!("{} deleted", parts[1]))?;
-                                save_storage(&cypher, &storage_guard, &filename)?;
+                                save_storage(cypher, &storage_guard, &filename)?;
                             } else {
                                 println!("No such key '{}' found", parts[1]);
                             }
@@ -327,14 +332,42 @@ fn main() -> Result<()> {
         Zeroize::zeroize(&mut password);
         let cypher = Cypher::new(key);
 
-        cypher.encrypt_file(&params.filename, &mut io::stdout())?;
+        if params.output == "-" {
+            cypher.encrypt_file(&params.filename, &mut io::stdout())?;
+        } else {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(params.output)?;
+            let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
+                Ok(l) => l,
+                Err((_, e)) => bail!(e),
+            };
+            cypher.encrypt_file(&params.filename, &mut *lock)?;
+            lock.flush()?;
+        };
     } else if params.decrypt {
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
         Zeroize::zeroize(&mut password);
 
         let cypher = Cypher::new(key);
 
-        cypher.decrypt_file(&params.filename, &mut io::stdout())?;
+        if params.output == "-" {
+            cypher.decrypt_file(&params.filename, &mut io::stdout())?;
+        } else {
+            let file = OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(params.output)?;
+            let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
+                Ok(l) => l,
+                Err((_, e)) => bail!(e),
+            };
+            cypher.decrypt_file(&params.filename, &mut *lock)?;
+            lock.flush()?;
+        };
     } else {
         let interactive_cli = InteractiveCli {
             insecure_stdout: params.insecure_stdout,
