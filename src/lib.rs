@@ -51,6 +51,7 @@ type Aes256CbcDec = Decryptor<Aes256>;
 type KeyBytes = [u8; KEY_LEN];
 type SaltBytes = [u8; SALT_SIZE];
 type BlockBytes = [u8; BLOCK_SIZE];
+type HmacBytes = [u8; HMAC_SIZE];
 
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]
@@ -168,6 +169,7 @@ pub struct EncryptionKey {
     version: CypherVersion,
     key: Zeroizing<KeyBytes>,
     salt: SaltBytes,
+    hmac_key: Zeroizing<KeyBytes>,
 }
 
 impl EncryptionKey {
@@ -202,25 +204,34 @@ impl EncryptionKey {
         salt: &SaltBytes,
     ) -> Result<Self> {
         // Argon2id parameters: memory=64MB, iterations=3, parallelism=1
-        let params = Params::new(65536, 3, 1, Some(KEY_LEN))
+        let params = Params::new(65536, 3, 1, Some(2 * size_of::<KeyBytes>()))
             .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
 
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-        let mut key = Zeroizing::new([0u8; KEY_LEN]);
+        let mut all_key_bytes = Zeroizing::new([0u8; 2 * size_of::<KeyBytes>()]);
         argon2
-            .hash_password_into(password.as_bytes(), salt, key.as_mut())
+            .hash_password_into(password.as_bytes(), salt, all_key_bytes.as_mut())
             .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+
+        let mut key = KeyBytes::default();
+        let mut hmac_key = KeyBytes::default();
+        key.copy_from_slice(&all_key_bytes[0..KEY_LEN]);
+        hmac_key.copy_from_slice(&all_key_bytes[KEY_LEN..]);
 
         Ok(Self {
             version,
-            key,
+            key: Zeroizing::new(key),
+            hmac_key: Zeroizing::new(hmac_key),
             salt: *salt,
         })
     }
 
     pub fn as_bytes(&self) -> &KeyBytes {
         &self.key
+    }
+    pub fn hmac_key(&self) -> &KeyBytes {
+        &self.hmac_key
     }
     pub const fn salt(&self) -> &SaltBytes {
         &self.salt
@@ -286,10 +297,10 @@ impl Cypher {
 
     // TODO: initialize HMAC from a separate key derived from master key
     fn hmac_start(&self) -> HmacSha256 {
-        HmacSha256::new_from_slice(self.key.as_bytes()).expect("HMAC can take key of any size")
+        HmacSha256::new_from_slice(self.key.hmac_key()).expect("HMAC can take key of any size")
     }
 
-    fn compute_hmac(&self, header: &[u8], encrypted_data: &[u8]) -> [u8; HMAC_SIZE] {
+    fn compute_hmac(&self, header: &[u8], encrypted_data: &[u8]) -> HmacBytes {
         let mut mac = self.hmac_start();
         Mac::update(&mut mac, header);
         Mac::update(&mut mac, encrypted_data);
@@ -548,7 +559,7 @@ impl Cypher {
                 // been tampered. If it doesn't match we immediately exit to minimize exposure of
                 // the code to the potential attacker.
                 file.seek(std::io::SeekFrom::End(-i64::try_from(HMAC_SIZE)?))?;
-                let mut hmac = [0u8; HMAC_SIZE];
+                let mut hmac = HmacBytes::default();
                 file.read_exact(&mut hmac)?;
 
                 let computed_hmac =
