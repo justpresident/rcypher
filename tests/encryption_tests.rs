@@ -1,6 +1,7 @@
+use anyhow::Result;
 use rcypher::*;
 use std::fs;
-use std::io::{Read as _, Seek as _, SeekFrom};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -85,25 +86,34 @@ fn test_decrypt_corrupted_data() {
     assert!(result.is_err());
 }
 
-fn encrypt_decrypt(input_path: &Path, output_path: &Path) -> Vec<u8> {
-    let cypher = Cypher::new(
-        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
-    );
+fn encrypt_decrypt(
+    input_path: &Path,
+    output_path: &Path,
+    in_between: impl FnOnce() -> (),
+) -> Result<Vec<u8>> {
+    let cypher = Cypher::new(EncryptionKey::from_password(
+        CypherVersion::V7WithKdf,
+        "test_password",
+    )?);
 
     // Encrypt
-    let mut file = fs::File::create(&output_path).unwrap();
-    cypher.encrypt_file(&input_path, &mut file).unwrap();
+    let mut file = fs::File::create(&output_path)?;
+    cypher.encrypt_file(&input_path, &mut file)?;
+
+    in_between();
 
     // Decrypt
     let mut buffer = std::io::Cursor::new(Vec::new());
-    cypher.decrypt_file(&output_path, &mut buffer).unwrap();
-    buffer.seek(SeekFrom::Start(0)).unwrap();
+    cypher.decrypt_file(&output_path, &mut buffer)?;
+    buffer.seek(SeekFrom::Start(0))?;
 
     let mut decrypted = Vec::new();
-    buffer.read_to_end(&mut decrypted).unwrap();
+    buffer.read_to_end(&mut decrypted)?;
 
-    decrypted
+    Ok(decrypted)
 }
+
+fn noop() {}
 
 #[test]
 fn test_encrypt_decrypt_file() {
@@ -114,7 +124,7 @@ fn test_encrypt_decrypt_file() {
     let test_data = b"This is test file content\nWith multiple lines\nAnd some more";
     fs::write(&input_path, test_data).unwrap();
 
-    let decrypted = encrypt_decrypt(&input_path, &output_path);
+    let decrypted = encrypt_decrypt(&input_path, &output_path, noop).unwrap();
 
     assert_eq!(decrypted.as_slice(), test_data);
 }
@@ -131,7 +141,7 @@ fn test_encrypt_decrypt_large_file() {
     }
     fs::write(&input_path, &test_data).unwrap();
 
-    let decrypted = encrypt_decrypt(&input_path, &output_path);
+    let decrypted = encrypt_decrypt(&input_path, &output_path, noop).unwrap();
 
     assert_eq!(decrypted.len(), test_data.len());
     assert_eq!(decrypted, test_data);
@@ -144,9 +154,97 @@ fn test_encrypt_decrypt_empty_file() {
 
     fs::write(&input_path, b"").unwrap();
 
-    let decrypted = encrypt_decrypt(&input_path, &output_path);
+    let decrypted = encrypt_decrypt(&input_path, &output_path, noop).unwrap();
 
     assert_eq!(decrypted.len(), 0);
+}
+
+#[test]
+fn test_corrupted_file_hmac() {
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, output_path) = temp_test_file();
+
+    // Create test file
+    let test_data = b"This is test file content\nWith multiple lines\nAnd some more";
+    fs::write(&input_path, test_data).unwrap();
+
+    let decrypted = encrypt_decrypt(&input_path, &output_path, || {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&output_path)
+            .unwrap();
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write(&[0u8]).unwrap();
+    });
+
+    assert!(decrypted.is_err());
+}
+
+#[test]
+fn test_invalid_file_version() {
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, output_path) = temp_test_file();
+
+    // Create test file
+    let test_data = b"This is test file content\nWith multiple lines\nAnd some more";
+    fs::write(&input_path, test_data).unwrap();
+
+    let decrypted = encrypt_decrypt(&input_path, &output_path, || {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&output_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(0)).unwrap();
+        file.write(&[5u8]).unwrap();
+    });
+
+    assert!(decrypted.is_err());
+}
+
+#[test]
+fn test_invalid_file_padding() {
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, output_path) = temp_test_file();
+
+    // Create test file
+    let test_data = b"This is test file content\nWith multiple lines\nAnd some more";
+    fs::write(&input_path, test_data).unwrap();
+
+    let decrypted = encrypt_decrypt(&input_path, &output_path, || {
+        let mut file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&output_path)
+            .unwrap();
+        file.seek(SeekFrom::Start(3)).unwrap();
+        let mut padding = [0u8; 1];
+        file.read(&mut padding).unwrap();
+        padding[0] += 1;
+        file.seek(SeekFrom::Start(3)).unwrap();
+        file.write(&padding).unwrap();
+    });
+
+    assert!(decrypted.is_err());
+}
+
+#[test]
+fn test_invalid_file_truncated() {
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, output_path) = temp_test_file();
+
+    // Create test file
+    let test_data = b"This is test file content\nWith multiple lines\nAnd some more";
+    fs::write(&input_path, test_data).unwrap();
+
+    let decrypted = encrypt_decrypt(&input_path, &output_path, || {
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&output_path)
+            .unwrap();
+        file.set_len(file.metadata().unwrap().len() - 16).unwrap();
+    });
+
+    assert!(decrypted.is_err());
 }
 
 #[test]
