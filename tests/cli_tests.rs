@@ -74,6 +74,7 @@ fn test_encrypt_decrypt_file() {
 fn run_commands(file_path: &Path, commands: Vec<u8>) -> Vec<String> {
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
+        .arg("--quiet")
         .arg("--insecure-stdout")
         .arg("--insecure-password")
         .arg("test_password")
