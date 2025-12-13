@@ -1,3 +1,4 @@
+![CI](https://github.com/justpresident/rcypher/actions/workflows/rust.yml/badge.svg)
 # rcypher
 
 rcypher is a minimal, offline, file-based password storage and encryption tool for technical users.
