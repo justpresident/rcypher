@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use arboard::Clipboard;
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::*; // Import from lib
@@ -13,9 +14,10 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 const STANDBY_TIMEOUT: u64 = 300;
+const CLIPBOARD_TTL_MS: u64 = 10000;
 
 #[derive(Parser)]
 #[command(group(
@@ -88,7 +90,9 @@ impl Completer for CypherCompleter {
         // If we're at the beginning or just typed a command
         if parts.is_empty() || (parts.len() == 1 && !line.ends_with(' ')) {
             // Complete commands
-            let commands = ["put", "get", "history", "search", "del", "rm", "help"];
+            let commands = [
+                "put", "get", "copy", "history", "search", "del", "rm", "help",
+            ];
             let prefix = parts.first().unwrap_or(&"");
             let matches: Vec<Pair> = commands
                 .iter()
@@ -107,7 +111,7 @@ impl Completer for CypherCompleter {
         if !parts.is_empty() {
             let cmd = parts[0];
             match cmd {
-                "get" | "history" | "del" | "rm" | "put" | "search" => {
+                "get" | "history" | "del" | "rm" | "put" | "copy" | "search" => {
                     // Only complete if we have exactly 1 argument (the command itself)
                     // or 2 arguments where the second is incomplete
                     if parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')) {
@@ -239,6 +243,33 @@ impl InteractiveCli {
                                 Err(e) => println!("Error: {}", e),
                             }
                         }
+                        "copy" => {
+                            rl.clear_screen()?;
+                            if parts.len() < 2 {
+                                println!("syntax: copy KEY");
+                                continue;
+                            }
+                            match storage_guard.get(parts[1]) {
+                                Ok(results) => {
+                                    if results.len() > 1 {
+                                        println!(
+                                            "Multiple keys found! Plese specify exact key name:"
+                                        );
+                                        for (key, _) in results {
+                                            self.secure_print(key)?;
+                                        }
+                                    } else if let Some((_, val)) = results.first() {
+                                        copy_to_clipboard(
+                                            val,
+                                            std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
+                                        )?;
+                                    } else {
+                                        println!("No key '{}' found!", parts[1]);
+                                    }
+                                }
+                                Err(e) => println!("Error: {}", e),
+                            }
+                        }
                         "history" => {
                             rl.clear_screen()?;
                             if parts.len() < 2 {
@@ -310,10 +341,37 @@ fn print_help() {
     println!("USER COMMANDS:");
     println!("  put KEY VAL     - Store a key-value pair");
     println!("  get REGEXP      - Get values for keys matching regexp");
+    println!("  copy KEY        - Copy key value into system clipboard");
     println!("  history KEY     - Show history of changes for a key");
     println!("  search REGEXP   - Search for keys matching regexp");
     println!("  del|rm KEY      - Delete a key");
     println!("  help            - Show this help");
+}
+
+pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) -> anyhow::Result<()> {
+    println!(
+        "Secret copied to the clipboard and will be automatically removed in {} seconds.\n
+        Warning: Clipboard managers may retain history",
+        ttl.as_secs()
+    );
+
+    let copy = Zeroizing::from(secret.to_string());
+
+    // Spawn a background thread to clear clipboard after TTL
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            let _ = clipboard.set_text(copy.to_string());
+            std::thread::sleep(ttl);
+            if clipboard.get_text().ok().as_deref() == Some(copy.as_ref()) {
+                let _ = clipboard.set_text("deleted");
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        } else {
+            println!("Can't access clipboard");
+        }
+    });
+
+    Ok(())
 }
 
 fn main() -> Result<()> {
