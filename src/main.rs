@@ -24,16 +24,28 @@ const STANDBY_TIMEOUT: u64 = 300;
         .multiple(false)
 ))]
 #[command(name = "cypher")]
-#[command(about = "Command line cypher tool for encrypted key-value storage")]
-struct Cli {
+#[command(about = "Command line cypher tool for encrypting secrets.
+By default treats provided filename as an encrypted key-value storage and provides put/get functionality for individual secrets.
+In this mode, the file is created if it doesn't exist.
+Otherwise, with --encrypt and --decrypt parameters it allows encryption of any other type of file.
+")]
+struct CliParams {
+    /// Encrypt a full file
     #[arg(short, long, action)]
     encrypt: bool,
+    /// Decrypt a full file
     #[arg(short, long, action)]
     decrypt: bool,
 
-    // This is only for automated testing
+    /// Don't prompt for password, use provided as a parameeter.
+    /// This is only for automated testing
     #[arg(long, hide(true))]
-    password: Option<String>,
+    insecure_password: Option<String>,
+
+    /// Use stdout to output secrets.
+    /// This is only for automated testing
+    #[arg(long, action, default_value_t = false, hide(true))]
+    insecure_stdout: bool,
 
     #[arg(long, default_value = "cypher > ")]
     prompt: String,
@@ -50,21 +62,6 @@ impl CypherCompleter {
     fn new(storage: Arc<Mutex<Storage>>) -> Self {
         CypherCompleter { storage }
     }
-}
-
-// Prints directly to tty to avoid
-// - snooping passwords from process stdout
-// - lingering passwords in memory
-fn secure_print(what: impl AsRef<str>) -> Result<()> {
-    let tty = OpenOptions::new().write(true).open("/dev/tty")?;
-    let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
-        Ok(l) => l,
-        Err((_, e)) => bail!(e),
-    };
-    lock.write_all(what.as_ref().as_bytes())?;
-    lock.write_all(b"\n")?;
-    lock.flush()?;
-    Ok(())
 }
 
 fn clear_screen() {
@@ -146,142 +143,167 @@ impl Validator for CypherCompleter {}
 
 impl Helper for CypherCompleter {}
 
-fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> Result<()> {
-    let storage = Arc::new(Mutex::new(load_storage(&password, &filename)?));
+struct InteractiveCli {
+    // Use insecure prints to stdout
+    insecure_stdout: bool,
+}
 
-    let config = Config::builder()
-        .completion_type(CompletionType::List)
-        .auto_add_history(true)
-        .history_ignore_space(true)
-        .history_ignore_dups(true)?
-        .max_history_size(5)?
-        .build();
-
-    let completer = CypherCompleter::new(Arc::clone(&storage));
-    let mut rl = Editor::with_config(config)?;
-    rl.set_helper(Some(completer));
-
-    let key = Cypher::encryption_key_for_file(&password, &filename)?;
-    Zeroize::zeroize(&mut password);
-
-    let cypher = Cypher::new(key);
-
-    let start_time = SystemTime::now();
-
-    rl.clear_screen()?;
-    loop {
-        // Check timeout
-        if start_time.elapsed().unwrap().as_secs() > STANDBY_TIMEOUT {
-            break;
+impl InteractiveCli {
+    // Prints directly to tty to avoid
+    // - snooping passwords from process stdout
+    // - lingering passwords in memory
+    fn secure_print(&self, what: impl AsRef<str>) -> Result<()> {
+        if self.insecure_stdout {
+            println!("{}", what.as_ref());
+            return Ok(());
         }
+        let tty = OpenOptions::new().write(true).open("/dev/tty")?;
+        let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
+            Ok(l) => l,
+            Err((_, e)) => bail!(e),
+        };
+        lock.write_all(what.as_ref().as_bytes())?;
+        lock.write_all(b"\n")?;
+        lock.flush()?;
+        Ok(())
+    }
+    pub fn run(&self, mut password: String, filename: PathBuf, prompt: String) -> Result<()> {
+        let storage = Arc::new(Mutex::new(load_storage(&password, &filename)?));
 
-        let readline = rl.readline(&prompt);
-        match readline {
-            Ok(line) => {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
+        let config = Config::builder()
+            .completion_type(CompletionType::List)
+            .auto_add_history(true)
+            .history_ignore_space(true)
+            .history_ignore_dups(true)?
+            .max_history_size(5)?
+            .build();
 
-                let parts: Vec<&str> = line.splitn(3, ' ').collect();
-                let cmd = parts[0];
+        let completer = CypherCompleter::new(Arc::clone(&storage));
+        let mut rl = Editor::with_config(config)?;
+        rl.set_helper(Some(completer));
 
-                let mut storage_guard = storage.lock().unwrap();
+        let key = Cypher::encryption_key_for_file(&password, &filename)?;
+        Zeroize::zeroize(&mut password);
 
-                match cmd {
-                    "put" => {
-                        rl.clear_screen()?;
-                        if parts.len() < 3 {
-                            println!("syntax: put KEY VAL");
-                            continue;
-                        }
-                        storage_guard.put(parts[1].to_string(), parts[2].to_string());
-                        secure_print(format!("{} stored", parts[1]))?;
-                        save_storage(&cypher, &storage_guard, &filename)?;
+        let cypher = Cypher::new(key);
+
+        let start_time = SystemTime::now();
+
+        rl.clear_screen()?;
+        loop {
+            // Check timeout
+            if start_time.elapsed().unwrap().as_secs() > STANDBY_TIMEOUT {
+                break;
+            }
+
+            let readline = rl.readline(&prompt);
+            match readline {
+                Ok(line) => {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
                     }
-                    "get" => {
-                        rl.clear_screen()?;
-                        if parts.len() < 2 {
-                            println!("syntax: get REGEXP");
-                            continue;
+
+                    let parts: Vec<&str> = line.splitn(3, ' ').collect();
+                    let cmd = parts[0];
+
+                    let mut storage_guard = storage.lock().unwrap();
+
+                    match cmd {
+                        "put" => {
+                            rl.clear_screen()?;
+                            if parts.len() < 3 {
+                                println!("syntax: put KEY VAL");
+                                continue;
+                            }
+                            storage_guard.put(parts[1].to_string(), parts[2].to_string());
+                            self.secure_print(format!("{} stored", parts[1]))?;
+                            save_storage(&cypher, &storage_guard, &filename)?;
                         }
-                        match storage_guard.get(parts[1]) {
-                            Ok(results) => {
-                                if results.is_empty() {
-                                    println!("No keys matching '{}' found!", parts[1]);
-                                } else {
-                                    for (key, val) in results {
-                                        secure_print(format!("{}: {}", key, val))?;
+                        "get" => {
+                            rl.clear_screen()?;
+                            if parts.len() < 2 {
+                                println!("syntax: get REGEXP");
+                                continue;
+                            }
+                            match storage_guard.get(parts[1]) {
+                                Ok(results) => {
+                                    if results.is_empty() {
+                                        println!("No keys matching '{}' found!", parts[1]);
+                                    } else {
+                                        for (key, val) in results {
+                                            self.secure_print(format!("{}: {}", key, val))?;
+                                        }
                                     }
                                 }
+                                Err(e) => println!("Error: {}", e),
                             }
-                            Err(e) => println!("Error: {}", e),
                         }
-                    }
-                    "history" => {
-                        rl.clear_screen()?;
-                        if parts.len() < 2 {
-                            println!("syntax: history KEY");
-                            continue;
-                        }
-                        if let Some(entries) = storage_guard.history(parts[1]) {
-                            for entry in entries {
-                                secure_print(format!(
-                                    "[{}]: {}",
-                                    format_timestamp(entry.timestamp),
-                                    entry.value
-                                ))?;
+                        "history" => {
+                            rl.clear_screen()?;
+                            if parts.len() < 2 {
+                                println!("syntax: history KEY");
+                                continue;
                             }
-                        } else {
-                            println!("No key '{}' found!", parts[1]);
-                        }
-                    }
-                    "search" => {
-                        rl.clear_screen()?;
-                        let pattern = if parts.len() > 1 { parts[1] } else { "" };
-                        match storage_guard.search(pattern) {
-                            Ok(keys) => {
-                                for key in keys {
-                                    secure_print(key)?;
+                            if let Some(entries) = storage_guard.history(parts[1]) {
+                                for entry in entries {
+                                    self.secure_print(format!(
+                                        "[{}]: {}",
+                                        format_timestamp(entry.timestamp),
+                                        entry.value
+                                    ))?;
                                 }
+                            } else {
+                                println!("No key '{}' found!", parts[1]);
                             }
-                            Err(e) => println!("Error: {}", e),
                         }
-                    }
-                    "del" | "rm" => {
-                        rl.clear_screen()?;
-                        if parts.len() < 2 {
-                            println!("syntax: del KEY");
-                            continue;
+                        "search" => {
+                            rl.clear_screen()?;
+                            let pattern = if parts.len() > 1 { parts[1] } else { "" };
+                            match storage_guard.search(pattern) {
+                                Ok(keys) => {
+                                    for key in keys {
+                                        self.secure_print(key)?;
+                                    }
+                                }
+                                Err(e) => println!("Error: {}", e),
+                            }
                         }
-                        if storage_guard.delete(parts[1]) {
-                            secure_print(format!("{} deleted", parts[1]))?;
-                            save_storage(&cypher, &storage_guard, &filename)?;
-                        } else {
-                            println!("No such key '{}' found", parts[1]);
+                        "del" | "rm" => {
+                            rl.clear_screen()?;
+                            if parts.len() < 2 {
+                                println!("syntax: del KEY");
+                                continue;
+                            }
+                            if storage_guard.delete(parts[1]) {
+                                self.secure_print(format!("{} deleted", parts[1]))?;
+                                save_storage(&cypher, &storage_guard, &filename)?;
+                            } else {
+                                println!("No such key '{}' found", parts[1]);
+                            }
                         }
-                    }
-                    "help" => {
-                        drop(storage_guard);
-                        print_help();
-                    }
-                    _ => {
-                        println!("No such command '{}'\n", cmd);
+                        "help" => {
+                            drop(storage_guard);
+                            print_help();
+                        }
+                        _ => {
+                            println!("No such command '{}'\n", cmd);
+                        }
                     }
                 }
-            }
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                break;
-            }
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break;
+                Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                    break;
+                }
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    break;
+                }
             }
         }
-    }
 
-    clear_screen();
-    Ok(())
+        clear_screen();
+        Ok(())
+    }
 }
 
 fn print_help() {
@@ -295,30 +317,34 @@ fn print_help() {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let params = CliParams::parse();
 
-    let mut password = match cli.password {
+    let mut password = match params.insecure_password {
         Some(passwd) => passwd.clone(),
-        None => {
-            rpassword::prompt_password(format!("Enter Password for {}: ", cli.filename.display()))?
-        }
+        None => rpassword::prompt_password(format!(
+            "Enter Password for {}: ",
+            params.filename.display()
+        ))?,
     };
 
-    if cli.encrypt {
+    if params.encrypt {
         let key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
         Zeroize::zeroize(&mut password);
         let cypher = Cypher::new(key);
 
-        cypher.encrypt_file(&cli.filename, &mut io::stdout())?;
-    } else if cli.decrypt {
-        let key = Cypher::encryption_key_for_file(&password, &cli.filename)?;
+        cypher.encrypt_file(&params.filename, &mut io::stdout())?;
+    } else if params.decrypt {
+        let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
         Zeroize::zeroize(&mut password);
 
         let cypher = Cypher::new(key);
 
-        cypher.decrypt_file(&cli.filename, &mut io::stdout())?;
+        cypher.decrypt_file(&params.filename, &mut io::stdout())?;
     } else {
-        run_interactive(password, cli.filename, cli.prompt)?;
+        let interactive_cli = InteractiveCli {
+            insecure_stdout: params.insecure_stdout,
+        };
+        interactive_cli.run(password, params.filename, params.prompt)?;
     }
 
     Ok(())

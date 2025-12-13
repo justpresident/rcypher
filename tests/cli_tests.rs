@@ -36,7 +36,7 @@ fn test_encrypt_decrypt_file() {
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
         .arg("--encrypt")
-        .arg("--password")
+        .arg("--insecure-password")
         .arg("test_password")
         .arg(&input_path)
         .output()
@@ -50,7 +50,7 @@ fn test_encrypt_decrypt_file() {
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
         .arg("--decrypt")
-        .arg("--password")
+        .arg("--insecure-password")
         .arg("test_passwor")
         .arg(&output_path)
         .output()
@@ -61,7 +61,7 @@ fn test_encrypt_decrypt_file() {
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
         .arg("--decrypt")
-        .arg("--password")
+        .arg("--insecure-password")
         .arg("test_password")
         .arg(&output_path)
         .output()
@@ -75,7 +75,8 @@ fn test_encrypt_decrypt_file() {
 fn run_commands(file_path: &Path, commands: Vec<u8>) -> Vec<String> {
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
-        .arg("--password")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
         .arg("test_password")
         .arg(&file_path)
         .write_stdin(commands)
