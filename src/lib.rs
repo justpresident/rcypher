@@ -34,9 +34,9 @@ use std::collections::HashMap;
 use std::io::{Read, Seek, Write};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::{fs, io};
+use std::{fmt, fs, io};
 use tempfile::NamedTempFile;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const READ_BUF_SIZE: usize = 4096;
 const BLOCK_SIZE: usize = 16;
@@ -87,9 +87,63 @@ impl Version7Header {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedValue {
+    // Store encrypted bytes instead of plaintext
+    ciphertext: Vec<u8>,
+}
+
+#[cfg(debug_assertions)]
+impl<T: AsRef<str>> From<T> for EncryptedValue {
+    fn from(value: T) -> Self {
+        Self {
+            ciphertext: value.as_ref().as_bytes().to_vec(),
+        }
+    }
+}
+
+impl EncryptedValue {
+    /// Creates an encrypted value from plaintext
+    pub fn encrypt(cypher: &Cypher, plaintext: &str) -> Result<Self> {
+        match cypher.version() {
+            CypherVersion::LegacyWithoutKdf => Ok(Self {
+                ciphertext: plaintext.to_string().into(),
+            }),
+            CypherVersion::V7WithKdf => {
+                let ciphertext = cypher.encrypt(plaintext.as_bytes())?;
+                Ok(Self { ciphertext })
+            }
+        }
+    }
+
+    /// Decrypts the value temporarily (result is zeroized after use)
+    pub fn decrypt(&self, cypher: &Cypher) -> Result<Zeroizing<String>> {
+        match cypher.version() {
+            CypherVersion::LegacyWithoutKdf => {
+                Ok(Zeroizing::new(String::from_utf8(self.ciphertext.clone())?))
+            }
+            CypherVersion::V7WithKdf => {
+                let decrypted_bytes = cypher.decrypt(&self.ciphertext)?;
+
+                Ok(Zeroizing::new(String::from_utf8(decrypted_bytes.to_vec())?))
+            }
+        }
+    }
+
+    pub const fn as_bytes(&self) -> &[u8] {
+        self.ciphertext.as_slice()
+    }
+}
+
+impl fmt::Display for EncryptedValue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "<encrypted:{} bytes>", self.ciphertext.len())
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ValueEntry {
-    pub value: String,
+    pub value: EncryptedValue,
     pub timestamp: u64,
 }
 
@@ -105,7 +159,7 @@ impl Storage {
         }
     }
 
-    pub fn put(&mut self, key: String, value: String) {
+    pub fn put(&mut self, key: String, value: EncryptedValue) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("time should go forward")
@@ -114,14 +168,14 @@ impl Storage {
         self.put_ts(key, value, timestamp);
     }
 
-    pub fn put_ts(&mut self, key: String, value: String, timestamp: u64) {
+    pub fn put_ts(&mut self, key: String, value: EncryptedValue, timestamp: u64) {
         self.data
             .entry(key)
             .or_default()
             .push(ValueEntry { value, timestamp });
     }
 
-    pub fn get(&self, pattern: &str) -> Result<Vec<(String, String)>> {
+    pub fn get(&self, pattern: &str) -> Result<Vec<(String, EncryptedValue)>> {
         let re = Regex::new(&format!("^{pattern}$"))?;
         let mut results = Vec::new();
 
@@ -166,7 +220,7 @@ impl Default for Storage {
 
 #[derive(Clone, Default)]
 pub struct EncryptionKey {
-    version: CypherVersion,
+    pub version: CypherVersion,
     key: Zeroizing<KeyBytes>,
     salt: SaltBytes,
     hmac_key: Zeroizing<KeyBytes>,
@@ -248,6 +302,10 @@ pub struct Cypher {
 impl Cypher {
     pub const fn new(key: EncryptionKey) -> Self {
         Self { key }
+    }
+
+    pub fn version(&self) -> CypherVersion {
+        self.key.version.clone()
     }
 
     pub fn encryption_key_for_file(password: &str, path: &Path) -> Result<EncryptionKey> {
@@ -382,7 +440,7 @@ impl Cypher {
         Ok(result)
     }
 
-    pub fn decrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         if data.len() < 3 {
             bail!("Data too short");
         }
@@ -406,7 +464,7 @@ impl Cypher {
                     result.truncate(result.len() - pad_len);
                 }
 
-                Ok(result)
+                Ok(Zeroizing::from(result))
             }
             Ok(CypherVersion::V7WithKdf) => {
                 if data.len() < size_of::<Version7Header>() + BLOCK_SIZE + HMAC_SIZE {
@@ -441,11 +499,12 @@ impl Cypher {
                     .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
                     .map_err(|e| anyhow::anyhow!("Decryption failed: {e}, size={encrypted_len}"))?;
 
+                // Decryption is done in place. 'encrypted' vector now contains decrypted data
                 if header.pad_len > 0 && header.pad_len as usize <= encrypted_len {
                     encrypted.truncate(encrypted_len - header.pad_len as usize);
                 }
 
-                Ok(encrypted)
+                Ok(Zeroizing::from(encrypted))
             }
             _ => bail!("Unsupported cypher version {version}"),
         }
@@ -501,6 +560,7 @@ impl Cypher {
                     break;
                 }
                 file_data.extend_from_slice(&buffer[0..n]);
+                buffer.zeroize();
             }
             if file_data.len() < BLOCK_SIZE {
                 break;
@@ -514,6 +574,7 @@ impl Cypher {
                 Mac::update(&mut mac, &block);
                 out.write_all(&block)?;
             }
+            file_data[0..pos].zeroize();
             file_data = file_data[pos..].to_vec();
             pos = 0;
         }
@@ -620,6 +681,7 @@ impl Cypher {
                         } else {
                             out.write_all(&block)?;
                         }
+                        block.zeroize();
                     }
 
                     file_data = file_data[pos..].to_vec();
@@ -705,7 +767,9 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
         if pos + val_len > data.len() {
             bail!("Corrupted file: value overflow");
         }
-        let value = String::from_utf8(data[pos..pos + val_len].to_vec())?;
+        let value = EncryptedValue {
+            ciphertext: data[pos..pos + val_len].to_vec(),
+        };
         pos += val_len;
 
         let timestamp = {

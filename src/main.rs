@@ -202,8 +202,8 @@ impl InteractiveCli {
 
             let readline = rl.readline(&prompt);
             match readline {
-                Ok(line) => {
-                    let line = line.trim();
+                Ok(mut input_line) => {
+                    let line = input_line.trim();
                     if line.is_empty() {
                         continue;
                     }
@@ -220,8 +220,11 @@ impl InteractiveCli {
                                 println!("syntax: put KEY VAL");
                                 continue;
                             }
-                            storage_guard.put(parts[1].to_string(), parts[2].to_string());
+                            let encrypted_value = EncryptedValue::encrypt(cypher, parts[2])?;
+                            storage_guard.put(parts[1].to_string(), encrypted_value);
+
                             self.secure_print(format!("{} stored", parts[1]))?;
+
                             save_storage(cypher, &storage_guard, &filename)?;
                         }
                         "get" => {
@@ -236,7 +239,11 @@ impl InteractiveCli {
                                         println!("No keys matching '{}' found!", parts[1]);
                                     } else {
                                         for (key, val) in results {
-                                            self.secure_print(format!("{}: {}", key, val))?;
+                                            let secret = val.decrypt(cypher)?;
+
+                                            let mut output = format!("{}: {}", key, &*secret);
+                                            self.secure_print(&output)?;
+                                            output.zeroize();
                                         }
                                     }
                                 }
@@ -259,8 +266,9 @@ impl InteractiveCli {
                                             self.secure_print(key)?;
                                         }
                                     } else if let Some((_, val)) = results.first() {
+                                        let secret = val.decrypt(cypher)?;
                                         copy_to_clipboard(
-                                            val,
+                                            secret.as_ref(),
                                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
                                         )?;
                                     } else {
@@ -278,11 +286,14 @@ impl InteractiveCli {
                             }
                             if let Some(entries) = storage_guard.history(parts[1]) {
                                 for entry in entries {
-                                    self.secure_print(format!(
+                                    let secret = entry.value.decrypt(cypher)?;
+                                    let mut output = format!(
                                         "[{}]: {}",
                                         format_timestamp(entry.timestamp),
-                                        entry.value
-                                    ))?;
+                                        &*secret
+                                    );
+                                    self.secure_print(&output)?;
+                                    output.zeroize();
                                 }
                             } else {
                                 println!("No key '{}' found!", parts[1]);
@@ -321,6 +332,7 @@ impl InteractiveCli {
                             println!("No such command '{}'\n", cmd);
                         }
                     }
+                    input_line.zeroize();
                 }
                 Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
                     break;

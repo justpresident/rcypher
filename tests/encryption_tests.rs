@@ -48,7 +48,7 @@ fn test_encrypt_decrypt_large_data() {
 
     let encrypted = cypher.encrypt(&data).unwrap();
     let decrypted = cypher.decrypt(&encrypted).unwrap();
-    assert_eq!(decrypted, data);
+    assert_eq!(decrypted, data.into());
 }
 
 #[test]
