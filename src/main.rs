@@ -1,6 +1,7 @@
 use anyhow::{Result, bail};
 use arboard::Clipboard;
 use clap::{ArgGroup, Parser};
+use indicatif::ProgressBar;
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::*; // Import from lib
 use rustyline::completion::{Completer, Pair};
@@ -12,7 +13,6 @@ use rustyline::{CompletionType, Config, Editor, Helper};
 use std::fs::OpenOptions;
 use std::io::{self, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use zeroize::{Zeroize, Zeroizing};
@@ -78,45 +78,6 @@ impl CypherCompleter {
 
 fn clear_screen() {
     print!("\x1B[2J\x1B[1;1H"); // Clear screen
-}
-
-pub struct Spinner {
-    running: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<()>>,
-}
-
-impl Spinner {
-    pub fn start(message: &str) -> Self {
-        let running = Arc::new(AtomicBool::new(true));
-        let running_clone = running.clone();
-        let msg = message.to_string();
-
-        let handle = std::thread::spawn(move || {
-            let frames = ['|', '/', '-', '\\'];
-            let mut i = 0;
-
-            while running_clone.load(Ordering::Relaxed) {
-                print!("\r{} {}", msg, frames[i % frames.len()]);
-                io::stdout().flush().ok();
-                i += 1;
-                std::thread::sleep(std::time::Duration::from_millis(100));
-            }
-        });
-
-        Self {
-            running,
-            handle: Some(handle),
-        }
-    }
-
-    pub fn stop(mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(h) = self.handle.take() {
-            let _ = h.join();
-        }
-        print!("\r"); // clear line
-        io::stdout().flush().ok();
-    }
 }
 
 impl Completer for CypherCompleter {
@@ -489,14 +450,20 @@ fn main() -> Result<()> {
 
         let spinner = match params.quiet {
             true => None,
-            false => Some(Spinner::start("Deriving encryption key")),
+            false => {
+                let spinner = ProgressBar::new_spinner();
+                spinner.set_message("Deriving encryption key");
+                spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+                Some(spinner)
+            }
         };
 
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
         Zeroize::zeroize(&mut password);
 
         if let Some(s) = spinner {
-            s.stop()
+            s.finish_and_clear();
         }
 
         let cypher = Cypher::new(key);
