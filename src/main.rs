@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
+use nix::fcntl::{Flock, FlockArg};
 use rcypher::*; // Import from lib
 use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
@@ -7,7 +8,8 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 use rustyline::{CompletionType, Config, Editor, Helper};
-use std::io::{self};
+use std::fs::OpenOptions;
+use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -48,6 +50,19 @@ impl CypherCompleter {
     fn new(storage: Arc<Mutex<Storage>>) -> Self {
         CypherCompleter { storage }
     }
+}
+
+fn secure_print(what: impl AsRef<str>) -> Result<()> {
+    let tty = OpenOptions::new().write(true).open("/dev/tty")?;
+    // Flock::lock(tty, FlockArg::LockExclusive);
+    let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
+        Ok(l) => l,
+        Err((_, e)) => bail!(e),
+    };
+    lock.write_all(what.as_ref().as_bytes())?;
+    lock.write_all(b"\n")?;
+    lock.flush()?;
+    Ok(())
 }
 
 impl Completer for CypherCompleter {
@@ -173,7 +188,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                             continue;
                         }
                         storage_guard.put(parts[1].to_string(), parts[2].to_string());
-                        println!("{} stored", parts[1]);
+                        secure_print(format!("{} stored", parts[1]))?;
                         save_storage(&cypher, &storage_guard, &filename)?;
                     }
                     "get" => {
@@ -187,7 +202,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                                     println!("No keys matching '{}' found!", parts[1]);
                                 } else {
                                     for (key, val) in results {
-                                        println!("{}: {}", key, val);
+                                        secure_print(format!("{}: {}", key, val))?;
                                     }
                                 }
                             }
@@ -201,11 +216,11 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                         }
                         if let Some(entries) = storage_guard.history(parts[1]) {
                             for entry in entries {
-                                println!(
+                                secure_print(format!(
                                     "[{}]: {}",
                                     format_timestamp(entry.timestamp),
                                     entry.value
-                                );
+                                ))?;
                             }
                         } else {
                             println!("No key '{}' found!", parts[1]);
@@ -216,7 +231,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                         match storage_guard.search(pattern) {
                             Ok(keys) => {
                                 for key in keys {
-                                    println!("{}", key);
+                                    secure_print(format!("{}", key))?;
                                 }
                             }
                             Err(e) => println!("Error: {}", e),
@@ -228,7 +243,7 @@ fn run_interactive(mut password: String, filename: PathBuf, prompt: String) -> R
                             continue;
                         }
                         if storage_guard.delete(parts[1]) {
-                            println!("{} deleted", parts[1]);
+                            secure_print(format!("{} deleted", parts[1]))?;
                             save_storage(&cypher, &storage_guard, &filename)?;
                         } else {
                             println!("No such key '{}' found", parts[1]);

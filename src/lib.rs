@@ -196,7 +196,7 @@ impl EncryptionKey {
     }
 
     /// Derives a key from password and salt using Argon2id
-    pub fn from_password_with_salt(
+    fn from_password_with_salt(
         version: CypherVersion,
         password: &str,
         salt: &SaltBytes,
@@ -731,12 +731,11 @@ pub fn load_storage(password: &str, path: &Path) -> Result<Storage> {
         return Ok(Storage::new());
     }
 
-    let encrypted = fs::read(path)?;
-
     let key = Cypher::encryption_key_for_file(password, path)?;
 
     let cypher = Cypher::new(key);
 
+    let encrypted = fs::read(path)?;
     let decrypted = cypher.decrypt(&encrypted)?;
 
     deserialize_storage(&decrypted)
@@ -748,6 +747,7 @@ pub fn save_storage(cypher: &Cypher, storage: &Storage, path: &Path) -> Result<(
 
     let serialized = serialize_storage(storage);
     let encrypted = cypher.encrypt(&serialized)?;
+
     temp.write_all(&encrypted)?;
     temp.persist(path)?;
 
