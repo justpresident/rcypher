@@ -58,7 +58,7 @@ type HmacBytes = [u8; HMAC_SIZE];
 enum StoreVersion {
     Version4 = 4u16,
 }
-#[derive(Clone, Debug, TryFromPrimitive, Default)]
+#[derive(Clone, Debug, TryFromPrimitive, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum CypherVersion {
     /// Legacy version with simple password padding (no KDF)

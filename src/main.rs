@@ -15,6 +15,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+use tempfile::NamedTempFile;
 use zeroize::{Zeroize, Zeroizing};
 
 const STANDBY_TIMEOUT: u64 = 300;
@@ -61,6 +62,11 @@ struct CliParams {
 
     #[arg(long, default_value = "cypher > ")]
     prompt: String,
+
+    /// Upgrade file with stored secrets to the latest supported encryption format. The file will
+    /// be updated in place
+    #[arg(short, long, action)]
+    upgrade_storage: bool,
 
     /// File to encrypt/decrypt or use as storage
     filename: PathBuf,
@@ -244,9 +250,10 @@ impl InteractiveCli {
                                         println!("No keys matching '{}' found!", parts[1]);
                                     } else {
                                         for (key, val) in results {
-                                            let secret = val.decrypt(cypher)?;
+                                            let mut secret = val.decrypt(cypher)?;
 
                                             let mut output = format!("{}: {}", key, &*secret);
+                                            secret.zeroize();
                                             self.secure_print(&output)?;
                                             output.zeroize();
                                         }
@@ -271,11 +278,12 @@ impl InteractiveCli {
                                             self.secure_print(key)?;
                                         }
                                     } else if let Some((_, val)) = results.first() {
-                                        let secret = val.decrypt(cypher)?;
+                                        let mut secret = val.decrypt(cypher)?;
                                         copy_to_clipboard(
                                             secret.as_ref(),
                                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
                                         )?;
+                                        secret.zeroize();
                                     } else {
                                         println!("No key '{}' found!", parts[1]);
                                     }
@@ -291,12 +299,13 @@ impl InteractiveCli {
                             }
                             if let Some(entries) = storage_guard.history(parts[1]) {
                                 for entry in entries {
-                                    let secret = entry.value.decrypt(cypher)?;
+                                    let mut secret = entry.value.decrypt(cypher)?;
                                     let mut output = format!(
                                         "[{}]: {}",
                                         format_timestamp(entry.timestamp),
                                         &*secret
                                     );
+                                    secret.zeroize();
                                     self.secure_print(&output)?;
                                     output.zeroize();
                                 }
@@ -425,6 +434,9 @@ fn main() -> Result<()> {
     } else if params.decrypt {
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
         Zeroize::zeroize(&mut password);
+        if key.version < CypherVersion::V7WithKdf && !params.quiet {
+            println!("File is encrypted with deprecated algorithm. Please reencrypt now.");
+        }
 
         let cypher = Cypher::new(key);
 
@@ -443,6 +455,57 @@ fn main() -> Result<()> {
             cypher.decrypt_file(&params.filename, &mut *lock)?;
             lock.flush()?;
         };
+    } else if params.upgrade_storage {
+        let spinner = match params.quiet {
+            true => None,
+            false => {
+                let spinner = ProgressBar::new_spinner();
+                spinner.set_message("Deriving old encryption keys");
+                spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+
+                Some(spinner)
+            }
+        };
+        let old_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+
+        if let Some(s) = spinner.as_ref() {
+            s.set_message("Deriving new encryption keys");
+        }
+        let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
+        Zeroize::zeroize(&mut password);
+
+        if let Some(s) = spinner.as_ref() {
+            s.set_message("Converting");
+        }
+
+        let old_cypher = Cypher::new(old_key);
+        let old_storage = load_storage(&old_cypher, &params.filename)?;
+
+        let mut new_storage = Storage::new();
+        let new_cypher = Cypher::new(new_key);
+        for (key, entries) in old_storage.data {
+            for entry in entries {
+                let mut secret = entry.value.decrypt(&old_cypher)?;
+                let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
+                new_storage.put_ts(key.clone(), new_value, entry.timestamp);
+                secret.zeroize();
+            }
+        }
+        let dir = &params
+            .filename
+            .parent()
+            .expect("Can't get parent dir of a file");
+        let mut temp = NamedTempFile::new_in(dir)?;
+
+        let serialized = serialize_storage(&new_storage);
+        let encrypted = new_cypher.encrypt(&serialized)?;
+
+        temp.write_all(&encrypted)?;
+        temp.persist(&params.filename)?;
+
+        if let Some(s) = spinner.as_ref() {
+            s.finish_and_clear();
+        }
     } else {
         let interactive_cli = InteractiveCli {
             insecure_stdout: params.insecure_stdout,
@@ -461,6 +524,11 @@ fn main() -> Result<()> {
 
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
         Zeroize::zeroize(&mut password);
+        if key.version < CypherVersion::V7WithKdf && !params.quiet {
+            println!(
+                "File is encrypted with deprecated algorithm. Please reencrypt it with --upgrade-storage"
+            );
+        }
 
         if let Some(s) = spinner {
             s.finish_and_clear();
