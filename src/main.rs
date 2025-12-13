@@ -167,8 +167,8 @@ impl InteractiveCli {
         lock.flush()?;
         Ok(())
     }
-    pub fn run(&self, mut password: String, filename: PathBuf, prompt: String) -> Result<()> {
-        let storage = Arc::new(Mutex::new(load_storage(&password, &filename)?));
+    pub fn run(&self, cypher: &Cypher, filename: PathBuf, prompt: String) -> Result<()> {
+        let storage = Arc::new(Mutex::new(load_storage(cypher, &filename)?));
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -181,11 +181,6 @@ impl InteractiveCli {
         let completer = CypherCompleter::new(Arc::clone(&storage));
         let mut rl = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
-
-        let key = Cypher::encryption_key_for_file(&password, &filename)?;
-        Zeroize::zeroize(&mut password);
-
-        let cypher = Cypher::new(key);
 
         let start_time = SystemTime::now();
 
@@ -344,7 +339,12 @@ fn main() -> Result<()> {
         let interactive_cli = InteractiveCli {
             insecure_stdout: params.insecure_stdout,
         };
-        interactive_cli.run(password, params.filename, params.prompt)?;
+        let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+        Zeroize::zeroize(&mut password);
+
+        let cypher = Cypher::new(key);
+
+        interactive_cli.run(&cypher, params.filename, params.prompt)?;
     }
 
     Ok(())

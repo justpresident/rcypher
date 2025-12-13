@@ -737,14 +737,10 @@ pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
     Ok(storage)
 }
 
-pub fn load_storage(password: &str, path: &Path) -> Result<Storage> {
+pub fn load_storage(cypher: &Cypher, path: &Path) -> Result<Storage> {
     if !path.exists() {
         return Ok(Storage::new());
     }
-
-    let key = Cypher::encryption_key_for_file(password, path)?;
-
-    let cypher = Cypher::new(key);
 
     let encrypted = fs::read(path)?;
     let decrypted = cypher.decrypt(&encrypted)?;
