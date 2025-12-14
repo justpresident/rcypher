@@ -6,6 +6,85 @@ It is designed to protect secrets at rest using modern cryptography, while remai
 
 > ⚠️ Not audited. Use at your own risk.
 
+# Usage
+
+`rcypher` operates in two main modes:
+
+1. **Encrypted key-value storage** (default)
+2. **Full file encryption / decryption**
+
+## Encrypted storage (default)
+
+When no `--encrypt` or `--decrypt` flags are provided, `rcypher` treats the given file as an encrypted key-value storage.
+
+If the file does not exist, it will be created.
+
+```sh
+$ rcypher secrets.db
+Enter Password for secrets.db:
+cypher > put github.username my-username
+github.username stored
+
+cypher > put github.password my-password
+github.password stored
+
+cypher > put github.token my-secret-token
+github.token stored
+
+cypher > get github.*
+github.password: my-password
+github.token: my-secret-token
+github.username: my-username
+
+cypher > help
+USER COMMANDS:
+  put KEY VAL     - Store a key-value pair
+  get REGEXP      - Get values for keys matching regexp
+  copy KEY        - Copy key value into system clipboard
+  history KEY     - Show history of changes for a key
+  search REGEXP   - Search for keys matching regexp
+  del|rm KEY      - Delete a key
+  help            - Show this help
+```
+Secrets are:
+
+* encrypted at rest
+
+* never printed to stdout
+
+* written directly to the terminal (TTY)
+
+## Encrypting/Decrypting a file
+
+To encrypt an arbitrary file:
+
+```(sh)
+# To encrypt:
+$ rcypher --encrypt input.txt --output input.txt.enc
+Enter Password for input.txt:
+# To decrypt:
+$ rcypher --decrypt input.txt.enc --output input.txt
+Enter Password for input.txt.enc:
+```
+
+If --output is omitted, resulting file is written to stdout:
+```(sh)
+$ rcypher --encrypt input.txt > input.txt.enc
+$ rcypher --decrypt input.txt.enc > input.txt
+```
+
+## Upgrading storage format
+
+To upgrade an existing encrypted storage file to the latest supported format:
+```(sh)
+$ rcypher --upgrade-storage secrets.db
+Enter Password for secrets.db:
+```
+
+The file is updated in place.
+
+---
+
 # Features
 
 * Offline, single-file encrypted storage
