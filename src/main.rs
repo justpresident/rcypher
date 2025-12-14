@@ -202,18 +202,19 @@ impl InteractiveCli {
         let mut rl = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
 
-        let start_time = SystemTime::now();
+        let mut last_use_time = SystemTime::now();
 
         rl.clear_screen()?;
         loop {
             // Check timeout
-            if start_time.elapsed().unwrap().as_secs() > STANDBY_TIMEOUT {
+            if last_use_time.elapsed().unwrap().as_secs() > STANDBY_TIMEOUT {
                 break;
             }
 
             let readline = rl.readline(&prompt);
             match readline {
                 Ok(mut input_line) => {
+                    last_use_time = SystemTime::now();
                     let line = input_line.trim();
                     if line.is_empty() {
                         continue;
