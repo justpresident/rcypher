@@ -222,8 +222,7 @@ impl InteractiveCli {
         if let Some(entries) = storage.history(key) {
             for entry in entries {
                 let mut secret = entry.value.decrypt(&self.cypher)?;
-                let mut output =
-                    format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
+                let mut output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 self.secure_print(&output)?;
                 output.zeroize();

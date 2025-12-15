@@ -19,24 +19,19 @@
 
 // Module declarations
 mod constants;
-mod version;
 mod crypto;
 mod storage;
 mod utils;
+mod version;
 
 // Public re-exports (maintaining exact same API)
-pub use version::CypherVersion;
-pub use storage::{
-    EncryptedValue,
-    ValueEntry,
-    Storage,
-    serialize_storage,
-    deserialize_storage,
-    load_storage,
-    save_storage,
-};
 pub use crypto::{Cypher, EncryptionKey};
+pub use storage::{
+    EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
+    serialize_storage,
+};
 pub use utils::format_timestamp;
+pub use version::CypherVersion;
 
 // Re-export for convenience
 pub use anyhow::{Result, bail};

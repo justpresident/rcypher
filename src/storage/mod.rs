@@ -1,7 +1,7 @@
-mod value;
-mod store;
 mod serialization;
+mod store;
+mod value;
 
-pub use value::{EncryptedValue, ValueEntry};
+pub use serialization::{deserialize_storage, load_storage, save_storage, serialize_storage};
 pub use store::Storage;
-pub use serialization::{serialize_storage, deserialize_storage, load_storage, save_storage};
+pub use value::{EncryptedValue, ValueEntry};

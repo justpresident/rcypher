@@ -3,7 +3,7 @@ use bincode::{Decode, Encode};
 use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
 
-use crate::constants::{BLOCK_SIZE, SaltBytes, BlockBytes};
+use crate::constants::{BLOCK_SIZE, BlockBytes, SaltBytes};
 
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]

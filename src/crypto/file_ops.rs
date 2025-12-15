@@ -12,7 +12,7 @@ use zeroize::Zeroize;
 
 use super::cipher::Cypher;
 use crate::constants::{
-    Aes256CbcDec, Aes256CbcEnc, BlockBytes, HmacBytes, BLOCK_SIZE, HMAC_SIZE, READ_BUF_SIZE,
+    Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacBytes, READ_BUF_SIZE,
 };
 use crate::version::{CypherVersion, Version7Header};
 

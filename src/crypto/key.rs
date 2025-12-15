@@ -5,7 +5,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
-use crate::constants::{KeyBytes, SaltBytes, KEY_LEN};
+use crate::constants::{KEY_LEN, KeyBytes, SaltBytes};
 use crate::version::CypherVersion;
 
 #[derive(Clone, Default)]
