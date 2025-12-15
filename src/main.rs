@@ -63,146 +63,179 @@ struct CliParams {
     filename: PathBuf,
 }
 
-fn main() -> Result<()> {
-    let params = CliParams::parse();
-
-    let mut password = match params.insecure_password {
-        Some(passwd) => passwd.clone(),
-        None => rpassword::prompt_password(format!(
+fn get_password(params: &CliParams) -> Result<String> {
+    match &params.insecure_password {
+        Some(passwd) => Ok(passwd.clone()),
+        None => Ok(rpassword::prompt_password(format!(
             "Enter Password for {}: ",
             params.filename.display()
-        ))?,
+        ))?),
+    }
+}
+
+fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
+    let cypher = Cypher::new(key);
+
+    if params.output == "-" {
+        cypher.encrypt_file(&params.filename, &mut io::stdout())?;
+    } else {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&params.output)?;
+        let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
+            Ok(l) => l,
+            Err((_, e)) => bail!(e),
+        };
+        cypher.encrypt_file(&params.filename, &mut *lock)?;
+        lock.flush()?;
+    }
+    Ok(())
+}
+
+fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
+    if key.version < CypherVersion::V7WithKdf && !params.quiet {
+        println!("File is encrypted with deprecated algorithm. Please reencrypt now.");
+    }
+
+    let cypher = Cypher::new(key);
+
+    if params.output == "-" {
+        cypher.decrypt_file(&params.filename, &mut io::stdout())?;
+    } else {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&params.output)?;
+        let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
+            Ok(l) => l,
+            Err((_, e)) => bail!(e),
+        };
+        cypher.decrypt_file(&params.filename, &mut *lock)?;
+        lock.flush()?;
+    }
+    Ok(())
+}
+
+fn run_upgrade_storage(
+    params: &CliParams,
+    old_key: EncryptionKey,
+    new_key: EncryptionKey,
+) -> Result<()> {
+    let spinner = match params.quiet {
+        true => None,
+        false => {
+            let spinner = ProgressBar::new_spinner();
+            spinner.set_message("Converting");
+            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
+            Some(spinner)
+        }
     };
+
+    let old_cypher = Cypher::new(old_key);
+    let old_storage = load_storage(&old_cypher, &params.filename)?;
+
+    let mut new_storage = Storage::new();
+    let new_cypher = Cypher::new(new_key);
+    for (key, entries) in old_storage.data {
+        for entry in entries {
+            let mut secret = entry.value.decrypt(&old_cypher)?;
+            let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
+            new_storage.put_ts(key.clone(), new_value, entry.timestamp);
+            secret.zeroize();
+        }
+    }
+    let dir = &params
+        .filename
+        .parent()
+        .expect("Can't get parent dir of a file");
+    let mut temp = NamedTempFile::new_in(dir)?;
+
+    let serialized = serialize_storage(&new_storage);
+    let encrypted = new_cypher.encrypt(&serialized)?;
+
+    temp.write_all(&encrypted)?;
+    temp.persist(&params.filename)?;
+
+    if let Some(s) = spinner.as_ref() {
+        s.finish_and_clear();
+    }
+    Ok(())
+}
+
+fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
+    if key.version < CypherVersion::V7WithKdf && !params.quiet {
+        println!(
+            "File is encrypted with deprecated algorithm. Please reencrypt it with --upgrade-storage"
+        );
+    }
+
+    let cypher = Cypher::new(key);
+
+    let interactive_cli = InteractiveCli::new(
+        params.prompt.clone(),
+        params.insecure_stdout,
+        cypher,
+        params.filename.clone(),
+    );
+    interactive_cli.run()?;
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let params = CliParams::parse();
+    let mut password = get_password(&params)?;
 
     if params.encrypt {
         let key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
-        Zeroize::zeroize(&mut password);
-        let cypher = Cypher::new(key);
-
-        if params.output == "-" {
-            cypher.encrypt_file(&params.filename, &mut io::stdout())?;
-        } else {
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(params.output)?;
-            let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
-                Ok(l) => l,
-                Err((_, e)) => bail!(e),
-            };
-            cypher.encrypt_file(&params.filename, &mut *lock)?;
-            lock.flush()?;
-        };
+        password.zeroize();
+        run_encrypt(&params, key)
     } else if params.decrypt {
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
-        Zeroize::zeroize(&mut password);
-        if key.version < CypherVersion::V7WithKdf && !params.quiet {
-            println!("File is encrypted with deprecated algorithm. Please reencrypt now.");
-        }
-
-        let cypher = Cypher::new(key);
-
-        if params.output == "-" {
-            cypher.decrypt_file(&params.filename, &mut io::stdout())?;
-        } else {
-            let file = OpenOptions::new()
-                .create(true)
-                .truncate(true)
-                .write(true)
-                .open(params.output)?;
-            let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
-                Ok(l) => l,
-                Err((_, e)) => bail!(e),
-            };
-            cypher.decrypt_file(&params.filename, &mut *lock)?;
-            lock.flush()?;
-        };
+        password.zeroize();
+        run_decrypt(&params, key)
     } else if params.upgrade_storage {
-        let spinner = match params.quiet {
-            true => None,
-            false => {
-                let spinner = ProgressBar::new_spinner();
-                spinner.set_message("Deriving old encryption keys");
-                spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-                Some(spinner)
-            }
+        let spinner = if !params.quiet {
+            let s = ProgressBar::new_spinner();
+            s.set_message("Deriving old encryption keys");
+            s.enable_steady_tick(std::time::Duration::from_millis(100));
+            Some(s)
+        } else {
+            None
         };
+
         let old_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
 
         if let Some(s) = spinner.as_ref() {
             s.set_message("Deriving new encryption keys");
         }
         let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
-        Zeroize::zeroize(&mut password);
-
-        if let Some(s) = spinner.as_ref() {
-            s.set_message("Converting");
-        }
-
-        let old_cypher = Cypher::new(old_key);
-        let old_storage = load_storage(&old_cypher, &params.filename)?;
-
-        let mut new_storage = Storage::new();
-        let new_cypher = Cypher::new(new_key);
-        for (key, entries) in old_storage.data {
-            for entry in entries {
-                let mut secret = entry.value.decrypt(&old_cypher)?;
-                let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
-                new_storage.put_ts(key.clone(), new_value, entry.timestamp);
-                secret.zeroize();
-            }
-        }
-        let dir = &params
-            .filename
-            .parent()
-            .expect("Can't get parent dir of a file");
-        let mut temp = NamedTempFile::new_in(dir)?;
-
-        let serialized = serialize_storage(&new_storage);
-        let encrypted = new_cypher.encrypt(&serialized)?;
-
-        temp.write_all(&encrypted)?;
-        temp.persist(&params.filename)?;
-
-        if let Some(s) = spinner.as_ref() {
-            s.finish_and_clear();
-        }
-    } else {
-        let spinner = match params.quiet {
-            true => None,
-            false => {
-                let spinner = ProgressBar::new_spinner();
-                spinner.set_message("Deriving encryption key");
-                spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-
-                Some(spinner)
-            }
-        };
-
-        let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
-        Zeroize::zeroize(&mut password);
-        if key.version < CypherVersion::V7WithKdf && !params.quiet {
-            println!(
-                "File is encrypted with deprecated algorithm. Please reencrypt it with --upgrade-storage"
-            );
-        }
+        password.zeroize();
 
         if let Some(s) = spinner {
             s.finish_and_clear();
         }
 
-        let cypher = Cypher::new(key);
+        run_upgrade_storage(&params, old_key, new_key)
+    } else {
+        let spinner = if !params.quiet {
+            let s = ProgressBar::new_spinner();
+            s.set_message("Deriving encryption key");
+            s.enable_steady_tick(std::time::Duration::from_millis(100));
+            Some(s)
+        } else {
+            None
+        };
 
-        let interactive_cli = InteractiveCli::new(
-            params.prompt,
-            params.insecure_stdout,
-            cypher,
-            params.filename,
-        );
-        interactive_cli.run()?;
+        let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+        password.zeroize();
+
+        if let Some(s) = spinner {
+            s.finish_and_clear();
+        }
+
+        run_interactive(&params, key)
     }
-
-    Ok(())
 }
