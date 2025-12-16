@@ -22,20 +22,6 @@ If the file does not exist, it will be created.
 ```sh
 $ rcypher secrets.db
 Enter Password for secrets.db:
-cypher > put github.username my-username
-github.username stored
-
-cypher > put github.password my-password
-github.password stored
-
-cypher > put github.token my-secret-token
-github.token stored
-
-cypher > get github.*
-github.password: my-password
-github.token: my-secret-token
-github.username: my-username
-
 cypher > help
 USER COMMANDS:
   put KEY VAL     - Store a key-value pair
@@ -46,6 +32,7 @@ USER COMMANDS:
   del|rm KEY      - Delete a key
   help            - Show this help
 ```
+![demo](demo.gif)
 Secrets are:
 
 * encrypted at rest
