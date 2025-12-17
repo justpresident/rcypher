@@ -170,11 +170,16 @@ fn test_corrupted_file_hmac() {
 
     let decrypted = encrypt_decrypt(&input_path, &output_path, || {
         let mut file = fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .open(&output_path)
             .unwrap();
+        let mut buf = [0u8; 1];
         file.seek(SeekFrom::End(-1)).unwrap();
-        file.write(&[0u8]).unwrap();
+        file.read(&mut buf).unwrap();
+        buf[0] += 1;
+        file.seek(SeekFrom::End(-1)).unwrap();
+        file.write(&buf).unwrap();
     });
 
     assert!(decrypted.is_err());
