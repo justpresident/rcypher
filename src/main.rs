@@ -2,7 +2,6 @@ mod cli;
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use cli::InteractiveCli;
-use indicatif::ProgressBar;
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::*; // Import from lib
 use std::fs::OpenOptions;
@@ -124,15 +123,7 @@ fn run_upgrade_storage(
     old_key: EncryptionKey,
     new_key: EncryptionKey,
 ) -> Result<()> {
-    let spinner = match params.quiet {
-        true => None,
-        false => {
-            let spinner = ProgressBar::new_spinner();
-            spinner.set_message("Converting");
-            spinner.enable_steady_tick(std::time::Duration::from_millis(100));
-            Some(spinner)
-        }
-    };
+    let spinner = Spinner::new("Converting", params.quiet);
 
     let old_cypher = Cypher::new(old_key);
     let old_storage = load_storage(&old_cypher, &params.filename)?;
@@ -159,9 +150,7 @@ fn run_upgrade_storage(
     temp.write_all(&encrypted)?;
     temp.persist(&params.filename)?;
 
-    if let Some(s) = spinner.as_ref() {
-        s.finish_and_clear();
-    }
+    spinner.finish_and_clear();
     Ok(())
 }
 
@@ -191,43 +180,23 @@ fn main() -> Result<()> {
         password.zeroize();
         run_decrypt(&params, key)
     } else if params.upgrade_storage {
-        let spinner = if !params.quiet {
-            let s = ProgressBar::new_spinner();
-            s.set_message("Deriving old encryption keys");
-            s.enable_steady_tick(std::time::Duration::from_millis(100));
-            Some(s)
-        } else {
-            None
-        };
+        let spinner = Spinner::new("Deriving old encryption keys", params.quiet);
 
         let old_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
 
-        if let Some(s) = spinner.as_ref() {
-            s.set_message("Deriving new encryption keys");
-        }
+        spinner.set_message("Deriving new encryption keys");
         let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
         password.zeroize();
 
-        if let Some(s) = spinner {
-            s.finish_and_clear();
-        }
+        spinner.finish_and_clear();
 
         run_upgrade_storage(&params, old_key, new_key)
     } else {
-        let spinner = if !params.quiet {
-            let s = ProgressBar::new_spinner();
-            s.set_message("Deriving encryption key");
-            s.enable_steady_tick(std::time::Duration::from_millis(100));
-            Some(s)
-        } else {
-            None
-        };
+        let spinner = Spinner::new("Deriving encryption key", params.quiet);
 
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
 
-        if let Some(s) = spinner {
-            s.finish_and_clear();
-        }
+        spinner.finish_and_clear();
 
         // Check if storage needs upgrade in interactive mode
         if key.version < CypherVersion::V7WithKdf && !params.quiet {
@@ -239,23 +208,14 @@ fn main() -> Result<()> {
             io::stdin().read_line(&mut input)?;
 
             if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
-                let spinner = if !params.quiet {
-                    let s = ProgressBar::new_spinner();
-                    s.set_message("Deriving new encryption keys");
-                    s.enable_steady_tick(std::time::Duration::from_millis(100));
-                    Some(s)
-                } else {
-                    None
-                };
+                let spinner = Spinner::new("Deriving new encryption keys", params.quiet);
 
                 let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
                 password.zeroize();
 
-                run_upgrade_storage(&params, key, new_key.clone())?;
+                spinner.finish_and_clear();
 
-                if let Some(s) = spinner {
-                    s.finish_and_clear();
-                }
+                run_upgrade_storage(&params, key, new_key.clone())?;
 
                 run_interactive(&params, new_key)
             } else {
