@@ -159,7 +159,7 @@ fn apply_all_updates(
         let mut decrypted = update.new_value.decrypt(update_cypher)?;
         let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
         decrypted.zeroize();
-        main_storage.put(update.key, re_encrypted);
+        main_storage.put_ts(update.key, re_encrypted, update.new_timestamp);
     }
 
     save_storage(main_cypher, main_storage, filename)?;
@@ -193,7 +193,7 @@ fn apply_updates_interactive(
                 let mut decrypted = update.new_value.decrypt(update_cypher)?;
                 let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
                 decrypted.zeroize();
-                main_storage.put(update.key, re_encrypted);
+                main_storage.put_ts(update.key, re_encrypted, update.new_timestamp);
                 applied += 1;
                 println!("✓ Applied");
             }
