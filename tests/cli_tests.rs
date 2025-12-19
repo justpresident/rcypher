@@ -1,3 +1,5 @@
+use rcypher::save_storage;
+use rcypher::{Cypher, CypherVersion, EncryptedValue, EncryptionKey, Storage};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -347,4 +349,48 @@ fn test_update_with_cancel() {
             || lines[0].contains("Not found")
             || lines[0].contains("No keys matching")
     );
+}
+
+#[test]
+fn test_upgrade_storage() {
+    let (_dir, storage_path) = temp_test_file();
+
+    // Create a legacy format storage file
+    let legacy_key =
+        EncryptionKey::from_password(CypherVersion::LegacyWithoutKdf, "test_password").unwrap();
+    let legacy_cypher = Cypher::new(legacy_key);
+
+    let mut storage = Storage::new();
+    storage.put(
+        "key1".to_string(),
+        EncryptedValue::encrypt(&legacy_cypher, "value1").unwrap(),
+    );
+    storage.put(
+        "key2".to_string(),
+        EncryptedValue::encrypt(&legacy_cypher, "value2").unwrap(),
+    );
+
+    save_storage(&legacy_cypher, &storage, &storage_path).unwrap();
+
+    // Run upgrade command
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--upgrade-storage")
+        .arg("--quiet")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg(&storage_path)
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+
+    // Verify the file was upgraded by trying to read it with new format
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get key1\n");
+    commands.extend_from_slice(b"get key2\n");
+    let lines = run_commands(&storage_path, commands);
+
+    assert_eq!(lines[0], "key1: value1");
+    assert_eq!(lines[1], "key2: value2");
 }

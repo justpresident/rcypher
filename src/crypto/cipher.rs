@@ -117,11 +117,36 @@ impl Cypher {
 
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
         match self.key.version() {
-            CypherVersion::LegacyWithoutKdf => {
-                bail!("Encryption with legacy version is not supported")
-            }
+            CypherVersion::LegacyWithoutKdf => self.encrypt_legacy(data),
             CypherVersion::V7WithKdf => self.encrypt_v7(data),
         }
+    }
+
+    fn encrypt_legacy(&self, data: &[u8]) -> Result<Vec<u8>> {
+        let mut result = Vec::new();
+
+        // Pad data to block size
+        #[allow(clippy::cast_possible_truncation)]
+        let pad_len = (BLOCK_SIZE - (data.len() % BLOCK_SIZE)) as u8;
+
+        // Write header: version (2 bytes) + pad_len (1 byte)
+        result.extend_from_slice(&(CypherVersion::LegacyWithoutKdf as u16).to_be_bytes());
+        result.push(pad_len);
+
+        // Prepare data with padding (zeros for legacy)
+        let mut padded_data = data.to_vec();
+        padded_data.extend(std::iter::repeat_n(0, pad_len as usize));
+        let len = padded_data.len();
+
+        // Encrypt with zero IV (legacy behavior)
+        let iv = BlockBytes::default();
+        let cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &iv.into());
+        let encrypted = cipher
+            .encrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut padded_data, len)
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
+
+        result.extend_from_slice(encrypted);
+        Ok(result)
     }
 
     fn encrypt_v7(&self, data: &[u8]) -> Result<Vec<u8>> {
