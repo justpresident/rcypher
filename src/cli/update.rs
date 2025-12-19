@@ -290,3 +290,139 @@ pub fn run_update_with(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{CypherVersion, Storage};
+
+    fn create_test_cypher() -> Cypher {
+        let key = EncryptionKey::from_password(CypherVersion::default(), "test_password")
+            .expect("Failed to create key");
+        Cypher::new(key)
+    }
+
+    #[test]
+    fn test_update_entry_is_new_key() {
+        let cypher = create_test_cypher();
+        let value = EncryptedValue::encrypt(&cypher, "test").unwrap();
+
+        let new_entry = UpdateEntry {
+            key: "key1".to_string(),
+            new_value: value.clone(),
+            new_timestamp: 100,
+            old_value: None,
+            old_timestamp: None,
+        };
+
+        assert!(new_entry.is_new_key());
+
+        let existing_entry = UpdateEntry {
+            key: "key2".to_string(),
+            new_value: value.clone(),
+            new_timestamp: 100,
+            old_value: Some(value),
+            old_timestamp: Some(50),
+        };
+
+        assert!(!existing_entry.is_new_key());
+    }
+
+    #[test]
+    fn test_find_updates_new_keys() {
+        let cypher = create_test_cypher();
+        let mut main_storage = Storage::new();
+        let mut update_storage = Storage::new();
+
+        // Main has key1, update has key1 and key2
+        main_storage.put(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+        );
+        update_storage.put(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+        );
+        update_storage.put(
+            "key2".to_string(),
+            EncryptedValue::encrypt(&cypher, "value2").unwrap(),
+        );
+
+        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].key, "key2");
+        assert!(updates[0].is_new_key());
+    }
+
+    #[test]
+    fn test_find_updates_conflicts() {
+        let cypher = create_test_cypher();
+        let mut main_storage = Storage::new();
+        let mut update_storage = Storage::new();
+
+        // Both have key1 but with different values
+        main_storage.put_ts(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "old_value").unwrap(),
+            100,
+        );
+        update_storage.put_ts(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "new_value").unwrap(),
+            200,
+        );
+
+        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].key, "key1");
+        assert!(!updates[0].is_new_key());
+    }
+
+    #[test]
+    fn test_find_updates_no_changes() {
+        let cypher = create_test_cypher();
+        let mut main_storage = Storage::new();
+        let mut update_storage = Storage::new();
+
+        // Both have same key with same value
+        main_storage.put(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+        );
+        update_storage.put(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+        );
+
+        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+
+        assert_eq!(updates.len(), 0);
+    }
+
+    #[test]
+    fn test_find_updates_ignores_older_timestamp() {
+        let cypher = create_test_cypher();
+        let mut main_storage = Storage::new();
+        let mut update_storage = Storage::new();
+
+        // Update has older value
+        update_storage.put_ts(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "old_value").unwrap(),
+            100,
+        );
+
+        main_storage.put_ts(
+            "key1".to_string(),
+            EncryptedValue::encrypt(&cypher, "new_value").unwrap(),
+            200,
+        );
+
+        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+
+        // Should not include update since main is newer
+        assert_eq!(updates.len(), 0);
+    }
+}
