@@ -62,13 +62,52 @@ $ rcypher --decrypt input.txt.enc > input.txt
 
 ## Upgrading storage format
 
-To upgrade an existing encrypted storage file to the latest supported format:
-```(sh)
+When opening an encrypted storage file with an outdated encryption format, `rcypher` automatically detects this and prompts you to upgrade:
+
+```sh
+$ rcypher secrets.db
+Enter Password for secrets.db:
+File is encrypted with deprecated algorithm.
+Would you like to upgrade it now? (y/n): y
+```
+
+The file is upgraded in place using the latest encryption format (Argon2id + AES-256 + HMAC).
+
+You can also upgrade manually without entering interactive mode:
+```sh
 $ rcypher --upgrade-storage secrets.db
 Enter Password for secrets.db:
 ```
 
-The file is updated in place.
+## Merging conflicting storage files
+
+If you synchronize your storage file across devices (e.g., via Dropbox, Syncthing), conflicts may occur when changes are made on different devices. The `--update-with` option helps merge these conflicts:
+
+```sh
+$ rcypher secrets.db --update-with "secrets (conflicted copy).db"
+Enter Password for secrets.db:
+
+Found 3 keys with different values:
+  [NEW] api_token
+    New: sk-abc123def456 (2025-12-19 14:30:00)
+  [CONFLICT] github_pat
+    Current: ghp_old_token (2025-12-18 10:15:00)
+    Update:  ghp_new_token (2025-12-19 14:25:00)
+  [CONFLICT] db_password
+    Current: old_pass (2025-12-17 08:00:00)
+    Update:  new_pass (2025-12-19 14:28:00)
+
+Summary: 1 new key, 2 conflicts
+
+Apply updates? (a)ll at once, (i)nteractive, (c)ancel [a/i/c]:
+```
+
+**Merge modes:**
+- **(a)ll at once**: Apply all updates from the conflicted file automatically
+- **(i)nteractive**: Review each change individually, accepting or rejecting one by one
+- **(c)ancel**: Exit without making any changes
+
+**Security note**: Values are displayed during comparison to help you make informed decisions. Passwords and sensitive data are written directly to the terminal (TTY), not to stdout, preventing accidental logging. Use `--insecure-stdout` only in testing environments.
 
 ---
 
@@ -93,6 +132,10 @@ The file is updated in place.
 * Minimal dependencies and attack surface
 
 * Explicit file format versioning
+
+* Automatic detection and upgrade of legacy storage formats
+
+* Conflict resolution for synchronized files (e.g., Dropbox conflicts)
 
 # Threat Model
 
@@ -273,7 +316,7 @@ Tests are located in the tests/ directory.
 
 # Limitations
 
-* No synchronization or multi-device support
+* No automatic synchronization (manual file sync tools like Dropbox/Syncthing can be used with conflict resolution)
 
 * No secret sharing or recovery
 

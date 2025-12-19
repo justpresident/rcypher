@@ -30,7 +30,7 @@ pub use storage::{
     EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
     serialize_storage,
 };
-pub use utils::{Spinner, format_timestamp};
+pub use utils::{Spinner, format_timestamp, secure_print};
 pub use version::CypherVersion;
 
 // Re-export for convenience

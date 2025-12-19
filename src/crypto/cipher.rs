@@ -30,7 +30,7 @@ impl Cypher {
     }
 
     pub fn encryption_key_for_file(password: &str, path: &Path) -> Result<EncryptionKey> {
-        let version = Self::probe_version(path, CypherVersion::V7WithKdf)?;
+        let version = Self::probe_version(path)?;
 
         let key = match version {
             CypherVersion::LegacyWithoutKdf => EncryptionKey::from_password(version, password)?,
@@ -53,9 +53,9 @@ impl Cypher {
     }
 
     /// Probes a file to determine its encryption version
-    fn probe_version(path: &Path, default: CypherVersion) -> Result<CypherVersion> {
+    fn probe_version(path: &Path) -> Result<CypherVersion> {
         if !path.exists() {
-            return Ok(default);
+            return Ok(CypherVersion::default());
         }
         let mut file = fs::File::open(path)?;
         let mut version_bytes = [0u8; 2];

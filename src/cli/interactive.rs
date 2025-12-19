@@ -6,16 +6,14 @@ use crate::cli::completer::CypherCompleter;
 use crate::format_timestamp;
 use crate::load_storage;
 use crate::save_storage;
+use crate::secure_print;
 use anyhow::{Result, bail};
 use arboard::Clipboard;
-use nix::fcntl::{Flock, FlockArg};
 use rcypher::Storage;
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
-use std::fs::OpenOptions;
-use std::io::Write as _;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -36,25 +34,6 @@ impl InteractiveCli {
             cypher,
             filename,
         }
-    }
-
-    // Prints directly to tty to avoid
-    // - snooping passwords from process stdout
-    // - lingering passwords in memory
-    fn secure_print(&self, what: impl AsRef<str>) -> Result<()> {
-        if self.insecure_stdout {
-            println!("{}", what.as_ref());
-            return Ok(());
-        }
-        let tty = OpenOptions::new().write(true).open("/dev/tty")?;
-        let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
-            Ok(l) => l,
-            Err((_, e)) => bail!(e),
-        };
-        lock.write_all(what.as_ref().as_bytes())?;
-        lock.write_all(b"\n")?;
-        lock.flush()?;
-        Ok(())
     }
 
     pub fn run(&self) -> Result<()> {
@@ -167,7 +146,7 @@ impl InteractiveCli {
         let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
         storage.put(key.to_string(), encrypted_value);
 
-        self.secure_print(format!("{} stored", key))?;
+        secure_print(format!("{} stored", key), self.insecure_stdout)?;
 
         save_storage(&self.cypher, storage, &self.filename)?;
         Ok(())
@@ -184,7 +163,7 @@ impl InteractiveCli {
 
                         let mut output = format!("{}: {}", key, &*secret);
                         secret.zeroize();
-                        self.secure_print(&output)?;
+                        secure_print(&output, self.insecure_stdout)?;
                         output.zeroize();
                     }
                 }
@@ -200,7 +179,7 @@ impl InteractiveCli {
                 if results.len() > 1 {
                     println!("Multiple keys found! Plese specify exact key name:");
                     for (key, _) in results {
-                        self.secure_print(key)?;
+                        secure_print(key, self.insecure_stdout)?;
                     }
                 } else if let Some((_, val)) = results.first() {
                     let mut secret = val.decrypt(&self.cypher)?;
@@ -224,7 +203,7 @@ impl InteractiveCli {
                 let mut secret = entry.value.decrypt(&self.cypher)?;
                 let mut output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
-                self.secure_print(&output)?;
+                secure_print(&output, self.insecure_stdout)?;
                 output.zeroize();
             }
         } else {
@@ -237,7 +216,7 @@ impl InteractiveCli {
         match storage.search(pattern) {
             Ok(keys) => {
                 for key in keys {
-                    self.secure_print(key)?;
+                    secure_print(key, self.insecure_stdout)?;
                 }
             }
             Err(e) => bail!("Error: {}", e),
@@ -247,7 +226,7 @@ impl InteractiveCli {
 
     fn cmd_delete(&self, key: &str, storage: &mut Storage) -> Result<()> {
         if storage.delete(key) {
-            self.secure_print(format!("{} deleted", key))?;
+            secure_print(format!("{} deleted", key), self.insecure_stdout)?;
             save_storage(&self.cypher, storage, &self.filename)?;
         } else {
             bail!("No such key '{}' found", key);

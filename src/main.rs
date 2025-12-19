@@ -58,6 +58,11 @@ struct CliParams {
     #[arg(short, long, action)]
     upgrade_storage: bool,
 
+    /// Update storage with entries from another encrypted storage file (e.g., Dropbox conflict copy).
+    /// Entries with newer timestamps will be merged into the main file
+    #[arg(long)]
+    update_with: Option<PathBuf>,
+
     /// File to encrypt/decrypt or use as storage
     filename: PathBuf,
 }
@@ -94,7 +99,7 @@ fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
 }
 
 fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
-    if key.version < CypherVersion::V7WithKdf && !params.quiet {
+    if key.version < CypherVersion::default() && !params.quiet {
         println!("File is encrypted with deprecated algorithm. Please reencrypt now.");
     }
 
@@ -172,20 +177,42 @@ fn main() -> Result<()> {
     let mut password = get_password(&params)?;
 
     if params.encrypt {
-        let key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
+        let key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
         password.zeroize();
         run_encrypt(&params, key)
     } else if params.decrypt {
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
         password.zeroize();
         run_decrypt(&params, key)
+    } else if params.update_with.is_some() {
+        let spinner = Spinner::new("Deriving encryption keys", params.quiet);
+
+        let main_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+
+        spinner.set_message("Deriving encryption key for update file");
+        let update_file = params
+            .update_with
+            .as_ref()
+            .expect("update_with must be set");
+        let update_key = Cypher::encryption_key_for_file(&password, update_file)?;
+        password.zeroize();
+
+        spinner.finish_and_clear();
+
+        cli::update::run_update_with(
+            &params.filename,
+            update_file,
+            main_key,
+            update_key,
+            params.insecure_stdout,
+        )
     } else if params.upgrade_storage {
         let spinner = Spinner::new("Deriving old encryption keys", params.quiet);
 
         let old_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
 
         spinner.set_message("Deriving new encryption keys");
-        let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
+        let new_key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
         password.zeroize();
 
         spinner.finish_and_clear();
@@ -199,7 +226,7 @@ fn main() -> Result<()> {
         spinner.finish_and_clear();
 
         // Check if storage needs upgrade in interactive mode
-        if key.version < CypherVersion::V7WithKdf && !params.quiet {
+        if key.version < CypherVersion::default() && !params.quiet {
             println!("File is encrypted with deprecated algorithm.");
             print!("Would you like to upgrade it now? (y/n): ");
             io::stdout().flush()?;
@@ -210,7 +237,7 @@ fn main() -> Result<()> {
             if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
                 let spinner = Spinner::new("Deriving new encryption keys", params.quiet);
 
-                let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
+                let new_key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
                 password.zeroize();
 
                 spinner.finish_and_clear();
