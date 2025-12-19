@@ -54,7 +54,7 @@ jobs:
 
       - name: Generate coverage
         run: |
-          cargo tarpaulin --out xml --output-dir coverage --all-features
+          cargo tarpaulin --out xml --output-dir coverage --all-features --engine llvm --run-types AllTargets --workspace --exclude-files tests/* --timeout 300
 
       - name: Extract coverage percentage
         id: coverage
