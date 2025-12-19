@@ -1,9 +1,11 @@
 use anyhow::{Result, bail};
+use arboard::Clipboard;
 use chrono::{Local, TimeZone};
 use indicatif::ProgressBar;
 use nix::fcntl::{Flock, FlockArg};
 use std::fs::OpenOptions;
 use std::io::Write;
+use zeroize::Zeroizing;
 
 pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
@@ -62,4 +64,30 @@ impl Spinner {
             s.finish_and_clear();
         }
     }
+}
+
+pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) -> Result<()> {
+    println!(
+        "Secret copied to the clipboard and will be automatically removed in {} seconds.\n
+        Warning: Clipboard managers may retain history",
+        ttl.as_secs()
+    );
+
+    let copy = Zeroizing::from(secret.to_string());
+
+    // Spawn a background thread to clear clipboard after TTL
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = Clipboard::new() {
+            let _ = clipboard.set_text(copy.to_string());
+            std::thread::sleep(ttl);
+            if clipboard.get_text().ok().as_deref() == Some(copy.as_ref()) {
+                let _ = clipboard.set_text("deleted");
+                std::thread::sleep(std::time::Duration::from_millis(1000));
+            }
+        } else {
+            println!("Can't access clipboard");
+        }
+    });
+
+    Ok(())
 }

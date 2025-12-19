@@ -1,15 +1,13 @@
 use crate::Cypher;
 use crate::EncryptedValue;
+use crate::Storage;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::STANDBY_TIMEOUT;
 use crate::cli::completer::CypherCompleter;
-use crate::format_timestamp;
+use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
 use crate::load_storage;
 use crate::save_storage;
-use crate::secure_print;
 use anyhow::{Result, bail};
-use arboard::Clipboard;
-use rcypher::Storage;
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
@@ -17,7 +15,7 @@ use rustyline::error::ReadlineError;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroize;
 
 pub struct InteractiveCli {
     prompt: String,
@@ -27,7 +25,12 @@ pub struct InteractiveCli {
 }
 
 impl InteractiveCli {
-    pub fn new(prompt: String, insecure_stdout: bool, cypher: Cypher, filename: PathBuf) -> Self {
+    pub const fn new(
+        prompt: String,
+        insecure_stdout: bool,
+        cypher: Cypher,
+        filename: PathBuf,
+    ) -> Self {
         Self {
             prompt,
             insecure_stdout,
@@ -56,7 +59,12 @@ impl InteractiveCli {
         rl.clear_screen()?;
         loop {
             // Check timeout
-            if last_use_time.elapsed().unwrap().as_secs() > STANDBY_TIMEOUT {
+            if last_use_time
+                .elapsed()
+                .expect("time moves forward")
+                .as_secs()
+                > STANDBY_TIMEOUT
+            {
                 break;
             }
 
@@ -71,18 +79,18 @@ impl InteractiveCli {
 
                     rl.clear_screen()?;
 
-                    let mut storage_guard = storage.lock().unwrap();
+                    let mut storage_guard = storage.lock().expect("able to lock");
                     if let Err(err) = self.process_cmd(line, &mut storage_guard) {
-                        println!("{}", err);
+                        println!("{err}");
                     }
 
                     input_line.zeroize();
                 }
-                Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
                     break;
                 }
                 Err(err) => {
-                    println!("Error: {:?}", err);
+                    println!("Error: {err:?}");
                     break;
                 }
             }
@@ -137,7 +145,7 @@ impl InteractiveCli {
                 Ok(())
             }
             _ => {
-                bail!("No such command '{}'\n", cmd);
+                bail!("No such command '{cmd}'\n");
             }
         }
     }
@@ -146,34 +154,33 @@ impl InteractiveCli {
         let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
         storage.put(key.to_string(), encrypted_value);
 
-        secure_print(format!("{} stored", key), self.insecure_stdout)?;
+        secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
         save_storage(&self.cypher, storage, &self.filename)?;
         Ok(())
     }
 
-    fn cmd_get(&self, pattern: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_get(&self, pattern: &str, storage: &Storage) -> Result<()> {
         match storage.get(pattern) {
             Ok(results) => {
                 if results.is_empty() {
-                    bail!("No keys matching '{}' found!", pattern);
-                } else {
-                    for (key, val) in results {
-                        let mut secret = val.decrypt(&self.cypher)?;
+                    bail!("No keys matching '{pattern}' found!");
+                }
+                for (key, val) in results {
+                    let mut secret = val.decrypt(&self.cypher)?;
 
-                        let mut output = format!("{}: {}", key, &*secret);
-                        secret.zeroize();
-                        secure_print(&output, self.insecure_stdout)?;
-                        output.zeroize();
-                    }
+                    let mut output = format!("{}: {}", key, &*secret);
+                    secret.zeroize();
+                    secure_print(&output, self.insecure_stdout)?;
+                    output.zeroize();
                 }
             }
-            Err(e) => bail!("Error: {}", e),
+            Err(e) => bail!("Error: {e}"),
         }
         Ok(())
     }
 
-    fn cmd_copy(&self, key: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_copy(&self, key: &str, storage: &Storage) -> Result<()> {
         match storage.get(key) {
             Ok(results) => {
                 if results.len() > 1 {
@@ -189,15 +196,15 @@ impl InteractiveCli {
                     )?;
                     secret.zeroize();
                 } else {
-                    bail!("No key '{}' found!", key);
+                    bail!("No key '{key}' found!");
                 }
             }
-            Err(e) => bail!("Error: {}", e),
+            Err(e) => bail!("Error: {e}"),
         }
         Ok(())
     }
 
-    fn cmd_history(&self, key: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_history(&self, key: &str, storage: &Storage) -> Result<()> {
         if let Some(entries) = storage.history(key) {
             for entry in entries {
                 let mut secret = entry.value.decrypt(&self.cypher)?;
@@ -207,29 +214,29 @@ impl InteractiveCli {
                 output.zeroize();
             }
         } else {
-            bail!("No key '{}' found!", key);
+            bail!("No key '{key}' found!");
         }
         Ok(())
     }
 
-    fn cmd_search(&self, pattern: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_search(&self, pattern: &str, storage: &Storage) -> Result<()> {
         match storage.search(pattern) {
             Ok(keys) => {
                 for key in keys {
                     secure_print(key, self.insecure_stdout)?;
                 }
             }
-            Err(e) => bail!("Error: {}", e),
+            Err(e) => bail!("Error: {e}"),
         }
         Ok(())
     }
 
     fn cmd_delete(&self, key: &str, storage: &mut Storage) -> Result<()> {
         if storage.delete(key) {
-            secure_print(format!("{} deleted", key), self.insecure_stdout)?;
+            secure_print(format!("{key} deleted"), self.insecure_stdout)?;
             save_storage(&self.cypher, storage, &self.filename)?;
         } else {
-            bail!("No such key '{}' found", key);
+            bail!("No such key '{key}' found");
         }
         Ok(())
     }
@@ -248,30 +255,4 @@ fn print_help() {
     println!("  search REGEXP   - Search for keys matching regexp");
     println!("  del|rm KEY      - Delete a key");
     println!("  help            - Show this help");
-}
-
-fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) -> anyhow::Result<()> {
-    println!(
-        "Secret copied to the clipboard and will be automatically removed in {} seconds.\n
-        Warning: Clipboard managers may retain history",
-        ttl.as_secs()
-    );
-
-    let copy = Zeroizing::from(secret.to_string());
-
-    // Spawn a background thread to clear clipboard after TTL
-    std::thread::spawn(move || {
-        if let Ok(mut clipboard) = Clipboard::new() {
-            let _ = clipboard.set_text(copy.to_string());
-            std::thread::sleep(ttl);
-            if clipboard.get_text().ok().as_deref() == Some(copy.as_ref()) {
-                let _ = clipboard.set_text("deleted");
-                std::thread::sleep(std::time::Duration::from_millis(1000));
-            }
-        } else {
-            println!("Can't access clipboard");
-        }
-    });
-
-    Ok(())
 }

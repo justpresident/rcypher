@@ -1,7 +1,5 @@
-use crate::{
-    Cypher, EncryptedValue, EncryptionKey, Storage, format_timestamp, load_storage, save_storage,
-    secure_print,
-};
+use crate::cli::utils::{format_timestamp, secure_print};
+use crate::{Cypher, EncryptedValue, EncryptionKey, Storage, load_storage, save_storage};
 use anyhow::Result;
 use std::io;
 use std::io::Write;
@@ -18,7 +16,7 @@ struct UpdateEntry {
 }
 
 impl UpdateEntry {
-    fn is_new_key(&self) -> bool {
+    const fn is_new_key(&self) -> bool {
         self.old_value.is_none()
     }
 }
@@ -39,7 +37,7 @@ fn find_updates(
             .get(key)
             .and_then(|entries| entries.last());
 
-        let should_update = if let Some(main_entry) = main_latest {
+        let should_update = main_latest.is_none_or(|main_entry| {
             // Key exists - decrypt and compare values
             let main_decrypted = main_entry
                 .value
@@ -52,10 +50,7 @@ fn find_updates(
 
             // Update if values differ and update is newer or same timestamp
             *main_decrypted != *update_decrypted && update_latest.timestamp >= main_entry.timestamp
-        } else {
-            // New key - always include
-            true
-        };
+        });
 
         if should_update {
             updates.push(UpdateEntry {
@@ -93,14 +88,18 @@ fn display_update_entry(
             insecure_stdout,
         )?;
     } else {
-        let old_decrypted = update.old_value.as_ref().unwrap().decrypt(main_cypher)?;
+        let old_decrypted = update
+            .old_value
+            .as_ref()
+            .expect("old value exists")
+            .decrypt(main_cypher)?;
         let new_decrypted = update.new_value.decrypt(update_cypher)?;
         secure_print(
             format!(
                 "  [CONFLICT] {}\n    Current: {} ({})\n    Update:  {} ({})",
                 update.key,
                 &*old_decrypted,
-                format_timestamp(update.old_timestamp.unwrap()),
+                format_timestamp(update.old_timestamp.expect("old timestamp exists")),
                 &*new_decrypted,
                 format_timestamp(update.new_timestamp)
             ),

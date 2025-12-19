@@ -7,13 +7,13 @@ use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
-pub(crate) struct CypherCompleter {
+pub struct CypherCompleter {
     storage: Arc<Mutex<Storage>>,
 }
 
 impl CypherCompleter {
-    pub fn new(storage: Arc<Mutex<Storage>>) -> Self {
-        CypherCompleter { storage }
+    pub const fn new(storage: Arc<Mutex<Storage>>) -> Self {
+        Self { storage }
     }
 }
 
@@ -40,8 +40,8 @@ impl Completer for CypherCompleter {
                 .iter()
                 .filter(|cmd| cmd.starts_with(prefix))
                 .map(|cmd| Pair {
-                    display: cmd.to_string(),
-                    replacement: cmd.to_string(),
+                    display: (*cmd).to_string(),
+                    replacement: (*cmd).to_string(),
                 })
                 .collect();
 
@@ -59,8 +59,9 @@ impl Completer for CypherCompleter {
                     if parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')) {
                         let prefix = if parts.len() == 2 { parts[1] } else { "" };
 
-                        let storage = self.storage.lock().unwrap();
+                        let storage = self.storage.lock().expect("able to take a lock");
                         let mut keys: Vec<String> = storage.data.keys().cloned().collect();
+                        drop(storage);
                         keys.sort();
 
                         let matches: Vec<Pair> = keys

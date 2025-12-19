@@ -18,19 +18,19 @@
 )]
 
 // Module declarations
+pub mod cli;
 mod constants;
 mod crypto;
 mod storage;
-mod utils;
 mod version;
 
 // Public re-exports (maintaining exact same API)
+pub use cli::utils::{Spinner, copy_to_clipboard, format_timestamp, secure_print};
 pub use crypto::{Cypher, EncryptionKey};
 pub use storage::{
     EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
     serialize_storage,
 };
-pub use utils::{Spinner, format_timestamp, secure_print};
 pub use version::CypherVersion;
 
 // Re-export for convenience

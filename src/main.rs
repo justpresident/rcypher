@@ -1,8 +1,7 @@
-mod cli;
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
-use cli::InteractiveCli;
 use nix::fcntl::{Flock, FlockArg};
+use rcypher::cli;
 use rcypher::*; // Import from lib
 use std::fs::OpenOptions;
 use std::io;
@@ -162,7 +161,7 @@ fn run_upgrade_storage(
 fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
     let cypher = Cypher::new(key);
 
-    let interactive_cli = InteractiveCli::new(
+    let interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
         cypher,
