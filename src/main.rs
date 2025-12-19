@@ -166,12 +166,6 @@ fn run_upgrade_storage(
 }
 
 fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
-    if key.version < CypherVersion::V7WithKdf && !params.quiet {
-        println!(
-            "File is encrypted with deprecated algorithm. Please reencrypt it with --upgrade-storage"
-        );
-    }
-
     let cypher = Cypher::new(key);
 
     let interactive_cli = InteractiveCli::new(
@@ -230,12 +224,47 @@ fn main() -> Result<()> {
         };
 
         let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
-        password.zeroize();
 
         if let Some(s) = spinner {
             s.finish_and_clear();
         }
 
-        run_interactive(&params, key)
+        // Check if storage needs upgrade in interactive mode
+        if key.version < CypherVersion::V7WithKdf && !params.quiet {
+            println!("File is encrypted with deprecated algorithm.");
+            print!("Would you like to upgrade it now? (y/n): ");
+            io::stdout().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+
+            if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
+                let spinner = if !params.quiet {
+                    let s = ProgressBar::new_spinner();
+                    s.set_message("Deriving new encryption keys");
+                    s.enable_steady_tick(std::time::Duration::from_millis(100));
+                    Some(s)
+                } else {
+                    None
+                };
+
+                let new_key = EncryptionKey::from_password(CypherVersion::V7WithKdf, &password)?;
+                password.zeroize();
+
+                run_upgrade_storage(&params, key, new_key.clone())?;
+
+                if let Some(s) = spinner {
+                    s.finish_and_clear();
+                }
+
+                run_interactive(&params, new_key)
+            } else {
+                password.zeroize();
+                run_interactive(&params, key)
+            }
+        } else {
+            password.zeroize();
+            run_interactive(&params, key)
+        }
     }
 }
