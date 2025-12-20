@@ -21,12 +21,14 @@
 pub mod cli;
 mod constants;
 mod crypto;
+mod security;
 mod storage;
 mod version;
 
 // Public re-exports (maintaining exact same API)
 pub use cli::utils::{Spinner, copy_to_clipboard, format_timestamp, secure_print};
 pub use crypto::{Cypher, EncryptionKey};
+pub use security::disable_core_dumps;
 pub use storage::{
     EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
     serialize_storage,

@@ -1,8 +1,30 @@
+#![warn(
+    clippy::all,
+    clippy::pedantic,
+    clippy::nursery,
+    clippy::cargo,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::dbg_macro,
+    clippy::missing_const_for_fn,
+    clippy::needless_pass_by_value,
+    clippy::redundant_pub_crate
+)]
+#![allow(
+    clippy::missing_errors_doc,
+    clippy::must_use_candidate,
+    clippy::multiple_crate_versions,
+    clippy::missing_panics_doc
+)]
+
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
-use rcypher::cli;
-use rcypher::*; // Import from lib
+use rcypher::{
+    Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage, load_storage,
+    serialize_storage,
+}; // Import from lib
+use rcypher::{cli, disable_core_dumps};
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
@@ -22,6 +44,7 @@ By default treats provided filename as an encrypted key-value storage and provid
 In this mode, the file is created if it doesn't exist.
 Otherwise, with --encrypt and --decrypt parameters it allows encryption of any other type of file.
 ")]
+#[allow(clippy::struct_excessive_bools)]
 struct CliParams {
     /// Encrypt a full file
     #[arg(short, long, action)]
@@ -172,6 +195,9 @@ fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    // Disable core dumps to prevent memory dumps on crash
+    let _ = disable_core_dumps();
+
     let params = CliParams::parse();
     let mut password = get_password(&params)?;
 

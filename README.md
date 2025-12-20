@@ -309,9 +309,8 @@ If clipboard retention is unacceptable, use terminal output instead.
     
 ## Security
 
-- [ ] Disable coredumps to prevent secrets from dumping to disk
+- [x] Disable coredumps to prevent secrets from dumping to disk
 - [ ] Add memory locking to prevent from swapping
-- [ ] Enable extra lints in main.rs
 - [ ] Enable MIRI in CI
 - [ ] Add wrapping #[clippy::has_significant_drop] struct DecryptedValue for all decrypted data.
 
