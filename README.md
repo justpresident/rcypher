@@ -295,26 +295,6 @@ If clipboard retention is unacceptable, use terminal output instead.
 
 * Use strong, unique master passwords
 
-# Testing
-
-The project includes:
-
-* Unit tests
-
-* Integration tests for the CLI
-
-* Negative tests covering:
-
-  * corrupted HMAC
-
-  * truncated files
-
-  * invalid padding
-
-  * unsupported file versions
-
-Tests are located in the tests/ directory.
-
 # Limitations
 
 * No automatic synchronization (manual file sync tools like Dropbox/Syncthing can be used with conflict resolution)
@@ -324,6 +304,24 @@ Tests are located in the tests/ directory.
 * No formal security audit
 
 * Not intended as a drop-in replacement for audited password managers
+
+# Ideas for the next steps    
+    
+## Security
+
+- [ ] Disable coredumps to prevent secrets from dumping to disk
+- [ ] Add memory locking to prevent from swapping
+- [ ] Enable extra lints in main.rs
+- [ ] Enable MIRI in CI
+- [ ] Add wrapping #[clippy::has_significant_drop] struct DecryptedValue for all decrypted data.
+
+## Features
+- [ ] Add command: rename for keys
+- [ ] Add groups/levels/folders
+  - [ ] Support rename for groups/levels/folders
+- [ ] Implement or intergrate some existing encrypted fs to store files securely in a storage
+  - [ ] Commands for extracting files outside and adding back in
+
 
 # License
 
