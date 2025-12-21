@@ -172,11 +172,9 @@ impl InteractiveCli {
                 }
                 for (key, val) in results {
                     let mut secret = val.decrypt(&self.cypher)?;
-
-                    let mut output = format!("{}: {}", key, &*secret);
+                    let output = format!("{}: {}", key, &*secret);
                     secret.zeroize();
-                    secure_print(&output, self.insecure_stdout)?;
-                    output.zeroize();
+                    secure_print(output, self.insecure_stdout)?;
                 }
             }
             Err(e) => bail!("Error: {e}"),
@@ -212,10 +210,9 @@ impl InteractiveCli {
         if let Some(entries) = storage.history(key) {
             for entry in entries {
                 let mut secret = entry.value.decrypt(&self.cypher)?;
-                let mut output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
+                let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
-                secure_print(&output, self.insecure_stdout)?;
-                output.zeroize();
+                secure_print(output, self.insecure_stdout)?;
             }
         } else {
             bail!("No key '{key}' found!");

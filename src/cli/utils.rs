@@ -7,7 +7,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
@@ -22,9 +22,12 @@ pub fn format_timestamp(ts: u64) -> String {
 /// Prints directly to tty to avoid
 /// - snooping passwords from process stdout
 /// - lingering passwords in memory
-pub fn secure_print(what: impl AsRef<str>, insecure_stdout: bool) -> Result<()> {
+///
+/// This function takes ownership of the string and zeroizes it after printing
+/// to ensure sensitive data doesn't linger in memory.
+pub fn secure_print(mut what: String, insecure_stdout: bool) -> Result<()> {
     if insecure_stdout {
-        println!("{}", what.as_ref());
+        println!("{}", &what);
         return Ok(());
     }
     let tty = OpenOptions::new().write(true).open("/dev/tty")?;
@@ -32,9 +35,12 @@ pub fn secure_print(what: impl AsRef<str>, insecure_stdout: bool) -> Result<()> 
         Ok(l) => l,
         Err((_, e)) => bail!(e),
     };
-    lock.write_all(what.as_ref().as_bytes())?;
+    lock.write_all(what.as_bytes())?;
     lock.write_all(b"\n")?;
     lock.flush()?;
+
+    // Zeroize the string before returning
+    what.zeroize();
     Ok(())
 }
 
