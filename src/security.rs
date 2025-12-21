@@ -156,34 +156,73 @@ fn check_proc_status() -> bool {
 
 #[cfg(test)]
 mod tests {
+    use nix::libc::getppid;
+
     use super::*;
 
     #[test]
+    #[cfg(target_family = "unix")]
     fn test_disable_core_dumps() {
-        // Should not fail even if it doesn't work
+        use nix::libc::{RLIMIT_CORE, getrlimit, rlimit};
+
+        // Call disable_core_dumps
+        disable_core_dumps().expect("Failed to disable core dumps");
+
+        // Verify that RLIMIT_CORE is actually set to 0
+        unsafe {
+            let mut rlim = rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+
+            let result = getrlimit(RLIMIT_CORE, &raw mut rlim);
+            assert_eq!(result, 0, "getrlimit failed");
+
+            // Both soft and hard limits should be 0
+            assert_eq!(rlim.rlim_cur, 0, "Soft limit (rlim_cur) should be 0");
+            assert_eq!(rlim.rlim_max, 0, "Hard limit (rlim_max) should be 0");
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_family = "unix"))]
+    fn test_disable_core_dumps() {
+        // On non-Unix platforms, this should just succeed
         assert!(disable_core_dumps().is_ok());
     }
 
     #[test]
-    fn test_debugger_detection() {
-        // This test should pass when run normally (not under debugger)
-        // We can't easily test the positive case without actually attaching a debugger
-        let _ = is_debugger_attached();
-    }
-
-    #[test]
-    fn test_individual_checks() {
-        // Test the proc_status check
-        let proc_status = check_proc_status();
-        eprintln!("Debugger detection results during test:");
-        eprintln!("  check_proc_status: {}", proc_status);
-    }
-
-    #[test]
+    // The test verifies that protection mechanics works:
+    // - `TracerPid` matches the parent process
+    // But it relies on the OS guarantee that only one process can connect as a debugger, it is not
+    // verified by the test explicitly
     fn test_ptrace_protection() {
-        // We can't actually test this because calling enable_ptrace_protection()
-        // in a test puts the test process into self-traced state, which prevents
-        // the test harness from cleaning up properly.
-        // The real testing happens in integration tests where each binary runs separately.
+        enable_ptrace_protection().unwrap();
+        let parent_pid = unsafe { getppid() } as u32;
+
+        assert_eq!(*(EXPECTED_TRACER_PID.get().unwrap()), parent_pid);
+
+        assert!(!is_debugger_attached());
+
+        // Manually verify TracerPid value from /proc/self/status
+        let status =
+            std::fs::read_to_string("/proc/self/status").expect("Failed to read /proc/self/status");
+
+        let mut found_tracer_pid = false;
+        for line in status.lines() {
+            if let Some(tracer_pid_str) = line.strip_prefix("TracerPid:") {
+                let tracer_pid: u32 = tracer_pid_str
+                    .trim()
+                    .parse()
+                    .expect("Failed to parse TracerPid");
+
+                found_tracer_pid = true;
+
+                assert_eq!(tracer_pid, parent_pid);
+                break;
+            }
+        }
+
+        assert!(found_tracer_pid, "TracerPid not found in /proc/self/status");
     }
 }
