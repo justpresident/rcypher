@@ -366,9 +366,10 @@ If clipboard retention is unacceptable, use terminal output instead.
 
 ## Features
 - [ ] Add password generation feature
-- [ ] Implement nested hardened encryption for most important secrets. It is a good practice for users to split secrets in two separate places
+- [ ] Implement nested hardened encryption for most important secrets. It is a good practice for users to split secrets in two separate places:
   - The most important data, which is the most safety critical. This data is usually accessed unfrequently and therefore kept encrypted most of the time.
   - Everything else - passwords from least crical services and other non-critical secrets. This would normally be most of the database.
+  
   So the idea is to require an extra password for accessing those secrets that are marked as hardened. This would add an extra level of security for this most secure data and prevent from leakage even when an attacker managed to obtain the main encryption key, e.g. on compromised OS or by shoulder-surfing.
 - [ ] Add command: rename for keys
 - [ ] Add groups/levels/folders
