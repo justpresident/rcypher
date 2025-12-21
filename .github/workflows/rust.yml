@@ -86,4 +86,5 @@ jobs:
           git config --local user.name "github-actions[bot]"
           git add .github/badges/coverage.svg
           git diff --staged --quiet || git commit -m "Update coverage badge [skip ci]"
+          git pull --rebase
           git push
