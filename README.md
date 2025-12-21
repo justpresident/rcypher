@@ -377,6 +377,15 @@ If clipboard retention is unacceptable, use terminal output instead.
 - [ ] Implement or intergrate some existing encrypted fs to store files securely in a storage
   - [ ] Commands for extracting files outside and adding back in
 
+# Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository
+2. Create your feature branch (git checkout -b some/amazing-feature)
+3. Commit your changes (git commit -m 'Add some amazing feature')
+4. Push to the branch (git push origin some/amazing-feature)
+5. Open a Pull Request
 
 # License
 
@@ -387,7 +396,7 @@ Apache-2.0
 This software is provided as-is, without warranty of any kind.
 No security claims are made beyond what is explicitly documented.
 
-A note to users
+**A note to users**
 
 If you need:
 
