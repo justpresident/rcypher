@@ -26,9 +26,9 @@ mod storage;
 mod version;
 
 // Public re-exports (maintaining exact same API)
-pub use cli::utils::{Spinner, copy_to_clipboard, format_timestamp, secure_print};
+pub use cli::utils::{Spinner, ThreadStopGuard, copy_to_clipboard, format_timestamp, secure_print};
 pub use crypto::{Cypher, EncryptionKey};
-pub use security::disable_core_dumps;
+pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 pub use storage::{
     EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
     serialize_storage,

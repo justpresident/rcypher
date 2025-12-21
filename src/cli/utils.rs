@@ -5,6 +5,8 @@ use indicatif::ProgressBar;
 use nix::fcntl::{Flock, FlockArg};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::Zeroizing;
 
 pub fn format_timestamp(ts: u64) -> String {
@@ -34,6 +36,32 @@ pub fn secure_print(what: impl AsRef<str>, insecure_stdout: bool) -> Result<()> 
     lock.write_all(b"\n")?;
     lock.flush()?;
     Ok(())
+}
+
+/// A guard to signal background thread to stop when dropped
+pub struct ThreadStopGuard {
+    flag: Arc<AtomicBool>,
+    handle: std::thread::JoinHandle<()>,
+}
+
+impl ThreadStopGuard {
+    pub const fn new(flag: Arc<AtomicBool>, handle: std::thread::JoinHandle<()>) -> Self {
+        Self { flag, handle }
+    }
+}
+
+impl Drop for ThreadStopGuard {
+    fn drop(&mut self) {
+        // Signal the thread to stop
+        self.flag.store(true, Ordering::Relaxed);
+
+        // Try to join with a short timeout
+        let start = std::time::Instant::now();
+        while !self.handle.is_finished() && start.elapsed() < std::time::Duration::from_millis(200)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
 }
 
 pub struct Spinner {

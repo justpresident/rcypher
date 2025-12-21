@@ -14,6 +14,7 @@ use crate::constants::{
     Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacBytes, HmacSha256,
     READ_BUF_SIZE,
 };
+use crate::security::is_debugger_attached;
 use crate::version::{CypherVersion, Version7Header};
 
 pub struct Cypher {
@@ -116,6 +117,10 @@ impl Cypher {
     }
 
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        if is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+
         match self.key.version() {
             CypherVersion::LegacyWithoutKdf => self.encrypt_legacy(data),
             CypherVersion::V7WithKdf => self.encrypt_v7(data),
@@ -192,6 +197,10 @@ impl Cypher {
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        if is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+
         if data.len() < 3 {
             bail!("Data too short");
         }

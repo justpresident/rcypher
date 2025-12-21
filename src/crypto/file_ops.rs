@@ -14,10 +14,15 @@ use super::cipher::Cypher;
 use crate::constants::{
     Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacBytes, READ_BUF_SIZE,
 };
+use crate::security::is_debugger_attached;
 use crate::version::{CypherVersion, Version7Header};
 
 impl Cypher {
     pub fn encrypt_file<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
+        if is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+
         match self.version() {
             CypherVersion::LegacyWithoutKdf => {
                 bail!("Encryption with legacy version is not supported")
@@ -104,6 +109,10 @@ impl Cypher {
     }
 
     pub fn decrypt_file<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {
+        if is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+
         let mut file = fs::File::open(input_path)?;
         let file_size = usize::try_from(file.metadata()?.len())
             .expect("Can't process files larger than 4Gb on a 32-bit platform");

@@ -21,14 +21,16 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::{
-    Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage, load_storage,
-    serialize_storage,
+    Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage, ThreadStopGuard,
+    load_storage, serialize_storage,
 }; // Import from lib
-use rcypher::{cli, disable_core_dumps};
+use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
@@ -67,6 +69,11 @@ struct CliParams {
     /// This is only for automated testing
     #[arg(long, action, default_value_t = false, hide(true))]
     insecure_stdout: bool,
+
+    /// Allow debuggers to attach (disables ptrace protection).
+    /// This is only for automated testing
+    #[arg(long, action, default_value_t = false, hide(true))]
+    insecure_allow_debugging: bool,
 
     /// Don't show loading animation during startup and warnings
     #[arg(long, action, default_value_t = false, hide(true))]
@@ -194,11 +201,52 @@ fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
     Ok(())
 }
 
+// Start background debugger monitoring thread
+// Returns a stop guard that needs to be held until the exit of the main thread
+fn start_background_debugger_checks() -> ThreadStopGuard {
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let stop_flag_clone = stop_flag.clone();
+
+    let handle = std::thread::spawn(move || {
+        loop {
+            // Check if we should stop
+            if stop_flag_clone.load(Ordering::Relaxed) {
+                break;
+            }
+
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            if is_debugger_attached() {
+                eprintln!("\nDebugger attached. Exiting for security.");
+                std::process::exit(1);
+            }
+        }
+    });
+
+    ThreadStopGuard::new(stop_flag, handle)
+}
+
 fn main() -> Result<()> {
     // Disable core dumps to prevent memory dumps on crash
     let _ = disable_core_dumps();
 
     let params = CliParams::parse();
+
+    // Enable ptrace self-protection to prevent debuggers from attaching
+    if !params.insecure_allow_debugging
+        && let Err(e) = enable_ptrace_protection()
+    {
+        eprintln!("Security error: {e}");
+        std::process::exit(1);
+    }
+
+    if is_debugger_attached() {
+        eprintln!("Debugger detected. Exiting for security.");
+        std::process::exit(1);
+    }
+
+    let _dbg_stop_guard = start_background_debugger_checks();
+
     let mut password = get_password(&params)?;
 
     if params.encrypt {

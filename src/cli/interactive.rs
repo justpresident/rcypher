@@ -5,6 +5,7 @@ use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::STANDBY_TIMEOUT;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
+use crate::is_debugger_attached;
 use crate::load_storage;
 use crate::save_storage;
 use anyhow::{Result, bail};
@@ -66,6 +67,9 @@ impl InteractiveCli {
                 > STANDBY_TIMEOUT
             {
                 break;
+            }
+            if is_debugger_attached() {
+                bail!("Debugger detected");
             }
 
             let readline = rl.readline(&self.prompt);

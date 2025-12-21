@@ -156,11 +156,17 @@ It **does not** protect against:
 
 ❌ privileged (root) attackers
 
-❌ memory dumps, debuggers, or swap attacks
+❌ swap attacks or hibernation
 
 ❌ shoulder-surfing or screen recording
 
-This tool focuses on **at-rest encryption**, not runtime secrecy.
+**Partial protection** (defense-in-depth, not security guarantees):
+
+⚠️ **Debugger attachment**: ptrace-based protection prevents casual debugging but can be bypassed by privileged attackers or kernel-level tools
+
+⚠️ **Core dumps**: disabled at startup to prevent crash dumps, but doesn't protect against forced dumps or swap
+
+This tool focuses on **at-rest encryption**. Runtime protections are defense-in-depth measures that raise the bar for attackers but do not provide complete runtime secrecy.
 
 # Cryptography Overview
 ## Key Derivation
@@ -237,6 +243,46 @@ Memory zeroing is a best-effort mitigation and does not protect against:
 
 Passwords are read without terminal echo and are not printed, logged, or stored in plaintext on disk.
 
+### Core Dump Protection (Linux/Unix)
+
+On Unix-like systems, `rcypher` disables core dumps using `setrlimit(RLIMIT_CORE, 0)` at startup.
+
+This prevents unencrypted secrets from being written to disk in the event of a crash, reducing the risk of:
+- accidental exposure through crash dumps
+- forensic recovery of plaintext secrets from core files
+
+**Limitations:**
+- Does not protect against swap files or hibernation
+- Does not prevent privileged (root) attackers from forcing core dumps
+- Does not protect against memory inspection by debuggers
+
+### Anti-Debugging Protection (Linux)
+
+`rcypher` implements ptrace-based anti-debugging protection using the secure fork model described in `ptrace(2)`:
+
+**How it works:**
+1. At startup, the process forks into parent and child
+2. Child calls `PTRACE_TRACEME` to be traced by the parent
+3. Child stores the parent PID and continues as the main application
+4. Parent monitors the child for its entire lifetime
+5. During runtime, the child continuously verifies that `TracerPid` matches the stored parent PID
+
+**What this prevents:**
+- External debuggers from attaching (e.g., `gdb`, `strace`)
+- Runtime inspection via ptrace-based tools
+- Dynamic analysis and memory inspection
+
+**Detection behavior:**
+If `TracerPid` becomes 0 (tracing stopped) or changes to a different PID, the application detects tampering and refuses to decrypt secrets.
+
+**Limitations:**
+- Does not protect against kernel-level debugging (e.g., kprobes, eBPF)
+- Does not protect against privileged (root) attackers who can modify kernel behavior
+- Can be bypassed by modifying `/proc/self/status` in a compromised OS
+- Does not prevent static analysis or reverse engineering
+
+These runtime protections are **defense-in-depth measures** and do not replace the core threat model. They provide additional barriers against casual memory inspection and debugging but cannot stop a determined attacker with OS-level privileges.
+
 
 # File Format (High-Level)
 ```(css)
@@ -305,11 +351,10 @@ If clipboard retention is unacceptable, use terminal output instead.
 
 * Not intended as a drop-in replacement for audited password managers
 
-# Ideas for the next steps    
-    
+# Ideas for the next steps
+
 ## Security
 
-- [x] Disable coredumps to prevent secrets from dumping to disk
 - [ ] Add memory locking to prevent from swapping
 - [ ] Enable MIRI in CI
 - [ ] Add wrapping #[clippy::has_significant_drop] struct DecryptedValue for all decrypted data.
