@@ -355,11 +355,21 @@ If clipboard retention is unacceptable, use terminal output instead.
 
 ## Security
 
+- [ ] Extend the header with Argon2id parameters, autodetect too fast key derivation and auto-bump complexity
+- [ ] Warn about weak master password
+- [ ] Add a command to change master password
+- [ ] Add authentication with a YubiKey and Google Authenticator
+- [ ] Add a user notification at start to perform regular backups in multiple places
 - [ ] Add memory locking to prevent from swapping
 - [ ] Enable MIRI in CI
 - [ ] Add wrapping #[clippy::has_significant_drop] struct DecryptedValue for all decrypted data.
 
 ## Features
+- [ ] Add password generation feature
+- [ ] Implement nested hardened encryption for most important secrets. It is a good practice for users to split secrets in two separate places
+  - The most important data, which is the most safety critical. This data is usually accessed unfrequently and therefore kept encrypted most of the time.
+  - Everything else - passwords from least crical services and other non-critical secrets. This would normally be most of the database.
+  So the idea is to require an extra password for accessing those secrets that are marked as hardened. This would add an extra level of security for this most secure data and prevent from leakage even when an attacker managed to obtain the main encryption key, e.g. on compromised OS or by shoulder-surfing.
 - [ ] Add command: rename for keys
 - [ ] Add groups/levels/folders
   - [ ] Support rename for groups/levels/folders
