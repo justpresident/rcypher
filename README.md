@@ -116,9 +116,9 @@ Apply updates? (a)ll at once, (i)nteractive, (c)ancel [a/i/c]:
 
 * Offline, single-file encrypted storage
 
-* Password-based encryption using Argon2id
+* Encryption key derivation using Argon2id
 
-* Strong authenticated encryption (AES + HMAC)
+* Strong authenticated encryption (AES CBC + HMAC)
 
 * Constant-time authentication checks
 
