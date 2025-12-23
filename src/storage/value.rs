@@ -13,6 +13,7 @@ pub struct EncryptedValue {
     ciphertext: Vec<u8>,
 }
 
+// This is a helper constructor only available in tests
 #[cfg(debug_assertions)]
 impl<T: AsRef<str>> From<T> for EncryptedValue {
     fn from(value: T) -> Self {
@@ -48,9 +49,10 @@ impl EncryptedValue {
                 Ok(Zeroizing::new(String::from_utf8(self.ciphertext.clone())?))
             }
             CypherVersion::V7WithKdf => {
-                let decrypted_bytes = cypher.decrypt(&self.ciphertext)?;
+                let mut decrypted_bytes = cypher.decrypt(&self.ciphertext)?;
 
-                Ok(Zeroizing::new(String::from_utf8(decrypted_bytes.to_vec())?))
+                let bytes = std::mem::take(&mut *decrypted_bytes);
+                Ok(Zeroizing::new(String::from_utf8(bytes)?))
             }
         }
     }
