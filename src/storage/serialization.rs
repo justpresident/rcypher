@@ -47,13 +47,15 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
 }
 
 pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
+    let version = StoreVersion::probe_data(data)?;
+    match version {
+        StoreVersion::Version4 => deserialize_storage_v4(data),
+    }
+}
+
+pub fn deserialize_storage_v4(data: &[u8]) -> Result<Storage> {
     if data.len() < 6 {
         bail!("Data too short");
-    }
-
-    let version = u16::from_be_bytes([data[0], data[1]]);
-    if version != StoreVersion::Version4 as u16 {
-        bail!("Unsupported storage version: {version}");
     }
 
     let count = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);

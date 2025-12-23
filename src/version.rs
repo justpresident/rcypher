@@ -13,6 +13,18 @@ pub enum StoreVersion {
     Version4 = 4u16,
 }
 
+impl StoreVersion {
+    /// Probes data to determine its encryption version
+    pub fn probe_data(data: &[u8]) -> Result<Self> {
+        if data.len() < 2 {
+            bail!("Data too short to determine version");
+        }
+
+        let version = u16::from_be_bytes([data[0], data[1]]);
+        Ok(Self::try_from(version)?)
+    }
+}
+
 #[derive(Clone, Debug, TryFromPrimitive, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum CypherVersion {
