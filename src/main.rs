@@ -96,14 +96,47 @@ struct CliParams {
     filename: PathBuf,
 }
 
-fn get_password(params: &CliParams) -> Result<String> {
+fn get_password(params: &CliParams, require_confirmation: bool) -> Result<String> {
+    #[allow(clippy::single_match_else)]
     match &params.insecure_password {
         Some(passwd) => Ok(passwd.clone()),
-        None => Ok(rpassword::prompt_password(format!(
-            "Enter Password for {}: ",
-            params.filename.display()
-        ))?),
+        None => {
+            if require_confirmation {
+                show_password_warning();
+            }
+
+            let mut password = rpassword::prompt_password(format!(
+                "Enter Password for {}: ",
+                params.filename.display()
+            ))?;
+
+            if require_confirmation {
+                let mut confirmation = rpassword::prompt_password("Confirm Password: ")?;
+                if password != confirmation {
+                    password.zeroize();
+                    confirmation.zeroize();
+                    bail!("Passwords do not match");
+                }
+            }
+
+            Ok(password)
+        }
     }
+}
+
+fn show_password_warning() {
+    eprintln!("\n╔════════════════════════════════════════════════════════════════════╗");
+    eprintln!("║                         ⚠️  IMPORTANT! ⚠️                          ║");
+    eprintln!("╠════════════════════════════════════════════════════════════════════╣");
+    eprintln!("║                                                                    ║");
+    eprintln!("║  Your password CANNOT be recovered if lost or forgotten.           ║");
+    eprintln!("║  Without it, your encrypted data will be PERMANENTLY inaccessible. ║");
+    eprintln!("║                                                                    ║");
+    eprintln!("║  → Use a strong, memorable password                                ║");
+    eprintln!("║  → Store it under a secret name in another password manager        ║");
+    eprintln!("║  → Never share it with anyone                                      ║");
+    eprintln!("║                                                                    ║");
+    eprintln!("╚════════════════════════════════════════════════════════════════════╝\n");
 }
 
 fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
@@ -247,7 +280,10 @@ fn main() -> Result<()> {
 
     let _dbg_stop_guard = start_background_debugger_checks();
 
-    let mut password = get_password(&params)?;
+    let mut password = {
+        let need_confirmation = params.encrypt || !params.filename.exists();
+        get_password(&params, need_confirmation)?
+    };
 
     if params.encrypt {
         let key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
