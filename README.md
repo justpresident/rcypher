@@ -117,10 +117,14 @@ Apply updates? (a)ll at once, (i)nteractive, (c)ancel [a/i/c]:
 * Offline, single-file encrypted storage
 
 * Encryption key derivation using Argon2id
+ * Argon2id is a winner in a "password Hashing Competition 2015", see https://www.password-hashing.net/ for details
+ * Random SALT is generated on every encryption operation
 
-* Strong authenticated encryption (AES CBC + HMAC)
-
-* Constant-time authentication checks
+* Strong authenticated encryption with AES-256-CBC-HMAC-SHA256
+ * **Quantum resistant**, widely used in TLS, IPsec, PGP and many other security tools and protocols
+ * Random IV is generated on every encrypt operation
+ * Secure constant time HMAC check to avoid timing attacks
+ * With encrypt-then-hmac approach, see https://www.daemonology.net/blog/2009-06-24-encrypt-then-mac.html for details
 
 * Secure password input (no terminal echo)
 
