@@ -1,5 +1,4 @@
 mod cipher;
-mod file_ops;
 mod key;
 mod stream_ops;
 mod utils;

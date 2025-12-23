@@ -1,5 +1,6 @@
+use crate::constants::HmacBytes;
 use std::fs;
-use std::io::{Cursor, Read, Seek};
+use std::io::{self, Cursor, Read, Seek};
 use std::mem::size_of;
 use std::path::Path;
 
@@ -34,6 +35,28 @@ pub const fn calculate_padding(data_len: usize) -> u8 {
     (BLOCK_SIZE - (data_len % BLOCK_SIZE)) as u8
 }
 
+/// Probes a file to determine its encryption version
+fn probe_file_version(path: &Path) -> Result<CypherVersion> {
+    if !path.exists() {
+        return Ok(CypherVersion::default());
+    }
+    let mut file = fs::File::open(path)?;
+    let mut version_bytes = [0u8; 2];
+    file.read_exact(&mut version_bytes)?;
+
+    probe_data_version(&version_bytes)
+}
+
+/// Probes data to determine its encryption version
+fn probe_data_version(data: &[u8]) -> Result<CypherVersion> {
+    if data.len() < 2 {
+        bail!("Data too short to determine version");
+    }
+
+    let version = u16::from_be_bytes([data[0], data[1]]);
+    Ok(CypherVersion::try_from(version)?)
+}
+
 impl Cypher {
     pub const fn new(key: EncryptionKey) -> Self {
         Self { key }
@@ -44,7 +67,7 @@ impl Cypher {
     }
 
     pub fn encryption_key_for_file(password: &str, path: &Path) -> Result<EncryptionKey> {
-        let version = Self::probe_version(path)?;
+        let version = probe_file_version(path)?;
 
         let key = match version {
             CypherVersion::LegacyWithoutKdf => EncryptionKey::from_password(version, password)?,
@@ -64,28 +87,6 @@ impl Cypher {
         };
 
         Ok(key)
-    }
-
-    /// Probes a file to determine its encryption version
-    fn probe_version(path: &Path) -> Result<CypherVersion> {
-        if !path.exists() {
-            return Ok(CypherVersion::default());
-        }
-        let mut file = fs::File::open(path)?;
-        let mut version_bytes = [0u8; 2];
-        file.read_exact(&mut version_bytes)?;
-
-        Self::probe_data_version(&version_bytes)
-    }
-
-    /// Probes data to determine its encryption version
-    fn probe_data_version(data: &[u8]) -> Result<CypherVersion> {
-        if data.len() < 2 {
-            bail!("Data too short to determine version");
-        }
-
-        let version = u16::from_be_bytes([data[0], data[1]]);
-        Ok(CypherVersion::try_from(version)?)
     }
 
     // TODO: initialize HMAC from a separate key derived from master key
@@ -158,13 +159,13 @@ impl Cypher {
         Ok(result)
     }
 
-    fn encrypt_v7(&self, data: &[u8]) -> Result<Vec<u8>> {
-        // Pre-allocate output buffer with exact size needed
-        let output_size = encrypted_size_v7(data.len());
-        let mut result = Vec::with_capacity(output_size);
-
-        let pad_len = calculate_padding(data.len());
-
+    /// Generic helper for V7 encryption that works with any Reader and Writer
+    fn encrypt_helper_v7<R: Read, W: io::Write>(
+        &self,
+        reader: &mut R,
+        writer: &mut W,
+        pad_len: u8,
+    ) -> Result<()> {
         // Generate random IV
         let mut iv = BlockBytes::default();
         rand::rngs::OsRng.try_fill_bytes(&mut iv)?;
@@ -179,21 +180,57 @@ impl Cypher {
         };
         let mut header_bytes = [0u8; size_of::<Version7Header>()];
         bincode::encode_into_slice(&header, &mut header_bytes, bincode::config::standard())?;
-        result.extend_from_slice(&header_bytes);
+        writer.write_all(&header_bytes)?;
 
-        // Create reader from input data
-        let mut reader = Cursor::new(data);
+        // Create cipher and MAC
         let mut cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
         let mut mac = self.hmac_start();
         Mac::update(&mut mac, &header_bytes);
 
-        encrypt_blocks_v7(&mut reader, &mut result, &mut cipher, &mut mac, pad_len)?;
+        // Encrypt blocks
+        encrypt_blocks_v7(reader, writer, &mut cipher, &mut mac, pad_len)?;
 
         // Write HMAC
         let computed_hmac = mac.finalize();
-        result.extend_from_slice(&computed_hmac.into_bytes());
+        writer.write_all(&computed_hmac.into_bytes())?;
+
+        Ok(())
+    }
+
+    fn encrypt_v7(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // Pre-allocate output buffer with exact size needed
+        let output_size = encrypted_size_v7(data.len());
+        let mut result = Vec::with_capacity(output_size);
+
+        let pad_len = calculate_padding(data.len());
+        let mut reader = Cursor::new(data);
+
+        self.encrypt_helper_v7(&mut reader, &mut result, pad_len)?;
 
         Ok(result)
+    }
+    pub fn encrypt_file<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
+        if is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+
+        match self.version() {
+            CypherVersion::LegacyWithoutKdf => {
+                bail!("Encryption with legacy version is not supported")
+            }
+            CypherVersion::V7WithKdf => self.encrypt_file_v7(path, out),
+        }
+    }
+
+    fn encrypt_file_v7<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
+        let mut file = fs::File::open(path)?;
+        let file_len = file.metadata()?.len();
+
+        let pad_len = calculate_padding(usize::try_from(file_len)?);
+
+        self.encrypt_helper_v7(&mut file, out, pad_len)?;
+
+        Ok(())
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
@@ -278,5 +315,70 @@ impl Cypher {
         )?;
 
         Ok(Zeroizing::from(result))
+    }
+
+    pub fn decrypt_file<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {
+        if is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+
+        let mut file = fs::File::open(input_path)?;
+        let file_size = usize::try_from(file.metadata()?.len())
+            .expect("Can't process files larger than 4Gb on a 32-bit platform");
+
+        if file_size < 3 {
+            bail!("File is too small");
+        }
+        let mut version_bytes = [0; 2];
+        file.read_exact(&mut version_bytes)?;
+        file.seek(std::io::SeekFrom::Start(0))?;
+
+        let version = u16::from_be_bytes([version_bytes[0], version_bytes[1]]);
+
+        match CypherVersion::try_from(version) {
+            Ok(CypherVersion::V7WithKdf) => {
+                if file_size < size_of::<Version7Header>() + HMAC_SIZE {
+                    bail!("File is too small");
+                }
+
+                // First thing we do is to verify HMAC to make sure the file is correct and hasn't
+                // been tampered. If it doesn't match we immediately exit to minimize exposure of
+                // the code to the potential attacker.
+                file.seek(std::io::SeekFrom::End(-i64::try_from(HMAC_SIZE)?))?;
+                let mut hmac = HmacBytes::default();
+                file.read_exact(&mut hmac)?;
+
+                let computed_hmac =
+                    self.compute_file_hmac(&mut file, 0, u64::try_from(file_size - HMAC_SIZE)?)?;
+
+                computed_hmac.verify_slice(&hmac)?;
+
+                // Read header
+                file.seek(std::io::SeekFrom::Start(0))?;
+                let header: Version7Header =
+                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+                header.validate()?;
+
+                // Proceed with decryption
+                let data_end = u64::try_from(file_size - HMAC_SIZE)?;
+                let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
+
+                // Create a limited reader that only reads encrypted data (excluding HMAC)
+                let current_pos = file.stream_position()?;
+                let remaining_bytes = data_end - current_pos;
+                let mut limited_reader = LimitedReader::new(file, remaining_bytes);
+
+                // Use generic decryption function
+                decrypt_blocks_v7(
+                    &mut limited_reader,
+                    out,
+                    &mut cipher,
+                    header.pad_len,
+                    remaining_bytes,
+                )?;
+            }
+            _ => bail!("Unsupported file encryption format: {version}"),
+        }
+        Ok(())
     }
 }
