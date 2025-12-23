@@ -3,17 +3,15 @@ use std::mem::size_of;
 use std::path::Path;
 use std::{fs, io};
 
-use aes::Block;
 use anyhow::{Result, bail};
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::KeyIvInit;
 use hmac::Mac;
 use rand::TryRngCore;
-use zeroize::Zeroize;
 
+use super::LimitedReader;
 use super::cipher::Cypher;
-use crate::constants::{
-    Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacBytes, READ_BUF_SIZE,
-};
+use crate::constants::{Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacBytes};
+use crate::crypto::stream_ops::{decrypt_blocks_v7, encrypt_blocks_v7};
 use crate::security::is_debugger_attached;
 use crate::version::{CypherVersion, Version7Header};
 
@@ -60,48 +58,8 @@ impl Cypher {
 
         let mut cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &header.iv.into());
 
-        let mut buffer = [0u8; READ_BUF_SIZE];
-
-        // All read data goes into this vec
-        let mut file_data = Vec::new();
-        let mut pos: usize = 0;
-        loop {
-            while file_data.len() < READ_BUF_SIZE {
-                let n = file.read(&mut buffer)?;
-                if n == 0 {
-                    break;
-                }
-                file_data.extend_from_slice(&buffer[0..n]);
-                buffer.zeroize();
-            }
-            if file_data.len() < BLOCK_SIZE {
-                break;
-            }
-
-            while file_data.len() >= pos + BLOCK_SIZE {
-                let mut block = Block::clone_from_slice(&file_data[pos..pos + BLOCK_SIZE]);
-                pos += BLOCK_SIZE;
-
-                cipher.encrypt_block_mut(&mut block);
-                Mac::update(&mut mac, &block);
-                out.write_all(&block)?;
-            }
-            file_data[0..pos].zeroize();
-            file_data = file_data[pos..].to_vec();
-            pos = 0;
-        }
-
-        if !file_data.is_empty() {
-            for _ in 0..header.pad_len {
-                file_data.push(header.pad_len);
-            }
-
-            // encrypt final padded block
-            let mut block = Block::clone_from_slice(&file_data[pos..]);
-            cipher.encrypt_block_mut(&mut block);
-            Mac::update(&mut mac, &block);
-            out.write_all(&block)?;
-        }
+        // Use generic encryption function
+        encrypt_blocks_v7(&mut file, out, &mut cipher, &mut mac, header.pad_len)?;
         let computed_hmac = mac.finalize();
         out.write_all(&computed_hmac.into_bytes())?;
 
@@ -153,56 +111,14 @@ impl Cypher {
                 // Proceed with decryption
                 let data_end = u64::try_from(file_size - HMAC_SIZE)?;
                 let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
-                let mut buffer = [0u8; READ_BUF_SIZE];
 
-                // All read data goes into this vec
-                let mut file_data = Vec::new();
-                let mut pos: usize = 0;
-                loop {
-                    // Read only until data_end, not full file
-                    while file_data.len() < READ_BUF_SIZE {
-                        let current = file.stream_position()?;
-                        if current >= data_end {
-                            break;
-                        }
+                // Create a limited reader that only reads encrypted data (excluding HMAC)
+                let current_pos = file.stream_position()?;
+                let remaining_bytes = data_end - current_pos;
+                let mut limited_reader = LimitedReader::new(file, remaining_bytes);
 
-                        let remaining = usize::try_from(data_end - current)?;
-                        let to_read = remaining.min(READ_BUF_SIZE);
-
-                        let n = file.read(&mut buffer[..to_read])?;
-                        if n == 0 {
-                            break;
-                        }
-
-                        file_data.extend_from_slice(&buffer[..n]);
-                    }
-
-                    if file_data.is_empty() {
-                        break;
-                    } else if file_data.len() < BLOCK_SIZE {
-                        bail!("Incorrect file size");
-                    }
-
-                    let file_end = file.stream_position()? >= data_end;
-
-                    while file_data.len() >= pos + BLOCK_SIZE {
-                        let mut block = Block::clone_from_slice(&file_data[pos..pos + BLOCK_SIZE]);
-                        pos += BLOCK_SIZE;
-
-                        cipher.decrypt_block_mut(&mut block);
-
-                        if file_end && file_data.len() == pos {
-                            let last_block_len = BLOCK_SIZE - header.pad_len as usize;
-                            out.write_all(&block[..last_block_len])?;
-                        } else {
-                            out.write_all(&block)?;
-                        }
-                        block.zeroize();
-                    }
-
-                    file_data = file_data[pos..].to_vec();
-                    pos = 0;
-                }
+                // Use generic decryption function
+                decrypt_blocks_v7(&mut limited_reader, out, &mut cipher, header.pad_len)?;
             }
             _ => bail!("Unsupported file encryption format: {version}"),
         }
