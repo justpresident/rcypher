@@ -45,16 +45,11 @@ impl Cypher {
     }
 
     // Initializes HMAC from a separate key derived from master key
-    pub(crate) fn hmac_start(&self) -> HmacSha256 {
+    fn hmac_start(&self) -> HmacSha256 {
         HmacSha256::new_from_slice(self.key.hmac_key()).expect("HMAC can take key of any size")
     }
 
-    pub(crate) fn compute_file_hmac(
-        &self,
-        file: &mut fs::File,
-        from: u64,
-        to: u64,
-    ) -> Result<HmacSha256> {
+    fn compute_file_hmac(&self, file: &mut fs::File, from: u64, to: u64) -> Result<HmacSha256> {
         let mut mac = self.hmac_start();
         // Go to the starting position
         file.seek(std::io::SeekFrom::Start(from))?;
@@ -277,63 +272,61 @@ impl Cypher {
             bail!("Debugger detected");
         }
 
+        let version = CypherVersion::probe_file(input_path)?;
+
+        match version {
+            CypherVersion::LegacyWithoutKdf => {
+                bail!("Legacy encryption is not supported for files")
+            }
+            CypherVersion::V7WithKdf => self.decrypt_file_v7(input_path, out)?,
+        }
+        Ok(())
+    }
+
+    fn decrypt_file_v7<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {
         let mut file = fs::File::open(input_path)?;
         let file_size = usize::try_from(file.metadata()?.len())
             .expect("Can't process files larger than 4Gb on a 32-bit platform");
-
-        if file_size < 3 {
+        if file_size < size_of::<Version7Header>() + HMAC_SIZE {
             bail!("File is too small");
         }
-        let mut version_bytes = [0; 2];
-        file.read_exact(&mut version_bytes)?;
+
+        // First thing we do is to verify HMAC to make sure the file is correct and hasn't
+        // been tampered. If it doesn't match we immediately exit to minimize exposure of
+        // the code to the potential attacker.
+        file.seek(std::io::SeekFrom::End(-i64::try_from(HMAC_SIZE)?))?;
+        let mut hmac = HmacBytes::default();
+        file.read_exact(&mut hmac)?;
+
+        let computed_hmac =
+            self.compute_file_hmac(&mut file, 0, u64::try_from(file_size - HMAC_SIZE)?)?;
+
+        computed_hmac.verify_slice(&hmac)?;
+
+        // Read header
         file.seek(std::io::SeekFrom::Start(0))?;
+        let header: Version7Header =
+            bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+        header.validate()?;
 
-        let version = u16::from_be_bytes([version_bytes[0], version_bytes[1]]);
+        // Proceed with decryption
+        let data_end = u64::try_from(file_size - HMAC_SIZE)?;
+        let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
 
-        match CypherVersion::try_from(version) {
-            Ok(CypherVersion::V7WithKdf) => {
-                if file_size < size_of::<Version7Header>() + HMAC_SIZE {
-                    bail!("File is too small");
-                }
+        // Create a limited reader that only reads encrypted data (excluding HMAC)
+        let current_pos = file.stream_position()?;
+        let remaining_bytes = data_end - current_pos;
+        let mut limited_reader = LimitedReader::new(file, remaining_bytes);
 
-                // First thing we do is to verify HMAC to make sure the file is correct and hasn't
-                // been tampered. If it doesn't match we immediately exit to minimize exposure of
-                // the code to the potential attacker.
-                file.seek(std::io::SeekFrom::End(-i64::try_from(HMAC_SIZE)?))?;
-                let mut hmac = HmacBytes::default();
-                file.read_exact(&mut hmac)?;
+        // Use generic decryption function
+        decrypt_blocks_v7(
+            &mut limited_reader,
+            out,
+            &mut cipher,
+            header.pad_len,
+            remaining_bytes,
+        )?;
 
-                let computed_hmac =
-                    self.compute_file_hmac(&mut file, 0, u64::try_from(file_size - HMAC_SIZE)?)?;
-
-                computed_hmac.verify_slice(&hmac)?;
-
-                // Read header
-                file.seek(std::io::SeekFrom::Start(0))?;
-                let header: Version7Header =
-                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
-                header.validate()?;
-
-                // Proceed with decryption
-                let data_end = u64::try_from(file_size - HMAC_SIZE)?;
-                let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
-
-                // Create a limited reader that only reads encrypted data (excluding HMAC)
-                let current_pos = file.stream_position()?;
-                let remaining_bytes = data_end - current_pos;
-                let mut limited_reader = LimitedReader::new(file, remaining_bytes);
-
-                // Use generic decryption function
-                decrypt_blocks_v7(
-                    &mut limited_reader,
-                    out,
-                    &mut cipher,
-                    header.pad_len,
-                    remaining_bytes,
-                )?;
-            }
-            _ => bail!("Unsupported file encryption format: {version}"),
-        }
         Ok(())
     }
 }
