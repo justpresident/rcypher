@@ -44,7 +44,7 @@ impl EncryptionKey {
     }
 
     /// Derives a key from password and salt using Argon2id
-    pub(crate) fn from_password_with_salt(
+    fn from_password_with_salt(
         version: CypherVersion,
         password: &str,
         salt: &SaltBytes,

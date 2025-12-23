@@ -203,7 +203,9 @@ impl Cypher {
 
     fn decrypt_legacy(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         let pad_len = data[2] as usize;
-        assert!(pad_len <= BLOCK_SIZE);
+        if pad_len > BLOCK_SIZE {
+            bail!("Invalid padding length: {pad_len}");
+        }
         let mut encrypted = data[3..].to_vec();
 
         let iv = BlockBytes::default();
@@ -272,9 +274,7 @@ impl Cypher {
             bail!("Debugger detected");
         }
 
-        let version = CypherVersion::probe_file(input_path)?;
-
-        match version {
+        match self.version() {
             CypherVersion::LegacyWithoutKdf => {
                 bail!("Legacy encryption is not supported for files")
             }
@@ -285,9 +285,10 @@ impl Cypher {
 
     fn decrypt_file_v7<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {
         let mut file = fs::File::open(input_path)?;
-        let file_size = usize::try_from(file.metadata()?.len())
-            .expect("Can't process files larger than 4Gb on a 32-bit platform");
-        if file_size < size_of::<Version7Header>() + HMAC_SIZE {
+        let file_size = usize::try_from(file.metadata()?.len()).map_err(|_| {
+            anyhow::anyhow!("Can't process files larger than 4Gb on a 32-bit platform")
+        })?;
+        if file_size < size_of::<Version7Header>() + BLOCK_SIZE + HMAC_SIZE {
             bail!("File is too small");
         }
 
@@ -301,7 +302,9 @@ impl Cypher {
         let computed_hmac =
             self.compute_file_hmac(&mut file, 0, u64::try_from(file_size - HMAC_SIZE)?)?;
 
-        computed_hmac.verify_slice(&hmac)?;
+        if computed_hmac.verify_slice(&hmac).is_err() {
+            bail!("Decryption failed");
+        }
 
         // Read header
         file.seek(std::io::SeekFrom::Start(0))?;
