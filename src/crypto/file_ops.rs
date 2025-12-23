@@ -10,7 +10,8 @@ use rand::TryRngCore;
 
 use super::LimitedReader;
 use super::cipher::Cypher;
-use crate::constants::{Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacBytes};
+use crate::constants::{Aes256CbcDec, Aes256CbcEnc, BlockBytes, HMAC_SIZE, HmacBytes};
+use crate::crypto::cipher::calculate_padding;
 use crate::crypto::stream_ops::{decrypt_blocks_v7, encrypt_blocks_v7};
 use crate::security::is_debugger_attached;
 use crate::version::{CypherVersion, Version7Header};
@@ -33,8 +34,7 @@ impl Cypher {
         let mut file = fs::File::open(path)?;
         let file_len = file.metadata()?.len();
 
-        #[allow(clippy::cast_possible_truncation)]
-        let pad_len = (BLOCK_SIZE - (file_len as usize % BLOCK_SIZE)) as u8;
+        let pad_len = calculate_padding(usize::try_from(file_len)?);
 
         // Generate random IV
         let mut iv = BlockBytes::default();
@@ -118,7 +118,13 @@ impl Cypher {
                 let mut limited_reader = LimitedReader::new(file, remaining_bytes);
 
                 // Use generic decryption function
-                decrypt_blocks_v7(&mut limited_reader, out, &mut cipher, header.pad_len)?;
+                decrypt_blocks_v7(
+                    &mut limited_reader,
+                    out,
+                    &mut cipher,
+                    header.pad_len,
+                    remaining_bytes,
+                )?;
             }
             _ => bail!("Unsupported file encryption format: {version}"),
         }
