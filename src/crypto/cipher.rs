@@ -188,16 +188,9 @@ impl Cypher {
             bail!("Debugger detected");
         }
 
-        if data.len() < 3 {
-            bail!("Data too short");
-        }
-
-        let version = u16::from_be_bytes([data[0], data[1]]);
-
-        match CypherVersion::try_from(version) {
-            Ok(CypherVersion::LegacyWithoutKdf) => self.decrypt_legacy(data),
-            Ok(CypherVersion::V7WithKdf) => self.decrypt_v7(data),
-            _ => bail!("Unsupported cypher version {version}"),
+        match self.key.version() {
+            CypherVersion::LegacyWithoutKdf => self.decrypt_legacy(data),
+            CypherVersion::V7WithKdf => self.decrypt_v7(data),
         }
     }
 
@@ -222,6 +215,38 @@ impl Cypher {
         Ok(Zeroizing::from(result))
     }
 
+    /// Generic helper for V7 decryption that works with any Reader and Writer
+    /// Reads header, validates it, and performs decryption
+    /// Reader should be positioned at the start of the header
+    fn decrypt_helper_v7<R: Read, W: io::Write>(
+        &self,
+        mut reader: R,
+        total_len: u64,
+        writer: &mut W,
+    ) -> Result<()> {
+        // Read and validate header
+        let header: Version7Header =
+            bincode::decode_from_std_read(&mut reader, bincode::config::standard())?;
+        header.validate()?;
+
+        // Calculate encrypted data length (total - header size)
+        let encrypted_data_len = total_len - size_of::<Version7Header>() as u64;
+
+        // Create cipher and decrypt
+        let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
+        let mut limited_reader = LimitedReader::new(reader, encrypted_data_len);
+
+        decrypt_blocks_v7(
+            &mut limited_reader,
+            writer,
+            &mut cipher,
+            header.pad_len,
+            encrypted_data_len,
+        )?;
+
+        Ok(())
+    }
+
     fn decrypt_v7(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         if data.len() < size_of::<Version7Header>() + BLOCK_SIZE + HMAC_SIZE {
             bail!("File is too small");
@@ -242,29 +267,12 @@ impl Cypher {
             bail!("Decryption failed");
         }
 
-        // Read header
-        let (header, _): (Version7Header, _) =
-            bincode::decode_from_slice(header_bytes, bincode::config::standard())?;
-        header.validate()?;
+        // Use helper to read header and decrypt
+        let all_data = &data[0..data.len() - HMAC_SIZE]; // Header + encrypted data
+        let reader = Cursor::new(all_data);
+        let mut result = Vec::new();
 
-        // Decrypt using stream function
-        let encrypted_len = encrypted_data.len();
-        let decrypted_len = encrypted_len - header.pad_len as usize;
-        let mut result = Vec::with_capacity(decrypted_len);
-
-        // Create reader limited to encrypted data (excluding HMAC)
-        let cursor = Cursor::new(encrypted_data);
-        let mut limited_reader = LimitedReader::new(cursor, encrypted_len as u64);
-        let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
-
-        // Use generic stream decryption
-        decrypt_blocks_v7(
-            &mut limited_reader,
-            &mut result,
-            &mut cipher,
-            header.pad_len,
-            encrypted_len as u64,
-        )?;
+        self.decrypt_helper_v7(reader, all_data.len() as u64, &mut result)?;
 
         Ok(Zeroizing::from(result))
     }
@@ -306,29 +314,11 @@ impl Cypher {
             bail!("Decryption failed");
         }
 
-        // Read header
+        // Use helper to read header and decrypt
         file.seek(std::io::SeekFrom::Start(0))?;
-        let header: Version7Header =
-            bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
-        header.validate()?;
+        let data_len = u64::try_from(file_size - HMAC_SIZE)?;
 
-        // Proceed with decryption
-        let data_end = u64::try_from(file_size - HMAC_SIZE)?;
-        let mut cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &header.iv.into());
-
-        // Create a limited reader that only reads encrypted data (excluding HMAC)
-        let current_pos = file.stream_position()?;
-        let remaining_bytes = data_end - current_pos;
-        let mut limited_reader = LimitedReader::new(file, remaining_bytes);
-
-        // Use generic decryption function
-        decrypt_blocks_v7(
-            &mut limited_reader,
-            out,
-            &mut cipher,
-            header.pad_len,
-            remaining_bytes,
-        )?;
+        self.decrypt_helper_v7(file, data_len, out)?;
 
         Ok(())
     }
