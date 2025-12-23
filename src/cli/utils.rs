@@ -5,6 +5,7 @@ use indicatif::ProgressBar;
 use nix::fcntl::{Flock, FlockArg};
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, Zeroizing};
@@ -124,4 +125,39 @@ pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) -> Result<()> {
     });
 
     Ok(())
+}
+
+pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<String> {
+    if require_confirmation {
+        show_password_warning();
+    }
+
+    let mut password =
+        rpassword::prompt_password(format!("Enter Password for {}: ", filename.display()))?;
+
+    if require_confirmation {
+        let mut confirmation = rpassword::prompt_password("Confirm Password: ")?;
+        if password != confirmation {
+            password.zeroize();
+            confirmation.zeroize();
+            bail!("Passwords do not match");
+        }
+    }
+
+    Ok(password)
+}
+
+fn show_password_warning() {
+    eprintln!("\n╔════════════════════════════════════════════════════════════════════╗");
+    eprintln!("║                         ⚠️  IMPORTANT! ⚠️                          ║");
+    eprintln!("╠════════════════════════════════════════════════════════════════════╣");
+    eprintln!("║                                                                    ║");
+    eprintln!("║  Your password CANNOT be recovered if lost or forgotten.           ║");
+    eprintln!("║  Without it, your encrypted data will be PERMANENTLY inaccessible. ║");
+    eprintln!("║                                                                    ║");
+    eprintln!("║  → Use a strong, memorable password                                ║");
+    eprintln!("║  → Store it under a secret name in another password manager        ║");
+    eprintln!("║  → Never share it with anyone                                      ║");
+    eprintln!("║                                                                    ║");
+    eprintln!("╚════════════════════════════════════════════════════════════════════╝\n");
 }

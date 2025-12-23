@@ -20,6 +20,7 @@
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
+use rcypher::cli::utils::get_password;
 use rcypher::{
     Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage, ThreadStopGuard,
     load_storage, serialize_storage,
@@ -94,49 +95,6 @@ struct CliParams {
 
     /// File to encrypt/decrypt or use as storage
     filename: PathBuf,
-}
-
-fn get_password(params: &CliParams, require_confirmation: bool) -> Result<String> {
-    #[allow(clippy::single_match_else)]
-    match &params.insecure_password {
-        Some(passwd) => Ok(passwd.clone()),
-        None => {
-            if require_confirmation {
-                show_password_warning();
-            }
-
-            let mut password = rpassword::prompt_password(format!(
-                "Enter Password for {}: ",
-                params.filename.display()
-            ))?;
-
-            if require_confirmation {
-                let mut confirmation = rpassword::prompt_password("Confirm Password: ")?;
-                if password != confirmation {
-                    password.zeroize();
-                    confirmation.zeroize();
-                    bail!("Passwords do not match");
-                }
-            }
-
-            Ok(password)
-        }
-    }
-}
-
-fn show_password_warning() {
-    eprintln!("\n╔════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║                         ⚠️  IMPORTANT! ⚠️                          ║");
-    eprintln!("╠════════════════════════════════════════════════════════════════════╣");
-    eprintln!("║                                                                    ║");
-    eprintln!("║  Your password CANNOT be recovered if lost or forgotten.           ║");
-    eprintln!("║  Without it, your encrypted data will be PERMANENTLY inaccessible. ║");
-    eprintln!("║                                                                    ║");
-    eprintln!("║  → Use a strong, memorable password                                ║");
-    eprintln!("║  → Store it under a secret name in another password manager        ║");
-    eprintln!("║  → Never share it with anyone                                      ║");
-    eprintln!("║                                                                    ║");
-    eprintln!("╚════════════════════════════════════════════════════════════════════╝\n");
 }
 
 fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
@@ -263,7 +221,7 @@ fn main() -> Result<()> {
     // Disable core dumps to prevent memory dumps on crash
     let _ = disable_core_dumps();
 
-    let params = CliParams::parse();
+    let mut params = CliParams::parse();
 
     // Enable ptrace self-protection to prevent debuggers from attaching
     if !params.insecure_allow_debugging
@@ -280,10 +238,10 @@ fn main() -> Result<()> {
 
     let _dbg_stop_guard = start_background_debugger_checks();
 
-    let mut password = {
+    let mut password = params.insecure_password.take().unwrap_or_else(|| {
         let need_confirmation = params.encrypt || !params.filename.exists();
-        get_password(&params, need_confirmation)?
-    };
+        get_password(&params.filename, need_confirmation).expect("password")
+    });
 
     if params.encrypt {
         let key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
