@@ -254,20 +254,20 @@ fn main() -> Result<()> {
         password.zeroize();
         run_encrypt(&params, key)
     } else if params.decrypt {
-        let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+        let key = EncryptionKey::for_file(&password, &params.filename)?;
         password.zeroize();
         run_decrypt(&params, key)
     } else if params.update_with.is_some() {
         let spinner = Spinner::new("Deriving encryption keys", params.quiet);
 
-        let main_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+        let main_key = EncryptionKey::for_file(&password, &params.filename)?;
 
         spinner.set_message("Deriving encryption key for update file");
         let update_file = params
             .update_with
             .as_ref()
             .expect("update_with must be set");
-        let update_key = Cypher::encryption_key_for_file(&password, update_file)?;
+        let update_key = EncryptionKey::for_file(&password, update_file)?;
         password.zeroize();
 
         spinner.finish_and_clear();
@@ -282,7 +282,7 @@ fn main() -> Result<()> {
     } else if params.upgrade_storage {
         let spinner = Spinner::new("Deriving old encryption keys", params.quiet);
 
-        let old_key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+        let old_key = EncryptionKey::for_file(&password, &params.filename)?;
 
         spinner.set_message("Deriving new encryption keys");
         let new_key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
@@ -294,7 +294,7 @@ fn main() -> Result<()> {
     } else {
         let spinner = Spinner::new("Deriving encryption key", params.quiet);
 
-        let key = Cypher::encryption_key_for_file(&password, &params.filename)?;
+        let key = EncryptionKey::for_file(&password, &params.filename)?;
 
         spinner.finish_and_clear();
 

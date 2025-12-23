@@ -1,12 +1,14 @@
+use std::fs;
 use std::mem::size_of;
+use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
 use crate::constants::{KEY_LEN, KeyBytes, SaltBytes};
-use crate::version::CypherVersion;
+use crate::version::{CypherVersion, Version7Header};
 
 #[derive(Clone, Default)]
 pub struct EncryptionKey {
@@ -69,6 +71,29 @@ impl EncryptionKey {
             hmac_key: Zeroizing::new(hmac_key),
             salt: *salt,
         })
+    }
+
+    pub fn for_file(password: &str, path: &Path) -> Result<Self> {
+        let version = CypherVersion::probe_file(path)?;
+
+        let key = match version {
+            CypherVersion::LegacyWithoutKdf => Self::from_password(version, password)?,
+            CypherVersion::V7WithKdf => {
+                if !fs::exists(path)? {
+                    return Self::from_password(version, password);
+                }
+                let mut file = fs::File::open(path)?;
+                if file.metadata()?.len() < u64::try_from(size_of::<Version7Header>())? {
+                    bail!("file size is too small");
+                }
+                let header: Version7Header =
+                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+                header.validate()?;
+                Self::from_password_with_salt(version, password, &header.salt)?
+            }
+        };
+
+        Ok(key)
     }
 
     pub fn as_bytes(&self) -> &KeyBytes {

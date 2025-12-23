@@ -35,28 +35,6 @@ pub const fn calculate_padding(data_len: usize) -> u8 {
     (BLOCK_SIZE - (data_len % BLOCK_SIZE)) as u8
 }
 
-/// Probes a file to determine its encryption version
-fn probe_file_version(path: &Path) -> Result<CypherVersion> {
-    if !path.exists() {
-        return Ok(CypherVersion::default());
-    }
-    let mut file = fs::File::open(path)?;
-    let mut version_bytes = [0u8; 2];
-    file.read_exact(&mut version_bytes)?;
-
-    probe_data_version(&version_bytes)
-}
-
-/// Probes data to determine its encryption version
-fn probe_data_version(data: &[u8]) -> Result<CypherVersion> {
-    if data.len() < 2 {
-        bail!("Data too short to determine version");
-    }
-
-    let version = u16::from_be_bytes([data[0], data[1]]);
-    Ok(CypherVersion::try_from(version)?)
-}
-
 impl Cypher {
     pub const fn new(key: EncryptionKey) -> Self {
         Self { key }
@@ -66,30 +44,7 @@ impl Cypher {
         self.key.version.clone()
     }
 
-    pub fn encryption_key_for_file(password: &str, path: &Path) -> Result<EncryptionKey> {
-        let version = probe_file_version(path)?;
-
-        let key = match version {
-            CypherVersion::LegacyWithoutKdf => EncryptionKey::from_password(version, password)?,
-            CypherVersion::V7WithKdf => {
-                if !fs::exists(path)? {
-                    return EncryptionKey::from_password(version, password);
-                }
-                let mut file = fs::File::open(path)?;
-                if file.metadata()?.len() < u64::try_from(size_of::<Version7Header>())? {
-                    bail!("file size is too small");
-                }
-                let header: Version7Header =
-                    bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
-                header.validate()?;
-                EncryptionKey::from_password_with_salt(version, password, &header.salt)?
-            }
-        };
-
-        Ok(key)
-    }
-
-    // TODO: initialize HMAC from a separate key derived from master key
+    // Initializes HMAC from a separate key derived from master key
     pub(crate) fn hmac_start(&self) -> HmacSha256 {
         HmacSha256::new_from_slice(self.key.hmac_key()).expect("HMAC can take key of any size")
     }

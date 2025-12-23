@@ -1,3 +1,5 @@
+use std::{fs, io::Read as _, path::Path};
+
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
 use num_enum::TryFromPrimitive;
@@ -19,6 +21,30 @@ pub enum CypherVersion {
     /// Modern version with Argon2id KDF and HMAC
     #[default]
     V7WithKdf = 7u16,
+}
+
+impl CypherVersion {
+    /// Probes a file to determine its encryption version
+    pub fn probe_file(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let mut file = fs::File::open(path)?;
+        let mut version_bytes = [0u8; 2];
+        file.read_exact(&mut version_bytes)?;
+
+        Self::probe_data(&version_bytes)
+    }
+
+    /// Probes data to determine its encryption version
+    pub fn probe_data(data: &[u8]) -> Result<Self> {
+        if data.len() < 2 {
+            bail!("Data too short to determine version");
+        }
+
+        let version = u16::from_be_bytes([data[0], data[1]]);
+        Ok(Self::try_from(version)?)
+    }
 }
 
 #[repr(C)]
