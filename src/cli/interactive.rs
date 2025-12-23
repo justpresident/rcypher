@@ -167,14 +167,16 @@ impl InteractiveCli {
     fn cmd_get(&self, pattern: &str, storage: &Storage) -> Result<()> {
         match storage.get(pattern) {
             Ok(results) => {
-                if results.is_empty() {
-                    bail!("No keys matching '{pattern}' found!");
-                }
+                let mut found = false;
                 for (key, val) in results {
+                    found = true;
                     let mut secret = val.decrypt(&self.cypher)?;
                     let output = format!("{}: {}", key, &*secret);
                     secret.zeroize();
                     secure_print(output, self.insecure_stdout)?;
+                }
+                if !found {
+                    bail!("No keys matching '{pattern}' found!");
                 }
             }
             Err(e) => bail!("Error: {e}"),
@@ -184,21 +186,30 @@ impl InteractiveCli {
 
     fn cmd_copy(&self, key: &str, storage: &Storage) -> Result<()> {
         match storage.get(key) {
-            Ok(results) => {
-                if results.len() > 1 {
-                    println!("Multiple keys found! Plese specify exact key name:");
-                    for (key, _) in results {
-                        secure_print(key, self.insecure_stdout)?;
+            Ok(mut results) => {
+                let first = results.next();
+                let second = results.next();
+
+                match (first, second) {
+                    (None, _) => bail!("No key '{key}' found!"),
+                    (Some((first_key, _)), Some((second_key, _))) => {
+                        // Multiple results - print all
+                        println!("Multiple keys found! Plese specify exact key name:");
+                        secure_print(first_key.to_string(), self.insecure_stdout)?;
+                        secure_print(second_key.to_string(), self.insecure_stdout)?;
+                        for (key, _) in results {
+                            secure_print(key.to_string(), self.insecure_stdout)?;
+                        }
                     }
-                } else if let Some((_, val)) = results.first() {
-                    let mut secret = val.decrypt(&self.cypher)?;
-                    copy_to_clipboard(
-                        secret.as_ref(),
-                        std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
-                    )?;
-                    secret.zeroize();
-                } else {
-                    bail!("No key '{key}' found!");
+                    (Some((_, val)), None) => {
+                        // Exactly one result - copy to clipboard
+                        let mut secret = val.decrypt(&self.cypher)?;
+                        copy_to_clipboard(
+                            secret.as_ref(),
+                            std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
+                        )?;
+                        secret.zeroize();
+                    }
                 }
             }
             Err(e) => bail!("Error: {e}"),
@@ -224,7 +235,7 @@ impl InteractiveCli {
         match storage.search(pattern) {
             Ok(keys) => {
                 for key in keys {
-                    secure_print(key, self.insecure_stdout)?;
+                    secure_print(key.to_string(), self.insecure_stdout)?;
                 }
             }
             Err(e) => bail!("Error: {e}"),

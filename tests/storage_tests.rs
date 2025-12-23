@@ -22,7 +22,7 @@ fn test_storage_put_get() {
     storage.put("key1".to_string(), "value1".into());
     storage.put("key2".to_string(), "value2".into());
 
-    let results = storage.get("key1").unwrap();
+    let results: Vec<_> = storage.get("key1").unwrap().collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0.as_bytes(), "key1".as_bytes());
     assert_eq!(results[0].1.as_bytes(), "value1".as_bytes());
@@ -36,12 +36,12 @@ fn test_storage_put_multiple_values() {
     storage.put("key1".to_string(), "value3".into());
 
     // get should return the latest value
-    let results = storage.get("key1").unwrap();
+    let results: Vec<_> = storage.get("key1").unwrap().collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].1.as_bytes(), "value3".as_bytes());
 
     // history should return all values
-    let history = storage.history("key1").unwrap();
+    let history: Vec<_> = storage.history("key1").unwrap().collect();
     assert_eq!(history.len(), 3);
     assert_eq!(history[0].value.as_bytes(), "value1".as_bytes());
     assert_eq!(history[1].value.as_bytes(), "value2".as_bytes());
@@ -56,11 +56,11 @@ fn test_storage_get_with_regex() {
     storage.put("prod1".to_string(), "value3".into());
 
     // Match all test keys
-    let results = storage.get("test.*").unwrap();
+    let results: Vec<_> = storage.get("test.*").unwrap().collect();
     assert_eq!(results.len(), 2);
 
     // Match specific key
-    let results = storage.get("test1").unwrap();
+    let results: Vec<_> = storage.get("test1").unwrap().collect();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].0, "test1");
 }
@@ -70,7 +70,7 @@ fn test_storage_get_no_match() {
     let mut storage = Storage::new();
     storage.put("key1".to_string(), "value1".into());
 
-    let results = storage.get("nonexistent").unwrap();
+    let results: Vec<_> = storage.get("nonexistent").unwrap().collect();
     assert_eq!(results.len(), 0);
 }
 
@@ -81,12 +81,12 @@ fn test_storage_search() {
     storage.put("user_bob".to_string(), "value2".into());
     storage.put("admin_charlie".to_string(), "value3".into());
 
-    let keys = storage.search("user_").unwrap();
+    let keys: Vec<_> = storage.search("user_").unwrap().collect();
     assert_eq!(keys.len(), 2);
-    assert!(keys.contains(&"user_alice".to_string()));
-    assert!(keys.contains(&"user_bob".to_string()));
+    assert!(keys.contains(&"user_alice"));
+    assert!(keys.contains(&"user_bob"));
 
-    let all_keys = storage.search("").unwrap();
+    let all_keys: Vec<_> = storage.search("").unwrap().collect();
     assert_eq!(all_keys.len(), 3);
 }
 
@@ -115,7 +115,7 @@ fn test_storage_history() {
     storage.put_ts("key1".to_string(), "v2".into(), timestamp.add(1));
     storage.put_ts("key1".to_string(), "v3".into(), timestamp.add(2));
 
-    let history = storage.history("key1").unwrap();
+    let history: Vec<_> = storage.history("key1").unwrap().collect();
     assert_eq!(history.len(), 3);
 
     // Timestamps should be in ascending order
@@ -250,7 +250,7 @@ fn test_storage_ordering() {
     storage.put("beta".to_string(), "b".into());
 
     // Search should return sorted
-    let keys = storage.search("").unwrap();
+    let keys: Vec<_> = storage.search("").unwrap().collect();
     assert_eq!(keys[0], "alpha");
     assert_eq!(keys[1], "beta");
     assert_eq!(keys[2], "zebra");
@@ -266,17 +266,17 @@ fn test_special_characters_in_keys() {
 
     assert_eq!(storage.data.len(), 4);
 
-    let mut result = storage.get("key-with-dash").unwrap();
+    let result: Vec<_> = storage.get("key-with-dash").unwrap().collect();
     assert_eq!(result[0].1.as_bytes(), "value1".as_bytes());
-    result = storage.get("key_with_underscore").unwrap();
+    let result: Vec<_> = storage.get("key_with_underscore").unwrap().collect();
     assert_eq!(result[0].1.as_bytes(), "value2".as_bytes());
-    result = storage.get("key.with.dots").unwrap();
+    let result: Vec<_> = storage.get("key.with.dots").unwrap().collect();
     assert_eq!(result[0].1.as_bytes(), "value3".as_bytes());
-    result = storage.get("key@with@at").unwrap();
+    let result: Vec<_> = storage.get("key@with@at").unwrap().collect();
     assert_eq!(result[0].1.as_bytes(), "value4".as_bytes());
 
     // Dot in regex matches any character
-    let results = storage.get("key.*").unwrap();
+    let results: Vec<_> = storage.get("key.*").unwrap().collect();
     assert_eq!(results.len(), 4);
 }
 

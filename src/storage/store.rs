@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::string::String;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
@@ -9,13 +10,13 @@ use super::value::{EncryptedValue, ValueEntry};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Storage {
-    pub data: HashMap<String, Vec<ValueEntry>>,
+    pub data: BTreeMap<String, Vec<ValueEntry>>,
 }
 
 impl Storage {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
-            data: HashMap::new(),
+            data: BTreeMap::new(),
         }
     }
 
@@ -35,40 +36,46 @@ impl Storage {
             .push(ValueEntry { value, timestamp });
     }
 
-    pub fn get(&self, pattern: &str) -> Result<Vec<(String, EncryptedValue)>> {
+    /// Returns an iterator over key-value pairs matching the given regex pattern.
+    ///
+    /// # Sorting
+    /// - Keys are returned in sorted order (guaranteed by `BTreeMap`)
+    /// - Returns the latest value for each key (relies on entries being sorted
+    ///   by timestamp during deserialization in `deserialize_storage_v4`)
+    pub fn get(&self, pattern: &str) -> Result<impl Iterator<Item = (&str, &EncryptedValue)> + '_> {
         let re = Regex::new(&format!("^{pattern}$"))?;
-        let mut results = Vec::new();
-
-        for (key, entries) in &self.data {
-            if re.is_match(key)
-                && let Some(entry) = entries.last()
-            {
-                results.push((key.clone(), entry.value.clone()));
-            }
-        }
-
-        results.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(results)
+        Ok(self
+            .data
+            .iter()
+            .filter(move |(k, entries)| re.is_match(k) && !entries.is_empty())
+            .filter_map(|(k, entries)| entries.last().map(|entry| (k.as_str(), &entry.value))))
     }
 
-    pub fn history(&self, key: &str) -> Option<&Vec<ValueEntry>> {
-        self.data.get(key)
+    /// Returns an iterator over all historical values for a given key.
+    ///
+    /// # Sorting
+    /// Entries are returned in chronological order (oldest to newest).
+    /// This ordering is guaranteed by timestamp sorting during deserialization
+    /// in `deserialize_storage_v4`.
+    pub fn history(&self, key: &str) -> Option<impl Iterator<Item = &ValueEntry> + '_> {
+        self.data.get(key).map(|entries| entries.iter())
     }
 
     pub fn delete(&mut self, key: &str) -> bool {
         self.data.remove(key).is_some()
     }
 
-    pub fn search(&self, pattern: &str) -> Result<Vec<String>> {
+    /// Returns an iterator over all keys matching the given regex pattern.
+    ///
+    /// # Sorting
+    /// Keys are returned in sorted order (guaranteed by `BTreeMap`).
+    pub fn search(&self, pattern: &str) -> Result<impl Iterator<Item = &str> + '_> {
         let re = Regex::new(pattern)?;
-        let mut keys: Vec<String> = self
+        Ok(self
             .data
             .keys()
-            .filter(|k| re.is_match(k))
-            .cloned()
-            .collect();
-        keys.sort();
-        Ok(keys)
+            .filter(move |k| re.is_match(k))
+            .map(String::as_str))
     }
 }
 

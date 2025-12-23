@@ -110,7 +110,11 @@ pub fn deserialize_storage_v4(data: &[u8]) -> Result<Storage> {
             .push(ValueEntry { value, timestamp });
     }
 
-    // Sort entries by timestamp
+    // IMPORTANT: Sort entries by timestamp after deserialization.
+    // The Storage::history() method relies on this sorting to return entries
+    // in chronological order without needing to sort on every call.
+    // The Storage::get() method also depends on this to reliably return the
+    // latest value using .last().
     for entries in storage.data.values_mut() {
         entries.sort_by_key(|e| e.timestamp);
     }
