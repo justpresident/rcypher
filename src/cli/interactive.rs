@@ -59,6 +59,12 @@ impl InteractiveCli {
 
         rl.clear_screen()?;
         loop {
+            if is_debugger_attached() {
+                bail!("Debugger detected");
+            }
+
+            let readline = rl.readline(&self.prompt);
+
             // Check timeout
             if last_use_time
                 .elapsed()
@@ -68,14 +74,9 @@ impl InteractiveCli {
             {
                 break;
             }
-            if is_debugger_attached() {
-                bail!("Debugger detected");
-            }
 
-            let readline = rl.readline(&self.prompt);
             match readline {
                 Ok(mut input_line) => {
-                    last_use_time = SystemTime::now();
                     let line = input_line.trim();
                     if line.is_empty() {
                         continue;
@@ -86,6 +87,8 @@ impl InteractiveCli {
                     let mut storage_guard = storage.lock().expect("able to lock");
                     if let Err(err) = self.process_cmd(line, &mut storage_guard) {
                         println!("{err}");
+                    } else {
+                        last_use_time = SystemTime::now();
                     }
 
                     input_line.zeroize();
