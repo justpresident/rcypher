@@ -22,8 +22,8 @@ use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::cli::utils::get_password;
 use rcypher::{
-    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage,
-    ThreadStopGuard, load_storage, serialize_storage,
+    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, StorageV5,
+    ThreadStopGuard, load_storage_v5, save_storage_v5,
 }; // Import from lib
 use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -32,7 +32,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
 #[derive(Parser)]
@@ -151,29 +150,20 @@ fn run_upgrade_storage(
     let spinner = Spinner::new("Converting", params.quiet);
 
     let old_cypher = Cypher::new(old_key);
-    let old_storage = load_storage(&old_cypher, &params.filename)?;
+    let old_storage = load_storage_v5(&old_cypher, &params.filename)?;
 
-    let mut new_storage = Storage::new();
+    let mut new_storage = StorageV5::new();
     let new_cypher = Cypher::new(new_key);
-    for (key, entries) in old_storage.data {
+    for (key, entries) in old_storage.root.secrets {
         for entry in entries {
-            let mut secret = entry.value.decrypt(&old_cypher)?;
+            let mut secret = entry.encrypted_value().decrypt(&old_cypher)?;
             let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
             new_storage.put_ts(key.clone(), new_value, entry.timestamp);
             secret.zeroize();
         }
     }
-    let dir = &params
-        .filename
-        .parent()
-        .expect("Can't get parent dir of a file");
-    let mut temp = NamedTempFile::new_in(dir)?;
 
-    let serialized = serialize_storage(&new_storage);
-    let encrypted = new_cypher.encrypt(&serialized)?;
-
-    temp.write_all(&encrypted)?;
-    temp.persist(&params.filename)?;
+    save_storage_v5(&new_cypher, &new_storage, &params.filename)?;
 
     spinner.finish_and_clear();
     Ok(())

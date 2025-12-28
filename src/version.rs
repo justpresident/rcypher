@@ -11,6 +11,7 @@ use crate::constants::{BLOCK_SIZE, BlockBytes, SaltBytes};
 #[repr(u16)]
 pub enum StoreVersion {
     Version4 = 4u16,
+    Version5 = 5u16,
 }
 
 impl StoreVersion {

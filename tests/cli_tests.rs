@@ -1,5 +1,5 @@
-use rcypher::save_storage;
-use rcypher::{Cypher, CypherVersion, EncryptedValue, EncryptionKey, Storage};
+use rcypher::save_storage_v5;
+use rcypher::{Cypher, CypherVersion, EncryptedValue, EncryptionKey, StorageV5};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -369,7 +369,7 @@ fn test_upgrade_storage() {
         EncryptionKey::from_password(CypherVersion::LegacyWithoutKdf, "test_password").unwrap();
     let legacy_cypher = Cypher::new(legacy_key);
 
-    let mut storage = Storage::new();
+    let mut storage = StorageV5::new();
     storage.put(
         "key1".to_string(),
         EncryptedValue::encrypt(&legacy_cypher, "value1").unwrap(),
@@ -379,7 +379,7 @@ fn test_upgrade_storage() {
         EncryptedValue::encrypt(&legacy_cypher, "value2").unwrap(),
     );
 
-    save_storage(&legacy_cypher, &storage, &storage_path).unwrap();
+    save_storage_v5(&legacy_cypher, &storage, &storage_path).unwrap();
 
     // Run upgrade command
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));

@@ -1,13 +1,13 @@
 use crate::Cypher;
 use crate::EncryptedValue;
-use crate::Storage;
+use crate::StorageV5;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::STANDBY_TIMEOUT;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
 use crate::is_debugger_attached;
-use crate::load_storage;
-use crate::save_storage;
+use crate::load_storage_v5;
+use crate::save_storage_v5;
 use anyhow::{Result, bail};
 use rustyline::CompletionType;
 use rustyline::Config;
@@ -41,7 +41,7 @@ impl InteractiveCli {
     }
 
     pub fn run(&self) -> Result<()> {
-        let storage = Arc::new(Mutex::new(load_storage(&self.cypher, &self.filename)?));
+        let storage = Arc::new(Mutex::new(load_storage_v5(&self.cypher, &self.filename)?));
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -109,7 +109,7 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn process_cmd(&self, line: &str, storage: &mut Storage) -> Result<()> {
+    fn process_cmd(&self, line: &str, storage: &mut StorageV5) -> Result<()> {
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         let cmd = parts[0];
         match cmd {
@@ -157,17 +157,17 @@ impl InteractiveCli {
         }
     }
 
-    fn cmd_put(&self, key: &str, value: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_put(&self, key: &str, value: &str, storage: &mut StorageV5) -> Result<()> {
         let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
         storage.put(key.to_string(), encrypted_value);
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
-        save_storage(&self.cypher, storage, &self.filename)?;
+        save_storage_v5(&self.cypher, storage, &self.filename)?;
         Ok(())
     }
 
-    fn cmd_get(&self, pattern: &str, storage: &Storage) -> Result<()> {
+    fn cmd_get(&self, pattern: &str, storage: &StorageV5) -> Result<()> {
         match storage.get(pattern) {
             Ok(results) => {
                 let mut found = false;
@@ -187,7 +187,7 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_copy(&self, key: &str, storage: &Storage) -> Result<()> {
+    fn cmd_copy(&self, key: &str, storage: &StorageV5) -> Result<()> {
         match storage.get(key) {
             Ok(mut results) => {
                 let first = results.next();
@@ -220,10 +220,10 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_history(&self, key: &str, storage: &Storage) -> Result<()> {
+    fn cmd_history(&self, key: &str, storage: &StorageV5) -> Result<()> {
         if let Some(entries) = storage.history(key) {
             for entry in entries {
-                let mut secret = entry.value.decrypt(&self.cypher)?;
+                let mut secret = entry.encrypted_value().decrypt(&self.cypher)?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 secure_print(output, self.insecure_stdout)?;
@@ -234,7 +234,7 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_search(&self, pattern: &str, storage: &Storage) -> Result<()> {
+    fn cmd_search(&self, pattern: &str, storage: &StorageV5) -> Result<()> {
         match storage.search(pattern) {
             Ok(keys) => {
                 for key in keys {
@@ -246,10 +246,10 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_delete(&self, key: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_delete(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
         if storage.delete(key) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
-            save_storage(&self.cypher, storage, &self.filename)?;
+            save_storage_v5(&self.cypher, storage, &self.filename)?;
         } else {
             bail!("No such key '{key}' found");
         }

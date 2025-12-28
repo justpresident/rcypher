@@ -30,8 +30,9 @@ pub use cli::utils::{Spinner, ThreadStopGuard, copy_to_clipboard, format_timesta
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 pub use storage::{
-    EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
-    serialize_storage,
+    EncryptedValue, SecretEntry, StorageV4, StorageV5, deserialize_storage_v4,
+    deserialize_storage_v5_from_slice, load_storage_v4, load_storage_v5, save_storage_v4,
+    save_storage_v5, serialize_storage_v4, serialize_storage_v5_to_vec,
 };
 pub use version::CypherVersion;
 

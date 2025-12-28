@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::Storage;
+use crate::StorageV5;
 use rustyline::Helper;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -8,11 +8,11 @@ use rustyline::hint::Hinter;
 use rustyline::validate::Validator;
 
 pub struct CypherCompleter {
-    storage: Arc<Mutex<Storage>>,
+    storage: Arc<Mutex<StorageV5>>,
 }
 
 impl CypherCompleter {
-    pub const fn new(storage: Arc<Mutex<Storage>>) -> Self {
+    pub const fn new(storage: Arc<Mutex<StorageV5>>) -> Self {
         Self { storage }
     }
 }
@@ -60,7 +60,7 @@ impl Completer for CypherCompleter {
                         let prefix = if parts.len() == 2 { parts[1] } else { "" };
 
                         let storage = self.storage.lock().expect("able to take a lock");
-                        let mut keys: Vec<String> = storage.data.keys().cloned().collect();
+                        let mut keys: Vec<String> = storage.root.secrets.keys().cloned().collect();
                         drop(storage);
                         keys.sort();
 

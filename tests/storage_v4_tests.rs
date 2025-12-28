@@ -12,13 +12,13 @@ fn temp_test_file() -> (TempDir, PathBuf) {
 
 #[test]
 fn test_storage_new() {
-    let storage = Storage::new();
+    let storage = StorageV4::new();
     assert_eq!(storage.data.len(), 0);
 }
 
 #[test]
 fn test_storage_put_get() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
     storage.put("key2".to_string(), "value2".into());
 
@@ -30,7 +30,7 @@ fn test_storage_put_get() {
 
 #[test]
 fn test_storage_put_multiple_values() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
     storage.put("key1".to_string(), "value2".into());
     storage.put("key1".to_string(), "value3".into());
@@ -50,7 +50,7 @@ fn test_storage_put_multiple_values() {
 
 #[test]
 fn test_storage_get_with_regex() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("test1".to_string(), "value1".into());
     storage.put("test2".to_string(), "value2".into());
     storage.put("prod1".to_string(), "value3".into());
@@ -67,7 +67,7 @@ fn test_storage_get_with_regex() {
 
 #[test]
 fn test_storage_get_no_match() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
 
     let results: Vec<_> = storage.get("nonexistent").unwrap().collect();
@@ -76,7 +76,7 @@ fn test_storage_get_no_match() {
 
 #[test]
 fn test_storage_search() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("user_alice".to_string(), "value1".into());
     storage.put("user_bob".to_string(), "value2".into());
     storage.put("admin_charlie".to_string(), "value3".into());
@@ -92,7 +92,7 @@ fn test_storage_search() {
 
 #[test]
 fn test_storage_delete() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
     storage.put("key2".to_string(), "value2".into());
 
@@ -106,7 +106,7 @@ fn test_storage_delete() {
 #[test]
 fn test_storage_history() {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "v1".into());
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -130,20 +130,20 @@ fn test_storage_history() {
 
 #[test]
 fn test_serialize_deserialize_empty() {
-    let storage = Storage::new();
-    let serialized = serialize_storage(&storage);
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let storage = StorageV4::new();
+    let serialized = serialize_storage_v4(&storage);
+    let deserialized = deserialize_storage_v4(&serialized).unwrap();
 
     assert_eq!(deserialized.data.len(), 0);
 }
 
 #[test]
 fn test_serialize_deserialize_single_entry() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
 
-    let serialized = serialize_storage(&storage);
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = serialize_storage_v4(&storage);
+    let deserialized = deserialize_storage_v4(&serialized).unwrap();
 
     assert_eq!(deserialized.data.len(), 1);
     let entry = &deserialized.data["key1"][0];
@@ -152,13 +152,13 @@ fn test_serialize_deserialize_single_entry() {
 
 #[test]
 fn test_serialize_deserialize_multiple_entries() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
     storage.put("key2".to_string(), "value2".into());
     storage.put("key1".to_string(), "value1_updated".into());
 
-    let serialized = serialize_storage(&storage);
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = serialize_storage_v4(&storage);
+    let deserialized = deserialize_storage_v4(&serialized).unwrap();
 
     assert_eq!(deserialized.data.len(), 2);
     assert_eq!(deserialized.data["key1"].len(), 2);
@@ -167,12 +167,12 @@ fn test_serialize_deserialize_multiple_entries() {
 
 #[test]
 fn test_serialize_deserialize_unicode() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("ключ".to_string(), "значение".into());
     storage.put("🔑".to_string(), "🎁".into());
 
-    let serialized = serialize_storage(&storage);
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = serialize_storage_v4(&storage);
+    let deserialized = deserialize_storage_v4(&serialized).unwrap();
 
     assert_eq!(deserialized.data.len(), 2);
     assert_eq!(
@@ -185,13 +185,13 @@ fn test_serialize_deserialize_unicode() {
 #[test]
 fn test_deserialize_corrupted_data() {
     // Too short
-    let result = deserialize_storage(&[0, 1, 2]);
+    let result = deserialize_storage_v4(&[0, 1, 2]);
     assert!(result.is_err());
 
     // Invalid version
     let mut data = vec![0, 99]; // version 99
     data.extend_from_slice(&[0, 0, 0, 1]); // count = 1
-    let result = deserialize_storage(&data);
+    let result = deserialize_storage_v4(&data);
     assert!(result.is_err());
 }
 
@@ -201,14 +201,14 @@ fn test_load_save_storage() {
 
     let cypher = Cypher::new(EncryptionKey::for_file("test_password", &path).unwrap());
 
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
     storage.put("key2".to_string(), "value2".into());
 
-    save_storage(&cypher, &storage, &path).unwrap();
+    save_storage_v4(&cypher, &storage, &path).unwrap();
     assert!(path.exists());
 
-    let loaded = load_storage(&cypher, &path).unwrap();
+    let loaded = load_storage_v4(&cypher, &path).unwrap();
     assert_eq!(loaded.data.len(), 2);
     assert_eq!(loaded.data["key1"][0].value.as_bytes(), "value1".as_bytes());
     assert_eq!(loaded.data["key2"][0].value.as_bytes(), "value2".as_bytes());
@@ -220,7 +220,7 @@ fn test_load_nonexistent_file() {
 
     let cypher = Cypher::new(EncryptionKey::for_file("test_password", &path).unwrap());
 
-    let storage = load_storage(&cypher, &path).unwrap();
+    let storage = load_storage_v4(&cypher, &path).unwrap();
     assert_eq!(storage.data.len(), 0);
 }
 
@@ -230,19 +230,19 @@ fn test_load_with_wrong_password() {
     let cypher1 = Cypher::new(EncryptionKey::for_file("test_password", &path).unwrap());
     let cypher2 = Cypher::new(EncryptionKey::for_file("test_password2", &path).unwrap());
 
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key1".to_string(), "value1".into());
 
-    save_storage(&cypher1, &storage, &path).unwrap();
+    save_storage_v4(&cypher1, &storage, &path).unwrap();
 
     // Should fail or return garbage
-    let result = load_storage(&cypher2, &path);
+    let result = load_storage_v4(&cypher2, &path);
     assert!(result.is_err() || result.unwrap().data.is_empty());
 }
 
 #[test]
 fn test_storage_ordering() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
 
     // Add keys in random order
     storage.put("zebra".to_string(), "z".into());
@@ -258,7 +258,7 @@ fn test_storage_ordering() {
 
 #[test]
 fn test_special_characters_in_keys() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("key-with-dash".to_string(), "value1".into());
     storage.put("key_with_underscore".to_string(), "value2".into());
     storage.put("key.with.dots".to_string(), "value3".into());
@@ -285,7 +285,7 @@ fn test_concurrent_operations() {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    let storage = Arc::new(Mutex::new(Storage::new()));
+    let storage = Arc::new(Mutex::new(StorageV4::new()));
     let mut handles = vec![];
 
     for i in 0..10 {
@@ -312,22 +312,22 @@ fn test_storage_persistence_across_sessions() {
 
     // Session 1: Create and save
     {
-        let mut storage = Storage::new();
+        let mut storage = StorageV4::new();
         storage.put("session1_key".to_string(), "session1_value".into());
-        save_storage(&cypher, &storage, &path).unwrap();
+        save_storage_v4(&cypher, &storage, &path).unwrap();
     }
 
     // Session 2: Load and add
     {
-        let mut storage = load_storage(&cypher, &path).unwrap();
+        let mut storage = load_storage_v4(&cypher, &path).unwrap();
         assert_eq!(storage.data.len(), 1);
         storage.put("session2_key".to_string(), "session2_value".into());
-        save_storage(&cypher, &storage, &path).unwrap();
+        save_storage_v4(&cypher, &storage, &path).unwrap();
     }
 
     // Session 3: Verify both keys exist
     {
-        let storage = load_storage(&cypher, &path).unwrap();
+        let storage = load_storage_v4(&cypher, &path).unwrap();
         assert_eq!(storage.data.len(), 2);
         assert!(storage.data.contains_key("session1_key"));
         assert!(storage.data.contains_key("session2_key"));
@@ -336,14 +336,14 @@ fn test_storage_persistence_across_sessions() {
 
 #[test]
 fn test_empty_key_value() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     storage.put("".to_string(), "value".into());
     storage.put("key".to_string(), "".into());
 
     assert_eq!(storage.data.len(), 2);
 
-    let serialized = serialize_storage(&storage);
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = serialize_storage_v4(&storage);
+    let deserialized = deserialize_storage_v4(&serialized).unwrap();
 
     assert_eq!(deserialized.data.len(), 2);
     assert_eq!(
@@ -355,14 +355,14 @@ fn test_empty_key_value() {
 
 #[test]
 fn test_very_long_key_value() {
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     let long_key = "k".repeat(10000);
     let long_value = "v".repeat(50000);
 
     storage.put(long_key.clone(), long_value.clone().into());
 
-    let serialized = serialize_storage(&storage);
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = serialize_storage_v4(&storage);
+    let deserialized = deserialize_storage_v4(&serialized).unwrap();
 
     assert_eq!(
         deserialized.data[&long_key][0].value.as_bytes(),

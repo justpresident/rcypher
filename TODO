@@ -1,0 +1,30 @@
+# Implement a new extensible storage format that supports
+
+## grouping secrets into folders
+- everything is in the root folder by default
+- secrets can be moved between folders
+
+## encryption domains
+- default encryption domain(0) means encryption with default master key as it is done now in storage v4.
+- non-default domain means secrets are encrypted with a custom key requiring another password
+- can be attached to either individual keys or folders
+- when a folder has a non-default encrypted domain, all its contents should be encrypted together, such that it is impossible to know what is stored inside. It should appear in the CLI UI as a regular key/value instead of a folder with a user-set value to confuse attackers in a case of master key is stolen.
+- "unlock" command for such a key asks for a password, decrypts its content and opens it for querying by all commands like if it was unencrypted.
+
+**Use case**
+Encryption:
+- User can call a command "lock {folder/key}" which would ask which encryption domain to use or to create a new one, password for it and a PlaceholderSecret value to show when it is locked.
+- The value or a folder is immediately encrypted and stored encrypted in memory
+- get/set/history commands work as if a PlaceholderSecret is a real stored secret value.
+
+Decryption:
+- get/set/history commands work as always as if a PlaceHolderSecret was a real value. set command can override the value even if it holds an encrypted folder underneath.
+- "unlock key" command checks encryption domain and if a key for this domain is already cached, then it performs decryption and if it is a folder, decrypts its contents into memory making its contents available for get/set/history commands
+
+## rename/move commands
+- rename command allows renaming keys with a regexp. Before renaming, it performs checks confirming that there are no collisions and asks for a confirmation if multiple keys are being renamed.
+- move command allows moving from/into folders. Default folder is "/"
+- an encrypted folder must be unlocked to allow copying into/from it. Re-encryption is performed with a key from corresponding encryption domain.
+
+## support SecretType and optional metadata HashMap
+- this will later be used for supporting storage of files.

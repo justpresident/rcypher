@@ -1,13 +1,14 @@
 use std::fmt;
 
 use anyhow::Result;
+use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::crypto::Cypher;
 use crate::version::CypherVersion;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Encode, Decode)]
 pub struct EncryptedValue {
     // Store encrypted bytes instead of plaintext
     ciphertext: Vec<u8>,
