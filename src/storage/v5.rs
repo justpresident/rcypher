@@ -162,6 +162,92 @@ impl StorageV5 {
             .is_some()
     }
 
+    /// Move a key from one location to another (like shell mv)
+    /// `source_folder`: folder containing the key
+    /// key: the key to move
+    /// `dest_folder`: destination folder
+    /// `dest_key`: optional new key name (if None, keeps same name)
+    pub fn move_key(
+        &mut self,
+        source_folder: &str,
+        key: &str,
+        dest_folder: &str,
+        dest_key: Option<&str>,
+    ) -> Result<()> {
+        let final_key = dest_key.unwrap_or(key);
+
+        // Check destination folder exists and no collision (must do before removing from source)
+        {
+            let dest = self
+                .get_folder(dest_folder)
+                .ok_or_else(|| anyhow::anyhow!("Destination folder '{dest_folder}' not found"))?;
+
+            if dest.secrets.contains_key(final_key) {
+                bail!("Key '{final_key}' already exists at destination '{dest_folder}'");
+            }
+        }
+
+        // Remove from source
+        let entries = self
+            .get_folder_mut(source_folder)
+            .ok_or_else(|| anyhow::anyhow!("Source folder '{source_folder}' not found"))?
+            .secrets
+            .remove(key)
+            .ok_or_else(|| anyhow::anyhow!("Key '{key}' not found in '{source_folder}'"))?;
+
+        // Insert into dest
+        self.get_folder_mut(dest_folder)
+            .expect("dest folder exists")
+            .secrets
+            .insert(final_key.to_string(), entries);
+
+        Ok(())
+    }
+
+    /// Move a folder from one location to another (like shell mv for directories)
+    /// `parent_path`: parent folder containing the folder to move
+    /// `folder_name`: name of the folder to move
+    /// `dest_parent`: destination parent folder
+    /// `dest_name`: optional new folder name (if None, keeps same name)
+    pub fn move_folder(
+        &mut self,
+        parent_path: &str,
+        folder_name: &str,
+        dest_parent: &str,
+        dest_name: Option<&str>,
+    ) -> Result<()> {
+        let final_name = dest_name.unwrap_or(folder_name);
+
+        // Check destination parent exists and no collision
+        {
+            let dest = self
+                .get_folder(dest_parent)
+                .ok_or_else(|| anyhow::anyhow!("Destination folder '{dest_parent}' not found"))?;
+
+            if dest.subfolders.contains_key(final_name) {
+                bail!("Folder '{final_name}' already exists at destination '{dest_parent}'");
+            }
+        }
+
+        // Remove from source
+        let folder = self
+            .get_folder_mut(parent_path)
+            .ok_or_else(|| anyhow::anyhow!("Source folder '{parent_path}' not found"))?
+            .subfolders
+            .remove(folder_name)
+            .ok_or_else(|| {
+                anyhow::anyhow!("Folder '{folder_name}' not found in '{parent_path}'")
+            })?;
+
+        // Insert into dest
+        self.get_folder_mut(dest_parent)
+            .expect("dest parent exists")
+            .subfolders
+            .insert(final_name.to_string(), folder);
+
+        Ok(())
+    }
+
     /// Returns an iterator over all keys matching the given regex pattern in root folder.
     ///
     /// # Sorting

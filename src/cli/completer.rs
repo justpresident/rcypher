@@ -20,6 +20,61 @@ impl CypherCompleter {
             current_path,
         }
     }
+
+    /// Helper function to complete paths with optional keys and/or folders
+    fn complete_path(
+        &self,
+        input: &str,
+        pos: usize,
+        include_keys: bool,
+        include_folders: bool,
+    ) -> (usize, Vec<Pair>) {
+        let storage = self.storage.lock().expect("able to take a lock");
+        let current_path = self.current_path.lock().expect("able to lock");
+
+        // Parse input to get resolved path and prefix
+        let (target_path, prefix) = parse_key_path(&current_path, input);
+
+        // Extract original dir part to preserve user's input style in completions
+        let dir_part = input.strip_suffix(prefix).unwrap_or("");
+
+        let mut matches: Vec<Pair> = Vec::new();
+        if let Some(folder) = storage.get_folder(&target_path) {
+            // Add matching secret keys
+            if include_keys {
+                for key in folder.secrets.keys() {
+                    if key.starts_with(prefix) {
+                        let full_path = format_full_path(dir_part, key, false);
+                        matches.push(Pair {
+                            display: full_path.clone(),
+                            replacement: full_path,
+                        });
+                    }
+                }
+            }
+
+            // Add matching folder names
+            if include_folders {
+                for name in folder.subfolders.keys() {
+                    if name.starts_with(prefix) {
+                        let full_path = format_full_path(dir_part, name, true);
+                        matches.push(Pair {
+                            display: full_path.clone(),
+                            replacement: full_path,
+                        });
+                    }
+                }
+            }
+        }
+
+        drop(current_path);
+        drop(storage);
+
+        matches.sort_by(|a, b| a.replacement.cmp(&b.replacement));
+
+        let start = pos - input.len();
+        (start, matches)
+    }
 }
 
 impl Completer for CypherCompleter {
@@ -38,8 +93,8 @@ impl Completer for CypherCompleter {
         if parts.is_empty() || (parts.len() == 1 && !line.ends_with(' ')) {
             // Complete commands
             let commands = [
-                "put", "get", "copy", "history", "search", "del", "rm", "mkdir", "cd", "pwd",
-                "help",
+                "put", "get", "copy", "history", "search", "del", "rm", "mkdir", "cd", "pwd", "mv",
+                "move", "help",
             ];
             let prefix = parts.first().unwrap_or(&"");
             let matches: Vec<Pair> = commands
@@ -60,86 +115,29 @@ impl Completer for CypherCompleter {
             let cmd = parts[0];
             match cmd {
                 "cd" | "mkdir" => {
-                    // Complete with folder names
+                    // Complete with folder names only
                     if parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')) {
                         let input = if parts.len() == 2 { parts[1] } else { "" };
-
-                        let storage = self.storage.lock().expect("able to take a lock");
-                        let current_path = self.current_path.lock().expect("able to lock");
-
-                        // Parse input to get resolved path and prefix
-                        let (target_path, prefix) = parse_key_path(&current_path, input);
-
-                        // Extract original dir part to preserve user's input style in completions
-                        // (e.g., if user typed "work/api", complete as "work/api_key", not "/work/api_key")
-                        let dir_part = input.strip_suffix(prefix).unwrap_or("");
-
-                        let mut matches: Vec<Pair> = Vec::new();
-                        if let Some(folder) = storage.get_folder(&target_path) {
-                            for name in folder.subfolders.keys() {
-                                if name.starts_with(prefix) {
-                                    let full_path = format_full_path(dir_part, name, true);
-                                    matches.push(Pair {
-                                        display: full_path.clone(),
-                                        replacement: full_path,
-                                    });
-                                }
-                            }
-                        }
-                        drop(current_path);
-                        drop(storage);
-
-                        matches.sort_by(|a, b| a.replacement.cmp(&b.replacement));
-
-                        let start = pos - input.len();
-                        return Ok((start, matches));
+                        return Ok(self.complete_path(input, pos, false, true));
                     }
                 }
                 "get" | "history" | "del" | "rm" | "put" | "copy" | "search" => {
-                    // Complete with keys and folders from current directory
+                    // Complete with keys and folders
                     if parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')) {
                         let input = if parts.len() == 2 { parts[1] } else { "" };
-
-                        let storage = self.storage.lock().expect("able to take a lock");
-                        let current_path = self.current_path.lock().expect("able to lock");
-
-                        // Parse input to get resolved path and prefix
-                        let (target_path, prefix) = parse_key_path(&current_path, input);
-
-                        // Extract original dir part to preserve user's input style in completions
-                        // (e.g., if user typed "work/api", complete as "work/api_key", not "/work/api_key")
-                        let dir_part = input.strip_suffix(prefix).unwrap_or("");
-
-                        let mut matches: Vec<Pair> = Vec::new();
-                        if let Some(folder) = storage.get_folder(&target_path) {
-                            // Add matching secret keys
-                            for key in folder.secrets.keys() {
-                                if key.starts_with(prefix) {
-                                    let full_path = format_full_path(dir_part, key, false);
-                                    matches.push(Pair {
-                                        display: full_path.clone(),
-                                        replacement: full_path,
-                                    });
-                                }
-                            }
-                            // Add matching folder names
-                            for name in folder.subfolders.keys() {
-                                if name.starts_with(prefix) {
-                                    let full_path = format_full_path(dir_part, name, true);
-                                    matches.push(Pair {
-                                        display: full_path.clone(),
-                                        replacement: full_path,
-                                    });
-                                }
-                            }
-                        }
-                        drop(current_path);
-                        drop(storage);
-
-                        matches.sort_by(|a, b| a.replacement.cmp(&b.replacement));
-
-                        let start = pos - input.len();
-                        return Ok((start, matches));
+                        return Ok(self.complete_path(input, pos, true, true));
+                    }
+                }
+                "mv" | "move" => {
+                    // First argument: complete with keys and folders (source)
+                    if parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')) {
+                        let input = if parts.len() == 2 { parts[1] } else { "" };
+                        return Ok(self.complete_path(input, pos, true, true));
+                    }
+                    // Second argument: complete with folders only (destination)
+                    else if parts.len() == 2 || (parts.len() == 3 && !line.ends_with(' ')) {
+                        let input = if parts.len() == 3 { parts[2] } else { "" };
+                        return Ok(self.complete_path(input, pos, false, true));
                     }
                 }
                 _ => {}

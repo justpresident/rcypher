@@ -724,3 +724,196 @@ fn test_update_with_mixed_nested_and_root_keys() {
     assert_eq!(lines[0], "/root2: root_value2");
     assert_eq!(lines[1], "/work/nested2: nested_value2");
 }
+
+#[test]
+fn test_move_single_key_to_folder() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup: create folders and keys
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir source\n");
+    commands.extend_from_slice(b"mkdir dest\n");
+    commands.extend_from_slice(b"put source/key1 value1\n");
+    run_commands(&file_path, commands);
+
+    // Move key to dest folder
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv source/key1 dest/\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("Moved")));
+
+    // Verify key moved
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get dest/key1\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/dest/key1: value1");
+
+    // Verify key gone from source
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get source/key1\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines[0].contains("not found") || lines[0].contains("No keys matching"));
+}
+
+#[test]
+fn test_move_with_rename() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"put /old_name old_value\n");
+    run_commands(&file_path, commands);
+
+    // Move and rename
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv old_name new_name\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("Moved")));
+
+    // Verify new name exists
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get new_name\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/new_name: old_value");
+
+    // Verify old name gone
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get old_name\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines[0].contains("not found") || lines[0].contains("No keys matching"));
+}
+
+#[test]
+fn test_move_multiple_keys_to_folder() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup: create keys with pattern
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir dest\n");
+    commands.extend_from_slice(b"put /api_key1 value1\n");
+    commands.extend_from_slice(b"put /api_key2 value2\n");
+    commands.extend_from_slice(b"put /api_key3 value3\n");
+    run_commands(&file_path, commands);
+
+    // Move all api_* keys to dest
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv api_.* dest/\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("Moved 3 keys")));
+
+    // Verify all keys moved
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"search dest/.*\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("/dest/api_key1")));
+    assert!(lines.iter().any(|l| l.contains("/dest/api_key2")));
+    assert!(lines.iter().any(|l| l.contains("/dest/api_key3")));
+}
+
+#[test]
+fn test_move_across_nested_folders() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup: create nested structure
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"mkdir work/old_project\n");
+    commands.extend_from_slice(b"mkdir work/new_project\n");
+    commands.extend_from_slice(b"put work/old_project/secret old_secret\n");
+    run_commands(&file_path, commands);
+
+    // Move from nested folder to another nested folder
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv work/old_project/secret work/new_project/\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("Moved")));
+
+    // Verify moved
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get work/new_project/secret\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/work/new_project/secret: old_secret");
+}
+
+#[test]
+fn test_move_preserves_history() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup: create key with history
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir dest\n");
+    commands.extend_from_slice(b"put /key1 v1\n");
+    commands.extend_from_slice(b"put /key1 v2\n");
+    commands.extend_from_slice(b"put /key1 v3\n");
+    run_commands(&file_path, commands);
+
+    // Move the key
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv key1 dest/\n");
+    run_commands(&file_path, commands);
+
+    // Check history preserved
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"cd dest\n");
+    commands.extend_from_slice(b"history key1\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("v1")));
+    assert!(lines.iter().any(|l| l.contains("v2")));
+    assert!(lines.iter().any(|l| l.contains("v3")));
+}
+
+#[test]
+fn test_move_single_match_with_pattern() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup: create a key that matches a pattern uniquely
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir dest\n");
+    commands.extend_from_slice(b"put /api_key value1\n");
+    commands.extend_from_slice(b"put /other_key value2\n");
+    run_commands(&file_path, commands);
+
+    // Move using pattern that matches only one key
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv api_.* dest/\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("Moved")));
+
+    // Verify the key was moved
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get dest/api_key\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("value1")));
+
+    // Verify original location is empty
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get /api_key\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("No keys matching")));
+}
+
+#[test]
+fn test_move_single_folder_with_pattern() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Setup: create folders where pattern matches only one
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work_project\n");
+    commands.extend_from_slice(b"mkdir personal\n");
+    commands.extend_from_slice(b"mkdir archive\n");
+    commands.extend_from_slice(b"put work_project/secret value1\n");
+    run_commands(&file_path, commands);
+
+    // Move folder using pattern
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mv work_.* archive/\n");
+    let lines = run_commands(&file_path, commands);
+    eprintln!("Lines after mv work_.* archive/: {:?}", lines);
+    assert!(lines.iter().any(|l| l.contains("Moved folder")));
+
+    // Verify folder was moved with contents
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get archive/work_project/secret\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("value1")));
+}

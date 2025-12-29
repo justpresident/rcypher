@@ -1,15 +1,27 @@
 # Implement a new extensible storage format that supports
 
 ## grouping secrets into folders
-- everything is in the root folder by default
-- secrets can be moved between folders
+✅ **COMPLETED**
+- Hierarchical folder structure with unlimited nesting depth
+- Everything is in the root folder (/) by default
+- Commands: `mkdir`, `cd`, `pwd` for folder navigation
+- Full path support: `/work/projects/api_key`
+- Relative paths: `../other_folder`, `./subfolder`
+- Keys can be moved between folders using `mv` command
+- Comprehensive test coverage for nested folders
 
 ## encryption domains
-- default encryption domain(0) means encryption with default master key as it is done now in storage v4.
-- non-default domain means secrets are encrypted with a custom key requiring another password
-- can be attached to either individual keys or folders
-- when a folder has a non-default encrypted domain, all its contents should be encrypted together, such that it is impossible to know what is stored inside. It should appear in the CLI UI as a regular key/value instead of a folder with a user-set value to confuse attackers in a case of master key is stolen.
-- "unlock" command for such a key asks for a password, decrypts its content and opens it for querying by all commands like if it was unencrypted.
+⚠️ **PARTIALLY COMPLETED**
+- Data structures exist: `Folder` has `encryption_domain: u32` field
+- `SecretValue` enum supports both plain and encrypted folder variants
+- Default encryption domain (0) uses the master key (same as storage v4)
+
+⏳ **TODO: CLI commands and functionality**
+- Non-default domains should encrypt secrets with a custom key requiring another password
+- Can be attached to either individual keys or folders
+- When a folder has a non-default encrypted domain, all its contents should be encrypted together, such that it is impossible to know what is stored inside
+- Should appear in the CLI UI as a regular key/value instead of a folder with a user-set value to confuse attackers in case master key is stolen
+- "unlock" command for such a key asks for a password, decrypts its content and opens it for querying by all commands as if it was unencrypted
 
 **Use case**
 Encryption:
@@ -21,10 +33,27 @@ Decryption:
 - get/set/history commands work as always as if a PlaceHolderSecret was a real value. set command can override the value even if it holds an encrypted folder underneath.
 - "unlock key" command checks encryption domain and if a key for this domain is already cached, then it performs decryption and if it is a folder, decrypts its contents into memory making its contents available for get/set/history commands
 
-## rename/move commands
-- rename command allows renaming keys with a regexp. Before renaming, it performs checks confirming that there are no collisions and asks for a confirmation if multiple keys are being renamed.
-- move command allows moving from/into folders. Default folder is "/"
-- an encrypted folder must be unlocked to allow copying into/from it. Re-encryption is performed with a key from corresponding encryption domain.
+## move command
+✅ **COMPLETED: move command**
+- `mv SOURCE_PATTERN DESTINATION` - shell-like move behavior
+- Single match: destination can be folder or full path (move+rename)
+- Multiple matches: destination must be a folder
+- Recursive pattern matching with regex support
+- Preserves full key history during move
+- Collision detection with pre-validation
+
+⏳ **TODO: encryption domain support for move**
+- Encrypted folders must be unlocked to allow moving/renaming keys from them
+- Re-encryption should be performed with key from corresponding encryption domain when moving between domains
 
 ## support SecretType and optional metadata HashMap
-- this will later be used for supporting storage of files.
+⚠️ **PARTIALLY COMPLETED**
+- Data structures exist: `SecretEntry` has `secret_type: SecretType` and `metadata: HashMap<String, String>` fields
+- Currently only `SecretType::Utf8String` is implemented
+- Metadata field exists but not exposed in CLI
+
+⏳ **TODO**
+- Add `SecretType::File` variant for file storage support
+- Implement CLI commands to set/view metadata
+- Add file upload/download functionality
+- Support for binary data storage

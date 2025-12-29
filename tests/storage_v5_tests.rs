@@ -783,3 +783,248 @@ fn test_multiple_nested_branches() {
             .any(|(p, k)| p == "/work/project_b" && *k == "api")
     );
 }
+
+#[test]
+fn test_move_key_same_folder() {
+    let mut storage = StorageV5::new();
+    storage.put_at_path("/", "old_name".to_string(), "value".into(), 0);
+
+    // Move with rename in same folder
+    storage
+        .move_key("/", "old_name", "/", Some("new_name"))
+        .unwrap();
+
+    // Old key should be gone
+    let results: Vec<_> = storage
+        .get_at_path("/", "old_name", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 0);
+
+    // New key should exist
+    let results: Vec<_> = storage
+        .get_at_path("/", "new_name", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].2.as_bytes(), "value".as_bytes());
+}
+
+#[test]
+fn test_move_key_between_folders() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/", "dest").unwrap();
+    storage.put_at_path("/source", "key1".to_string(), "value1".into(), 0);
+
+    // Move to different folder keeping same name
+    storage.move_key("/source", "key1", "/dest", None).unwrap();
+
+    // Should be gone from source
+    let results: Vec<_> = storage
+        .get_at_path("/source", "key1", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 0);
+
+    // Should exist in dest
+    let results: Vec<_> = storage
+        .get_at_path("/dest", "key1", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].2.as_bytes(), "value1".as_bytes());
+}
+
+#[test]
+fn test_move_key_with_rename_between_folders() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/", "dest").unwrap();
+    storage.put_at_path("/source", "old_key".to_string(), "value".into(), 0);
+
+    // Move and rename
+    storage
+        .move_key("/source", "old_key", "/dest", Some("new_key"))
+        .unwrap();
+
+    // Should be gone from source
+    let results: Vec<_> = storage
+        .get_at_path("/source", "old_key", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 0);
+
+    // Should exist in dest with new name
+    let results: Vec<_> = storage
+        .get_at_path("/dest", "new_key", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].2.as_bytes(), "value".as_bytes());
+}
+
+#[test]
+fn test_move_key_preserves_history() {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let mut storage = StorageV5::new();
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/", "dest").unwrap();
+
+    // Add multiple versions
+    storage.put_at_path("/source", "key1".to_string(), "v1".into(), timestamp);
+    storage.put_at_path("/source", "key1".to_string(), "v2".into(), timestamp.add(1));
+    storage.put_at_path("/source", "key1".to_string(), "v3".into(), timestamp.add(2));
+
+    // Move the key
+    storage.move_key("/source", "key1", "/dest", None).unwrap();
+
+    // Check history is preserved
+    let history: Vec<_> = storage.history_at_path("/dest", "key1").unwrap().collect();
+    assert_eq!(history.len(), 3);
+    assert_eq!(history[0].encrypted_value().as_bytes(), "v1".as_bytes());
+    assert_eq!(history[1].encrypted_value().as_bytes(), "v2".as_bytes());
+    assert_eq!(history[2].encrypted_value().as_bytes(), "v3".as_bytes());
+}
+
+#[test]
+fn test_move_key_collision_error() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/", "dest").unwrap();
+    storage.put_at_path("/source", "key1".to_string(), "value1".into(), 0);
+    storage.put_at_path("/dest", "key1".to_string(), "existing".into(), 0);
+
+    // Should fail due to collision
+    let result = storage.move_key("/source", "key1", "/dest", None);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("already exists"));
+
+    // Source should still have the key (move was not performed)
+    let results: Vec<_> = storage
+        .get_at_path("/source", "key1", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn test_move_key_nonexistent_source() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "dest").unwrap();
+
+    let result = storage.move_key("/", "nonexistent", "/dest", None);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn test_move_key_nonexistent_dest_folder() {
+    let mut storage = StorageV5::new();
+    storage.put_at_path("/", "key1".to_string(), "value".into(), 0);
+
+    let result = storage.move_key("/", "key1", "/nonexistent", None);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("not found"));
+}
+
+#[test]
+fn test_move_folder_between_parents() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/source", "folder1").unwrap();
+    storage.mkdir("/", "dest").unwrap();
+    storage.put_at_path("/source/folder1", "key1".to_string(), "value1".into(), 0);
+
+    // Move folder1 from /source to /dest
+    storage
+        .move_folder("/source", "folder1", "/dest", None)
+        .unwrap();
+
+    // Should be gone from source
+    assert!(storage.get_folder("/source/folder1").is_none());
+
+    // Should exist in dest with contents
+    assert!(storage.get_folder("/dest/folder1").is_some());
+    let results: Vec<_> = storage
+        .get_at_path("/dest/folder1", "key1", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].2.as_bytes(), "value1".as_bytes());
+}
+
+#[test]
+fn test_move_folder_with_rename() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "old_name").unwrap();
+    storage.put_at_path("/old_name", "key1".to_string(), "value1".into(), 0);
+
+    // Rename folder
+    storage
+        .move_folder("/", "old_name", "/", Some("new_name"))
+        .unwrap();
+
+    // Old should be gone
+    assert!(storage.get_folder("/old_name").is_none());
+
+    // New should exist with contents
+    assert!(storage.get_folder("/new_name").is_some());
+    let results: Vec<_> = storage
+        .get_at_path("/new_name", "key1", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+}
+
+#[test]
+fn test_move_folder_preserves_nested_structure() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/source", "folder1").unwrap();
+    storage.mkdir("/source/folder1", "subfolder").unwrap();
+    storage.put_at_path(
+        "/source/folder1/subfolder",
+        "deep_key".to_string(),
+        "deep_value".into(),
+        0,
+    );
+    storage.mkdir("/", "dest").unwrap();
+
+    // Move entire folder tree
+    storage
+        .move_folder("/source", "folder1", "/dest", None)
+        .unwrap();
+
+    // Verify nested structure preserved
+    assert!(storage.get_folder("/dest/folder1").is_some());
+    assert!(storage.get_folder("/dest/folder1/subfolder").is_some());
+    let results: Vec<_> = storage
+        .get_at_path("/dest/folder1/subfolder", "deep_key", false)
+        .unwrap()
+        .collect();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].2.as_bytes(), "deep_value".as_bytes());
+}
+
+#[test]
+fn test_move_folder_collision_error() {
+    let mut storage = StorageV5::new();
+    storage.mkdir("/", "source").unwrap();
+    storage.mkdir("/source", "folder1").unwrap();
+    storage.mkdir("/", "dest").unwrap();
+    storage.mkdir("/dest", "folder1").unwrap(); // Collision
+
+    // Should fail
+    let result = storage.move_folder("/source", "folder1", "/dest", None);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().to_string().contains("already exists"));
+
+    // Source should still have it
+    assert!(storage.get_folder("/source/folder1").is_some());
+}

@@ -172,6 +172,12 @@ impl InteractiveCli {
                 let path = if parts.len() > 1 { parts[1] } else { "/" };
                 self.cmd_cd(path, storage)
             }
+            "mv" | "move" => {
+                if parts.len() < 3 {
+                    bail!("syntax: mv SOURCE_PATTERN DESTINATION");
+                }
+                self.cmd_move(parts[1], parts[2], storage)
+            }
             "pwd" => {
                 self.cmd_pwd();
                 Ok(())
@@ -342,6 +348,185 @@ impl InteractiveCli {
         Ok(())
     }
 
+    fn cmd_move(
+        &self,
+        source_pattern: &str,
+        destination: &str,
+        storage: &mut StorageV5,
+    ) -> Result<()> {
+        let current_path = self.get_current_path();
+
+        // Find matching keys and folders
+        let key_count = storage
+            .get_at_path(&current_path, source_pattern, true)?
+            .count();
+        let folder_count = storage
+            .search_at_path(&current_path, source_pattern, true)?
+            .filter(|(path, name)| {
+                // Only count folders (check if it exists as a subfolder)
+                let check_path = if path == "/" {
+                    format!("/{name}")
+                } else {
+                    format!("{path}/{name}")
+                };
+                storage.get_folder(&check_path).is_some()
+            })
+            .count();
+
+        let total_matches = key_count + folder_count;
+
+        if total_matches == 0 {
+            bail!("No keys or folders matching pattern '{source_pattern}'");
+        }
+
+        if total_matches == 1 {
+            // Single match: could be a key or a folder
+            // Get the actual matched item (not the pattern)
+            let (source_path, source_name, is_folder) = if key_count == 1 {
+                // It's a key
+                let (folder, key, _) = storage
+                    .get_at_path(&current_path, source_pattern, true)?
+                    .next()
+                    .expect("key_count is 1");
+                (folder, key.to_string(), false)
+            } else {
+                // It's a folder
+                let (path, name) = storage
+                    .search_at_path(&current_path, source_pattern, true)?
+                    .find(|(path, name)| {
+                        let check_path = if path == "/" {
+                            format!("/{name}")
+                        } else {
+                            format!("{path}/{name}")
+                        };
+                        storage.get_folder(&check_path).is_some()
+                    })
+                    .expect("folder_count is 1");
+                (path, name.to_string(), true)
+            };
+
+            // Determine destination
+            let dest_is_existing_folder = destination.ends_with('/')
+                || storage
+                    .get_folder(&resolve_path(&current_path, destination))
+                    .is_some();
+
+            if is_folder {
+                // Moving a folder
+                let dest_parent = if dest_is_existing_folder {
+                    // Destination is a folder, move into it
+                    resolve_path(&current_path, destination)
+                } else {
+                    // Destination is a new name (rename)
+                    let (dest_parent, _) = parse_key_path(&current_path, destination);
+                    dest_parent
+                };
+
+                let dest_name = if dest_is_existing_folder {
+                    None // Keep same name
+                } else {
+                    let (_, name) = parse_key_path(&current_path, destination);
+                    Some(name)
+                };
+
+                storage.move_folder(&source_path, &source_name, &dest_parent, dest_name)?;
+
+                let dest_display = if let Some(dn) = dest_name {
+                    format_full_path(&dest_parent, dn, true)
+                } else {
+                    format_full_path(&dest_parent, &source_name, true)
+                };
+
+                secure_print(
+                    format!(
+                        "Moved folder {} -> {}",
+                        format_full_path(&source_path, &source_name, true),
+                        dest_display
+                    ),
+                    self.insecure_stdout,
+                )?;
+            } else {
+                // Moving a key
+                let (dest_folder, dest_key_opt) = parse_key_path(&current_path, destination);
+
+                let dest_key = if dest_is_existing_folder {
+                    None
+                } else {
+                    Some(dest_key_opt)
+                };
+
+                storage.move_key(&source_path, &source_name, &dest_folder, dest_key)?;
+
+                let dest_display = if let Some(dk) = dest_key {
+                    format_full_path(&dest_folder, dk, false)
+                } else {
+                    format_full_path(&dest_folder, &source_name, false)
+                };
+
+                secure_print(
+                    format!(
+                        "Moved {} -> {}",
+                        format_full_path(&source_path, &source_name, false),
+                        dest_display
+                    ),
+                    self.insecure_stdout,
+                )?;
+            }
+        } else {
+            // Multiple matches: destination must be a folder
+            let dest_folder = resolve_path(&current_path, destination);
+
+            if storage.get_folder(&dest_folder).is_none() {
+                bail!(
+                    "Destination '{destination}' is not a folder (required when moving multiple items)"
+                );
+            }
+
+            // Collect keys to move
+            let keys_to_move: Vec<(String, String)> = storage
+                .get_at_path(&current_path, source_pattern, true)?
+                .map(|(folder, key, _)| (folder, key.to_string()))
+                .collect();
+
+            // Collect folders to move
+            let folders_to_move: Vec<(String, String)> = storage
+                .search_at_path(&current_path, source_pattern, true)?
+                .filter_map(|(path, name)| {
+                    let check_path = if path == "/" {
+                        format!("/{name}")
+                    } else {
+                        format!("{path}/{name}")
+                    };
+                    if storage.get_folder(&check_path).is_some() {
+                        Some((path, name.to_string()))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            // Move all keys
+            for (source_folder, source_key) in &keys_to_move {
+                storage.move_key(source_folder, source_key, &dest_folder, None)?;
+            }
+
+            // Move all folders
+            for (parent_path, folder_name) in &folders_to_move {
+                storage.move_folder(parent_path, folder_name, &dest_folder, None)?;
+            }
+
+            let message = match (keys_to_move.len(), folders_to_move.len()) {
+                (k, 0) => format!("Moved {k} keys to {dest_folder}"),
+                (0, f) => format!("Moved {f} folders to {dest_folder}"),
+                (k, f) => format!("Moved {k} keys and {f} folders to {dest_folder}"),
+            };
+            secure_print(message, self.insecure_stdout)?;
+        }
+
+        save_storage_v5(&self.cypher, storage, &self.filename)?;
+        Ok(())
+    }
+
     fn cmd_pwd(&self) {
         println!("{}", self.get_current_path());
     }
@@ -359,6 +544,7 @@ fn print_help() {
     println!("  history KEY     - Show history of changes for a key in current folder");
     println!("  search REGEXP   - Search for keys matching regexp (recursive)");
     println!("  del|rm KEY      - Delete a key from current folder");
+    println!("  mv|move SRC DST - Move key(s) matching SRC to DST (folder or full path)");
     println!();
     println!("FOLDER COMMANDS:");
     println!("  mkdir FOLDER    - Create a new folder in current directory");
