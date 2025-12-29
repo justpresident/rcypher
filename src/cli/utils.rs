@@ -20,6 +20,114 @@ pub fn format_timestamp(ts: u64) -> String {
     dt.format("%Y-%m-%d %H:%M:%S").to_string()
 }
 
+/// Format a full path from folder path and key
+/// Handles both absolute paths ("/", "/work") and relative paths ("", "work/", "../work")
+/// If `is_folder` is true, appends a trailing "/" to the result
+pub fn format_full_path(folder_path: &str, key: &str, is_folder: bool) -> String {
+    let path = if folder_path.is_empty() {
+        key.to_string()
+    } else if folder_path == "/" {
+        format!("/{key}")
+    } else {
+        format!("{}/{key}", folder_path.trim_end_matches('/'))
+    };
+
+    if is_folder { format!("{path}/") } else { path }
+}
+
+/// Compute relative path from root to path
+/// Examples:
+/// - `relative_path_from`("/", "/work") = "work"
+/// - `relative_path_from`("/", "/work/api") = "work/api"
+/// - `relative_path_from("/work`", "/work/api") = "api"
+/// - `relative_path_from`("/", "/") = ""
+pub fn relative_path_from(root: &str, path: &str) -> String {
+    if path == root {
+        String::new()
+    } else if root == "/" {
+        path.strip_prefix('/').unwrap_or(path).to_string()
+    } else {
+        path.strip_prefix(root)
+            .and_then(|p| p.strip_prefix('/'))
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
+/// Resolve a path (absolute or relative) from a given current directory
+pub fn resolve_path(current_path: &str, path: &str) -> String {
+    if path.is_empty() {
+        return current_path.to_string();
+    }
+
+    if path.starts_with('/') {
+        // Absolute path
+        return normalize_path(path);
+    }
+
+    // Relative path - resolve from current directory
+    let mut components: Vec<&str> = if current_path == "/" {
+        Vec::new()
+    } else {
+        current_path.trim_matches('/').split('/').collect()
+    };
+
+    // Process each component of the path
+    for component in path.trim_end_matches('/').split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            name => {
+                components.push(name);
+            }
+        }
+    }
+
+    if components.is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", components.join("/"))
+    }
+}
+
+/// Normalize an absolute path by resolving . and .. components
+pub fn normalize_path(path: &str) -> String {
+    let mut components: Vec<&str> = Vec::new();
+
+    for component in path.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop();
+            }
+            name => {
+                components.push(name);
+            }
+        }
+    }
+
+    if components.is_empty() {
+        String::from("/")
+    } else {
+        format!("/{}", components.join("/"))
+    }
+}
+
+/// Parse a key argument that may include a path (e.g., "`work/api_key`")
+/// Returns (`resolved_folder_path`, `key_name`)
+pub fn parse_key_path<'a>(current_path: &str, key_arg: &'a str) -> (String, &'a str) {
+    if let Some(last_slash) = key_arg.rfind('/') {
+        let dir_part = &key_arg[..last_slash];
+        let key_name = &key_arg[last_slash + 1..];
+        let resolved_path = resolve_path(current_path, dir_part);
+        (resolved_path, key_name)
+    } else {
+        (current_path.to_string(), key_arg)
+    }
+}
+
 /// Prints directly to tty to avoid
 /// - snooping passwords from process stdout
 /// - lingering passwords in memory

@@ -14,7 +14,8 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::multiple_crate_versions,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    clippy::option_if_let_else
 )]
 
 use anyhow::{Result, bail};
@@ -79,7 +80,9 @@ struct CliParams {
     #[arg(long, action, default_value_t = false, hide(true))]
     quiet: bool,
 
-    #[arg(long, default_value = "cypher > ")]
+    /// Prompt for interactive mode.
+    /// %p is replaced with the current folder path
+    #[arg(long, default_value = "cypher : %p > ")]
     prompt: String,
 
     /// Upgrade file with stored secrets to the latest supported encryption format. The file will
@@ -158,7 +161,7 @@ fn run_upgrade_storage(
         for entry in entries {
             let mut secret = entry.encrypted_value().decrypt(&old_cypher)?;
             let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
-            new_storage.put_ts(key.clone(), new_value, entry.timestamp);
+            new_storage.put_at_path("/", key.clone(), new_value, entry.timestamp);
             secret.zeroize();
         }
     }
@@ -172,7 +175,7 @@ fn run_upgrade_storage(
 fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
     let cypher = Cypher::new(key);
 
-    let interactive_cli = cli::InteractiveCli::new(
+    let mut interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
         cypher,

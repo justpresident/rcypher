@@ -114,16 +114,16 @@ fn test_commands() {
 
     let lines = run_commands(&file_path, commands);
 
-    assert_eq!(lines[0], "key1: val_new");
-    assert_eq!(lines[1], "key2: val2");
+    assert_eq!(lines[0], "/key1: val_new");
+    assert_eq!(lines[1], "/key2: val2");
 
     // get with a regexp
     let mut commands = Vec::new();
     commands.extend_from_slice(b"get key.*\n");
     let lines = run_commands(&file_path, commands);
 
-    assert_eq!(lines[0], "key1: val_new");
-    assert_eq!(lines[1], "key2: val2");
+    assert_eq!(lines[0], "/key1: val_new");
+    assert_eq!(lines[1], "/key2: val2");
 
     // history command
     let mut commands = Vec::new();
@@ -211,8 +211,8 @@ fn test_update_with_new_keys() {
     commands.extend_from_slice(b"get key3\n");
     let lines = run_commands(&main_path, commands);
 
-    assert_eq!(lines[0], "key2: value2");
-    assert_eq!(lines[1], "key3: value3");
+    assert_eq!(lines[0], "/key2: value2");
+    assert_eq!(lines[1], "/key3: value3");
 }
 
 #[test]
@@ -259,7 +259,7 @@ fn test_update_with_conflicts() {
     commands.extend_from_slice(b"get key1\n");
     let lines = run_commands(&main_path, commands);
 
-    assert_eq!(lines[0], "key1: new_value");
+    assert_eq!(lines[0], "/key1: new_value");
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn test_update_with_interactive_mode() {
     commands.extend_from_slice(b"get key3\n");
     let lines = run_commands(&main_path, commands);
 
-    assert_eq!(lines[0], "key2: accept_this");
+    assert_eq!(lines[0], "/key2: accept_this");
     assert!(
         lines[1].contains("not found")
             || lines[1].contains("Not found")
@@ -370,13 +370,17 @@ fn test_upgrade_storage() {
     let legacy_cypher = Cypher::new(legacy_key);
 
     let mut storage = StorageV5::new();
-    storage.put(
+    storage.put_at_path(
+        "/",
         "key1".to_string(),
         EncryptedValue::encrypt(&legacy_cypher, "value1").unwrap(),
+        0,
     );
-    storage.put(
+    storage.put_at_path(
+        "/",
         "key2".to_string(),
         EncryptedValue::encrypt(&legacy_cypher, "value2").unwrap(),
+        0,
     );
 
     save_storage_v5(&legacy_cypher, &storage, &storage_path).unwrap();
@@ -401,6 +405,322 @@ fn test_upgrade_storage() {
     commands.extend_from_slice(b"get key2\n");
     let lines = run_commands(&storage_path, commands);
 
-    assert_eq!(lines[0], "key1: value1");
-    assert_eq!(lines[1], "key2: value2");
+    assert_eq!(lines[0], "/key1: value1");
+    assert_eq!(lines[1], "/key2: value2");
+}
+
+#[test]
+fn test_folders_and_paths() {
+    let (_dir, file_path) = temp_test_file();
+
+    // Create folders and store keys in different locations
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"mkdir personal\n");
+    commands.extend_from_slice(b"put /key1 root_value\n");
+    commands.extend_from_slice(b"put work/api_key work_value\n");
+    commands.extend_from_slice(b"put personal/password personal_value\n");
+    run_commands(&file_path, commands);
+
+    // Test get with absolute paths
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get /key1\n");
+    commands.extend_from_slice(b"get work/api_key\n");
+    commands.extend_from_slice(b"get personal/password\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/key1: root_value");
+    assert_eq!(lines[1], "/work/api_key: work_value");
+    assert_eq!(lines[2], "/personal/password: personal_value");
+
+    // Test cd and relative paths
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"cd work\n");
+    commands.extend_from_slice(b"put local_key local_value\n");
+    let _ = run_commands(&file_path, commands);
+
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"cd work\n");
+    commands.extend_from_slice(b"get local_key\n");
+    commands.extend_from_slice(b"get ../personal/password\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/work/local_key: local_value");
+    assert_eq!(lines[1], "/personal/password: personal_value");
+
+    // Test search with paths
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"search work/.*\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("/work/api_key")));
+    assert!(lines.iter().any(|l| l.contains("/work/local_key")));
+
+    // Test delete with paths
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"del work/local_key\n");
+    commands.extend_from_slice(b"search work/.*\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("/work/api_key")));
+    assert!(!lines.iter().any(|l| l.contains("/work/local_key")));
+
+    // Test mkdir with paths and nested folders
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work/projects\n");
+    commands.extend_from_slice(b"put work/projects/secret nested_value\n");
+    let _ = run_commands(&file_path, commands);
+
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"cd work/projects\n");
+    commands.extend_from_slice(b"get secret\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/work/projects/secret: nested_value");
+
+    // Test complex relative paths
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"cd work/projects\n");
+    commands.extend_from_slice(b"get ../../key1\n");
+    commands.extend_from_slice(b"get ../api_key\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/key1: root_value");
+    assert_eq!(lines[1], "/work/api_key: work_value");
+
+    // Test pwd
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"cd work\n");
+    commands.extend_from_slice(b"pwd\n");
+    let lines = run_commands(&file_path, commands);
+    assert_eq!(lines[0], "/work");
+
+    // Test history with paths
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"put work/api_key updated_value\n");
+    let _ = run_commands(&file_path, commands);
+
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"history work/api_key\n");
+    let lines = run_commands(&file_path, commands);
+    assert!(lines.iter().any(|l| l.contains("work_value")));
+    assert!(lines.iter().any(|l| l.contains("updated_value")));
+}
+
+#[test]
+fn test_update_with_nested_folders() {
+    let (_dir, main_path) = temp_test_file();
+    let (_dir2, update_path) = temp_test_file();
+
+    // Create main storage with nested folder structure
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"mkdir work/projects\n");
+    commands.extend_from_slice(b"mkdir personal\n");
+    commands.extend_from_slice(b"put /root_key root_value\n");
+    commands.extend_from_slice(b"put work/api_key work_api\n");
+    commands.extend_from_slice(b"put work/projects/secret project_secret\n");
+    commands.extend_from_slice(b"put personal/password personal_pw\n");
+    let _ = run_commands(&main_path, commands);
+
+    // Create update storage with same structure but different values
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"mkdir work/projects\n");
+    commands.extend_from_slice(b"mkdir personal\n");
+    commands.extend_from_slice(b"put /root_key root_value\n");
+    commands.extend_from_slice(b"put work/api_key updated_api\n");
+    commands.extend_from_slice(b"put work/projects/secret updated_secret\n");
+    commands.extend_from_slice(b"put personal/password personal_pw\n");
+    let _ = run_commands(&update_path, commands);
+
+    // Wait to ensure different timestamp
+    std::thread::sleep(std::time::Duration::from_secs(1));
+
+    // Create update file with newer timestamps
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"mkdir work/projects\n");
+    commands.extend_from_slice(b"put work/api_key updated_api\n");
+    commands.extend_from_slice(b"put work/projects/secret updated_secret\n");
+    let _ = run_commands(&update_path, commands);
+
+    // Run update-with
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&main_path)
+        .arg("--update-with")
+        .arg(&update_path)
+        .write_stdin(b"a\n")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("2 conflict"));
+
+    // Verify updates were applied in nested folders
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get work/api_key\n");
+    commands.extend_from_slice(b"get work/projects/secret\n");
+    let lines = run_commands(&main_path, commands);
+
+    assert_eq!(lines[0], "/work/api_key: updated_api");
+    assert_eq!(lines[1], "/work/projects/secret: updated_secret");
+}
+
+#[test]
+fn test_update_with_new_keys_in_nested_folders() {
+    let (_dir, main_path) = temp_test_file();
+    let (_dir2, update_path) = temp_test_file();
+
+    // Create main storage with basic structure
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"put work/api_key work_api\n");
+    let _ = run_commands(&main_path, commands);
+
+    // Create update storage with additional nested keys
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"mkdir work/projects\n");
+    commands.extend_from_slice(b"mkdir work/projects/client_a\n");
+    commands.extend_from_slice(b"put work/api_key work_api\n");
+    commands.extend_from_slice(b"put work/projects/secret project_secret\n");
+    commands.extend_from_slice(b"put work/projects/client_a/token client_token\n");
+    let _ = run_commands(&update_path, commands);
+
+    // Run update-with and auto-apply
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&main_path)
+        .arg("--update-with")
+        .arg(&update_path)
+        .write_stdin(b"a\n")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("2 new key"));
+    assert!(stdout.contains("All updates applied"));
+
+    // Verify the new keys were added in nested folders
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get work/projects/secret\n");
+    commands.extend_from_slice(b"get work/projects/client_a/token\n");
+    let lines = run_commands(&main_path, commands);
+
+    assert_eq!(lines[0], "/work/projects/secret: project_secret");
+    assert_eq!(lines[1], "/work/projects/client_a/token: client_token");
+}
+
+#[test]
+fn test_update_with_deep_nesting() {
+    let (_dir, main_path) = temp_test_file();
+    let (_dir2, update_path) = temp_test_file();
+
+    // Create main storage with deeply nested structure (4 levels)
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir org\n");
+    commands.extend_from_slice(b"mkdir org/dept\n");
+    commands.extend_from_slice(b"mkdir org/dept/team\n");
+    commands.extend_from_slice(b"mkdir org/dept/team/project\n");
+    commands.extend_from_slice(b"put org/dept/team/project/secret old_secret\n");
+    let _ = run_commands(&main_path, commands);
+
+    // Create update storage with new value
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir org\n");
+    commands.extend_from_slice(b"mkdir org/dept\n");
+    commands.extend_from_slice(b"mkdir org/dept/team\n");
+    commands.extend_from_slice(b"mkdir org/dept/team/project\n");
+    commands.extend_from_slice(b"put org/dept/team/project/secret old_secret\n");
+    let _ = run_commands(&update_path, commands);
+
+    // Wait and update with new value
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"put org/dept/team/project/secret new_secret\n");
+    let _ = run_commands(&update_path, commands);
+
+    // Run update-with
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&main_path)
+        .arg("--update-with")
+        .arg(&update_path)
+        .write_stdin(b"a\n")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("1 conflict"));
+
+    // Verify the deeply nested key was updated
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get org/dept/team/project/secret\n");
+    let lines = run_commands(&main_path, commands);
+
+    assert_eq!(lines[0], "/org/dept/team/project/secret: new_secret");
+}
+
+#[test]
+fn test_update_with_mixed_nested_and_root_keys() {
+    let (_dir, main_path) = temp_test_file();
+    let (_dir2, update_path) = temp_test_file();
+
+    // Create main storage with mixed structure
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"put /root1 root_value1\n");
+    commands.extend_from_slice(b"put work/nested1 nested_value1\n");
+    let _ = run_commands(&main_path, commands);
+
+    // Create update storage with new keys at both levels
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"mkdir work\n");
+    commands.extend_from_slice(b"put /root1 root_value1\n");
+    commands.extend_from_slice(b"put /root2 root_value2\n");
+    commands.extend_from_slice(b"put work/nested1 nested_value1\n");
+    commands.extend_from_slice(b"put work/nested2 nested_value2\n");
+    let _ = run_commands(&update_path, commands);
+
+    // Run update-with
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&main_path)
+        .arg("--update-with")
+        .arg(&update_path)
+        .write_stdin(b"a\n")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("2 new key"));
+
+    // Verify both root and nested keys were added
+    let mut commands = Vec::new();
+    commands.extend_from_slice(b"get /root2\n");
+    commands.extend_from_slice(b"get work/nested2\n");
+    let lines = run_commands(&main_path, commands);
+
+    assert_eq!(lines[0], "/root2: root_value2");
+    assert_eq!(lines[1], "/work/nested2: nested_value2");
 }

@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode, config};
 use regex::Regex;
 
 use super::value::EncryptedValue;
+use crate::cli::utils::{format_full_path, relative_path_from};
 use crate::version::StoreVersion;
 
 // ============================================================================
@@ -28,70 +28,341 @@ impl StorageV5 {
         }
     }
 
-    /// Store a secret value with current timestamp
-    /// For V5, stores in root folder with default encryption domain (0)
-    pub fn put(&mut self, key: String, value: EncryptedValue) {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("time should go forward")
-            .as_secs();
+    /// Get a folder by path (e.g., "/" or "/work/personal")
+    pub fn get_folder(&self, path: &str) -> Option<&Folder> {
+        if path == "/" || path.is_empty() {
+            return Some(&self.root);
+        }
 
-        self.put_ts(key, value, timestamp);
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        let mut current = &self.root;
+
+        for part in parts {
+            current = current.subfolders.get(part)?;
+        }
+
+        Some(current)
     }
 
-    /// Store a secret value with a specific timestamp
-    pub fn put_ts(&mut self, key: String, value: EncryptedValue, timestamp: u64) {
-        self.root
-            .secrets
-            .entry(key)
-            .or_default()
-            .push(SecretEntry::new_plain(value, timestamp, 0));
+    /// Get a mutable folder by path
+    pub fn get_folder_mut(&mut self, path: &str) -> Option<&mut Folder> {
+        if path == "/" || path.is_empty() {
+            return Some(&mut self.root);
+        }
+
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        let mut current = &mut self.root;
+
+        for part in parts {
+            current = current.subfolders.get_mut(part)?;
+        }
+
+        Some(current)
     }
 
-    /// Returns an iterator over key-value pairs matching the given regex pattern.
+    /// Create a new folder at the given path
+    pub fn mkdir(&mut self, path: &str, folder_name: &str) -> Result<()> {
+        let parent = self
+            .get_folder_mut(path)
+            .ok_or_else(|| anyhow::anyhow!("Parent folder '{path}' not found"))?;
+
+        if parent.subfolders.contains_key(folder_name) {
+            bail!("Folder '{folder_name}' already exists");
+        }
+
+        parent.subfolders.insert(
+            folder_name.to_string(),
+            Folder::new(folder_name.to_string(), parent.encryption_domain),
+        );
+
+        Ok(())
+    }
+
+    /// Store a secret value at a specific path
+    pub fn put_at_path(&mut self, path: &str, key: String, value: EncryptedValue, timestamp: u64) {
+        if let Some(folder) = self.get_folder_mut(path) {
+            folder
+                .secrets
+                .entry(key)
+                .or_default()
+                .push(SecretEntry::new_plain(value, timestamp, 0));
+        }
+    }
+
+    /// Returns an iterator over key-value pairs matching the given regex pattern in root folder.
     ///
     /// # Sorting
     /// - Keys are returned in sorted order (guaranteed by `BTreeMap`)
     /// - Returns the latest value for each key (entries sorted by timestamp)
-    pub fn get(&self, pattern: &str) -> Result<impl Iterator<Item = (&str, &EncryptedValue)> + '_> {
-        let re = Regex::new(&format!("^{pattern}$"))?;
-        Ok(self
-            .root
-            .secrets
-            .iter()
-            .filter(move |(k, entries)| re.is_match(k) && !entries.is_empty())
-            .filter_map(|(k, entries)| {
-                entries
-                    .last()
-                    .map(|entry| (k.as_str(), entry.encrypted_value()))
-            }))
+    ///
+    /// Returns (`full_path`, key, value) tuples where `full_path` is like "/work/personal"
+    pub fn get(
+        &self,
+        pattern: &str,
+    ) -> Result<impl Iterator<Item = (String, &str, &EncryptedValue)> + '_> {
+        self.get_at_path("/", pattern, false)
     }
 
-    /// Returns an iterator over all historical values for a given key.
+    /// Returns an iterator over key-value pairs matching pattern at a specific path.
+    /// If recursive is true, searches through all subfolders.
+    /// Returns (`full_path`, key, value) tuples where `full_path` is like "/work/personal"
+    pub fn get_at_path(
+        &self,
+        path: &str,
+        pattern: &str,
+        recursive: bool,
+    ) -> Result<impl Iterator<Item = (String, &str, &EncryptedValue)> + '_> {
+        let re = Regex::new(&format!("^{pattern}$"))?;
+        let folder = self
+            .get_folder(path)
+            .ok_or_else(|| anyhow::anyhow!("Folder '{path}' not found"))?;
+
+        let normalized_path = if path == "/" || path.is_empty() {
+            String::from("/")
+        } else {
+            path.to_string()
+        };
+
+        Ok(RecursiveSecretIterator::new(
+            folder,
+            re,
+            recursive,
+            normalized_path,
+        ))
+    }
+
+    /// Returns an iterator over all historical values for a given key in root folder.
     ///
     /// # Sorting
     /// Entries are returned in chronological order (oldest to newest).
     pub fn history(&self, key: &str) -> Option<impl Iterator<Item = &SecretEntry> + '_> {
-        self.root.secrets.get(key).map(|entries| entries.iter())
+        self.history_at_path("/", key)
     }
 
-    /// Delete a key and all its history
+    /// Returns an iterator over all historical values for a given key at a specific path.
+    pub fn history_at_path(
+        &self,
+        path: &str,
+        key: &str,
+    ) -> Option<impl Iterator<Item = &SecretEntry> + '_> {
+        self.get_folder(path)
+            .and_then(|folder| folder.secrets.get(key))
+            .map(|entries| entries.iter())
+    }
+
+    /// Delete a key and all its history from root folder
     pub fn delete(&mut self, key: &str) -> bool {
-        self.root.secrets.remove(key).is_some()
+        self.delete_at_path("/", key)
     }
 
-    /// Returns an iterator over all keys matching the given regex pattern.
+    /// Delete a key and all its history from a specific path
+    pub fn delete_at_path(&mut self, path: &str, key: &str) -> bool {
+        self.get_folder_mut(path)
+            .and_then(|folder| folder.secrets.remove(key))
+            .is_some()
+    }
+
+    /// Returns an iterator over all keys matching the given regex pattern in root folder.
     ///
     /// # Sorting
     /// Keys are returned in sorted order (guaranteed by `BTreeMap`).
-    pub fn search(&self, pattern: &str) -> Result<impl Iterator<Item = &str> + '_> {
+    /// Returns (`folder_path`, key) tuples where `folder_path` is like "/work/personal"
+    pub fn search(&self, pattern: &str) -> Result<impl Iterator<Item = (String, &str)> + '_> {
+        self.search_at_path("/", pattern, false)
+    }
+
+    /// Returns an iterator over all keys matching pattern at a specific path.
+    /// If recursive is true, searches through all subfolders.
+    /// Returns (`folder_path`, key) tuples where `folder_path` is like "/work/personal"
+    pub fn search_at_path(
+        &self,
+        path: &str,
+        pattern: &str,
+        recursive: bool,
+    ) -> Result<impl Iterator<Item = (String, &str)> + '_> {
         let re = Regex::new(pattern)?;
-        Ok(self
-            .root
-            .secrets
-            .keys()
-            .filter(move |k| re.is_match(k))
-            .map(String::as_str))
+        let folder = self
+            .get_folder(path)
+            .ok_or_else(|| anyhow::anyhow!("Folder '{path}' not found"))?;
+
+        let normalized_path = if path == "/" || path.is_empty() {
+            String::from("/")
+        } else {
+            path.to_string()
+        };
+
+        Ok(RecursiveKeyIterator::new(
+            folder,
+            re,
+            recursive,
+            normalized_path,
+        ))
+    }
+}
+
+// ============================================================================
+// Recursive Iterators - Zero-copy iteration through folder hierarchies
+// ============================================================================
+
+type SecretsIterator<'a> = std::collections::btree_map::Iter<'a, String, Vec<SecretEntry>>;
+type KeysIterator<'a> = std::collections::btree_map::Keys<'a, String, Vec<SecretEntry>>;
+type FolderIterator<'a> = std::collections::btree_map::Iter<'a, String, Folder>;
+/// Iterator over secrets in a folder and optionally its subfolders
+pub struct RecursiveSecretIterator<'a> {
+    // Stack of (current_path, folder, secrets_iter) for depth-first traversal
+    stack: Vec<(String, &'a Folder, SecretsIterator<'a>)>,
+    regex: Regex,
+    recursive: bool,
+    // For tracking subfolders to visit - stores (current_path, subfolders_iter)
+    subfolders_stack: Vec<(String, FolderIterator<'a>)>,
+    // Search root for computing relative paths in regex matching
+    search_root: String,
+}
+
+impl<'a> RecursiveSecretIterator<'a> {
+    fn new(folder: &'a Folder, regex: Regex, recursive: bool, initial_path: String) -> Self {
+        let secrets_iter = folder.secrets.iter();
+        let subfolders_iter = folder.subfolders.iter();
+
+        Self {
+            stack: vec![(initial_path.clone(), folder, secrets_iter)],
+            regex,
+            recursive,
+            subfolders_stack: vec![(initial_path.clone(), subfolders_iter)],
+            search_root: initial_path,
+        }
+    }
+}
+
+impl<'a> Iterator for RecursiveSecretIterator<'a> {
+    type Item = (String, &'a str, &'a EncryptedValue);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Try to get next secret from current folder
+            if let Some((current_path, _, secrets_iter)) = self.stack.last_mut() {
+                let path = current_path.clone();
+                // Compute relative path from search root for regex matching
+                let relative_folder = relative_path_from(&self.search_root, &path);
+
+                for (key, entries) in secrets_iter.by_ref() {
+                    // Match regex against full relative path (folder + key)
+                    let full_path = format_full_path(&relative_folder, key, false);
+                    if self.regex.is_match(&full_path)
+                        && !entries.is_empty()
+                        && let Some(entry) = entries.last()
+                    {
+                        return Some((path, key.as_str(), entry.encrypted_value()));
+                    }
+                }
+            }
+
+            // Current folder exhausted, try to descend into subfolder
+            if self.recursive
+                && let Some((current_path, subfolders_iter)) = self.subfolders_stack.last_mut()
+                && let Some((subfolder_name, subfolder)) = subfolders_iter.next()
+            {
+                // Build path for the subfolder
+                let new_path = if current_path == "/" {
+                    format!("/{subfolder_name}")
+                } else {
+                    format!("{current_path}/{subfolder_name}")
+                };
+
+                // Push new folder onto stack
+                self.stack
+                    .push((new_path.clone(), subfolder, subfolder.secrets.iter()));
+                self.subfolders_stack
+                    .push((new_path, subfolder.subfolders.iter()));
+                continue;
+            }
+
+            // No more subfolders, pop the stack
+            self.stack.pop();
+            self.subfolders_stack.pop();
+
+            if self.stack.is_empty() {
+                return None;
+            }
+        }
+    }
+}
+
+/// Iterator over keys in a folder and optionally its subfolders
+pub struct RecursiveKeyIterator<'a> {
+    // Stack of (current_path, keys_iter) for tracking keys in each folder
+    stack: Vec<(String, KeysIterator<'a>)>,
+    regex: Regex,
+    recursive: bool,
+    // Stack of (current_path, folder, subfolders_iter) for descending into subfolders
+    folder_stack: Vec<(String, &'a Folder, FolderIterator<'a>)>,
+    // Search root for computing relative paths in regex matching
+    search_root: String,
+}
+
+impl<'a> RecursiveKeyIterator<'a> {
+    fn new(folder: &'a Folder, regex: Regex, recursive: bool, initial_path: String) -> Self {
+        let keys_iter = folder.secrets.keys();
+        let subfolders_iter = folder.subfolders.iter();
+
+        Self {
+            stack: vec![(initial_path.clone(), keys_iter)],
+            regex,
+            recursive,
+            folder_stack: vec![(initial_path.clone(), folder, subfolders_iter)],
+            search_root: initial_path,
+        }
+    }
+}
+
+impl<'a> Iterator for RecursiveKeyIterator<'a> {
+    type Item = (String, &'a str);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            // Try to get next key from current folder
+            if let Some((current_path, keys_iter)) = self.stack.last_mut() {
+                let path = current_path.clone();
+                // Compute relative path from search root for regex matching
+                let relative_folder = relative_path_from(&self.search_root, &path);
+
+                for key in keys_iter.by_ref() {
+                    // Match regex against full relative path (folder + key)
+                    let full_path = format_full_path(&relative_folder, key, false);
+                    if self.regex.is_match(&full_path) {
+                        return Some((path, key.as_str()));
+                    }
+                }
+            }
+
+            // Current folder exhausted, try to descend into subfolder
+            if self.recursive
+                && let Some((current_path, _, subfolders_iter)) = self.folder_stack.last_mut()
+                && let Some((subfolder_name, subfolder)) = subfolders_iter.next()
+            {
+                // Build path for the subfolder
+                let new_path = if current_path == "/" {
+                    format!("/{subfolder_name}")
+                } else {
+                    format!("{current_path}/{subfolder_name}")
+                };
+
+                // Push new folder onto stack
+                self.stack
+                    .push((new_path.clone(), subfolder.secrets.keys()));
+                self.folder_stack
+                    .push((new_path, subfolder, subfolder.subfolders.iter()));
+                continue;
+            }
+
+            // No more subfolders, pop the stack
+            self.stack.pop();
+            self.folder_stack.pop();
+
+            if self.stack.is_empty() || self.folder_stack.is_empty() {
+                return None;
+            }
+        }
     }
 }
 
@@ -478,7 +749,7 @@ mod tests {
     fn test_put_and_get() {
         let mut storage = StorageV5::new();
         let test_value = EncryptedValue::from_ciphertext(b"test_value".to_vec());
-        storage.put("test_key".to_string(), test_value);
+        storage.put_at_path("/", "test_key".to_string(), test_value, 0);
 
         let results: Vec<_> = storage.get("test_key").unwrap().collect();
         assert_eq!(results.len(), 1);
@@ -489,61 +760,84 @@ mod tests {
     #[test]
     fn test_get_with_pattern() {
         let mut storage = StorageV5::new();
-        storage.put(
+        storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::from_ciphertext(b"value1".to_vec()),
+            0,
         );
-        storage.put(
+        storage.put_at_path(
+            "/",
             "key2".to_string(),
             EncryptedValue::from_ciphertext(b"value2".to_vec()),
+            0,
         );
-        storage.put(
+        storage.put_at_path(
+            "/",
             "other".to_string(),
             EncryptedValue::from_ciphertext(b"value3".to_vec()),
+            0,
         );
 
         let results: Vec<_> = storage.get("key.*").unwrap().collect();
         assert_eq!(results.len(), 2);
-        assert!(results.iter().any(|(k, _)| *k == "key1"));
-        assert!(results.iter().any(|(k, _)| *k == "key2"));
+        assert!(
+            results
+                .iter()
+                .any(|(path, k, _)| path == "/" && *k == "key1")
+        );
+        assert!(
+            results
+                .iter()
+                .any(|(path, k, _)| path == "/" && *k == "key2")
+        );
     }
 
     #[test]
     fn test_search() {
         let mut storage = StorageV5::new();
-        storage.put(
+        storage.put_at_path(
+            "/",
             "alpha".to_string(),
             EncryptedValue::from_ciphertext(b"value1".to_vec()),
+            0,
         );
-        storage.put(
+        storage.put_at_path(
+            "/",
             "beta".to_string(),
             EncryptedValue::from_ciphertext(b"value2".to_vec()),
+            0,
         );
-        storage.put(
+        storage.put_at_path(
+            "/",
             "gamma".to_string(),
             EncryptedValue::from_ciphertext(b"value3".to_vec()),
+            0,
         );
 
         let results: Vec<_> = storage.search(".*a.*").unwrap().collect();
         assert_eq!(results.len(), 2); // alpha, gamma
-        assert!(results.contains(&"alpha"));
-        assert!(results.contains(&"gamma"));
+        assert!(results.iter().any(|(path, k)| path == "/" && *k == "alpha"));
+        assert!(results.iter().any(|(path, k)| path == "/" && *k == "gamma"));
     }
 
     #[test]
     fn test_history() {
         let mut storage = StorageV5::new();
-        storage.put_ts(
+        storage.put_at_path(
+            "/",
             "key".to_string(),
             EncryptedValue::from_ciphertext(b"value1".to_vec()),
             100,
         );
-        storage.put_ts(
+        storage.put_at_path(
+            "/",
             "key".to_string(),
             EncryptedValue::from_ciphertext(b"value2".to_vec()),
             200,
         );
-        storage.put_ts(
+        storage.put_at_path(
+            "/",
             "key".to_string(),
             EncryptedValue::from_ciphertext(b"value3".to_vec()),
             300,
@@ -559,13 +853,17 @@ mod tests {
     #[test]
     fn test_delete() {
         let mut storage = StorageV5::new();
-        storage.put(
+        storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::from_ciphertext(b"value1".to_vec()),
+            0,
         );
-        storage.put(
+        storage.put_at_path(
+            "/",
             "key2".to_string(),
             EncryptedValue::from_ciphertext(b"value2".to_vec()),
+            0,
         );
 
         assert!(storage.delete("key1"));

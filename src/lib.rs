@@ -14,7 +14,8 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::multiple_crate_versions,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    clippy::option_if_let_else
 )]
 
 // Module declarations
