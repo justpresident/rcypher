@@ -386,11 +386,15 @@ pub fn run_update_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CypherVersion, StorageV5};
+    use crate::{Argon2Params, CypherVersion, StorageV5};
 
     fn create_test_cypher() -> Cypher {
-        let key = EncryptionKey::from_password(CypherVersion::default(), "test_password")
-            .expect("Failed to create key");
+        let key = EncryptionKey::from_password_with_params(
+            CypherVersion::default(),
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .expect("Failed to create key");
         Cypher::new(key)
     }
 
