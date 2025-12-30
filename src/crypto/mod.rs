@@ -4,5 +4,5 @@ mod stream_ops;
 mod utils;
 
 pub use cipher::Cypher;
-pub use key::EncryptionKey;
+pub use key::{Argon2Params, EncryptionKey};
 pub use utils::LimitedReader;

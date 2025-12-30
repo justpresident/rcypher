@@ -22,8 +22,8 @@ use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::cli::utils::get_password;
 use rcypher::{
-    Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage, ThreadStopGuard,
-    load_storage, serialize_storage,
+    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage,
+    ThreadStopGuard, load_storage, serialize_storage,
 }; // Import from lib
 use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -192,6 +192,17 @@ fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
     Ok(())
 }
 
+/// Returns appropriate Argon2 parameters based on CLI flags.
+/// When --insecure-password is used (for testing), returns minimal parameters to speed up tests.
+/// Otherwise returns secure default parameters for production use.
+fn get_argon2_params(params: &CliParams) -> Argon2Params {
+    if params.insecure_password.is_some() {
+        Argon2Params::insecure()
+    } else {
+        Argon2Params::default()
+    }
+}
+
 // Start background debugger monitoring thread
 // Returns a stop guard that needs to be held until the exit of the main thread
 fn start_background_debugger_checks() -> ThreadStopGuard {
@@ -243,25 +254,33 @@ fn main() -> Result<()> {
         get_password(&params.filename, need_confirmation).expect("password")
     });
 
+    let argon2_params = get_argon2_params(&params);
+
     if params.encrypt {
-        let key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
+        let key = EncryptionKey::from_password_with_params(
+            CypherVersion::default(),
+            &password,
+            &argon2_params,
+        )?;
         password.zeroize();
         run_encrypt(&params, key)
     } else if params.decrypt {
-        let key = EncryptionKey::for_file(&password, &params.filename)?;
+        let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
         password.zeroize();
         run_decrypt(&params, key)
     } else if params.update_with.is_some() {
         let spinner = Spinner::new("Deriving encryption keys", params.quiet);
 
-        let main_key = EncryptionKey::for_file(&password, &params.filename)?;
+        let main_key =
+            EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
 
         spinner.set_message("Deriving encryption key for update file");
         let update_file = params
             .update_with
             .as_ref()
             .expect("update_with must be set");
-        let update_key = EncryptionKey::for_file(&password, update_file)?;
+        let update_key =
+            EncryptionKey::for_file_with_params(&password, update_file, &argon2_params)?;
         password.zeroize();
 
         spinner.finish_and_clear();
@@ -276,10 +295,15 @@ fn main() -> Result<()> {
     } else if params.upgrade_storage {
         let spinner = Spinner::new("Deriving old encryption keys", params.quiet);
 
-        let old_key = EncryptionKey::for_file(&password, &params.filename)?;
+        let old_key =
+            EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
 
         spinner.set_message("Deriving new encryption keys");
-        let new_key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
+        let new_key = EncryptionKey::from_password_with_params(
+            CypherVersion::default(),
+            &password,
+            &argon2_params,
+        )?;
         password.zeroize();
 
         spinner.finish_and_clear();
@@ -288,7 +312,7 @@ fn main() -> Result<()> {
     } else {
         let spinner = Spinner::new("Deriving encryption key", params.quiet);
 
-        let key = EncryptionKey::for_file(&password, &params.filename)?;
+        let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
 
         spinner.finish_and_clear();
 
@@ -304,7 +328,11 @@ fn main() -> Result<()> {
             if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
                 let spinner = Spinner::new("Deriving new encryption keys", params.quiet);
 
-                let new_key = EncryptionKey::from_password(CypherVersion::default(), &password)?;
+                let new_key = EncryptionKey::from_password_with_params(
+                    CypherVersion::default(),
+                    &password,
+                    &argon2_params,
+                )?;
                 password.zeroize();
 
                 spinner.finish_and_clear();

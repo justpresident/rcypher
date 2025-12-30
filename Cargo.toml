@@ -40,6 +40,10 @@ predicates = "3"
 opt-level = 0
 lto = "none"
 
+[[bench]]
+name = "argon2_benchmark"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = "fat"
