@@ -18,13 +18,21 @@ use crate::version::StoreVersion;
 pub struct StorageV5 {
     /// Root folder containing all secrets and subfolders
     pub root: Folder,
+    /// Encryption domain metadata (`domain_id` -> `domain_name`)
+    /// Domain 0 is always "master" (uses storage password)
+    pub encryption_domains: std::collections::HashMap<u32, String>,
 }
 
 impl StorageV5 {
     /// Create a new empty V5 storage
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
+        use crate::{MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME};
+        let mut encryption_domains = std::collections::HashMap::new();
+        encryption_domains.insert(MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME.to_string());
+
         Self {
             root: Folder::new_root(),
+            encryption_domains,
         }
     }
 
@@ -260,6 +268,56 @@ impl StorageV5 {
             recursive,
             normalized_path,
         ))
+    }
+
+    // ========================================================================
+    // Encryption Domain Management
+    // ========================================================================
+
+    /// Creates a new encryption domain with the given name
+    ///
+    /// # Arguments
+    /// * `name` - Name for the new encryption domain
+    ///
+    /// # Returns
+    /// * The new domain ID
+    ///
+    /// # Errors
+    /// * If a domain with this name already exists
+    pub fn create_encryption_domain(&mut self, name: String) -> Result<u32> {
+        // Check if domain name already exists
+        if self
+            .encryption_domains
+            .values()
+            .any(|existing_name| existing_name == &name)
+        {
+            bail!("Encryption domain '{name}' already exists");
+        }
+
+        // Find next available domain ID (start from 1, skip 0 which is master)
+        let domain_id = (1..=u32::MAX)
+            .find(|id| !self.encryption_domains.contains_key(id))
+            .ok_or_else(|| anyhow::anyhow!("No available domain IDs"))?;
+
+        self.encryption_domains.insert(domain_id, name);
+        Ok(domain_id)
+    }
+
+    /// Gets the name of an encryption domain
+    ///
+    /// # Returns
+    /// * `Some(&str)` if the domain exists
+    /// * `None` if the domain ID is not registered
+    pub fn get_domain_name(&self, domain_id: u32) -> Option<&str> {
+        self.encryption_domains.get(&domain_id).map(String::as_str)
+    }
+
+    /// Gets all encryption domains
+    ///
+    /// # Returns
+    /// * Iterator of (`domain_id`, `domain_name`) pairs
+    pub fn encryption_domains_iter(&self) -> impl Iterator<Item = (&u32, &String)> {
+        self.encryption_domains.iter()
     }
 }
 
@@ -911,6 +969,8 @@ use super::value::ValueEntry;
 /// Migrate V4 storage to V5 format
 /// All secrets go into root folder with default encryption domain (0)
 pub fn migrate_v4_to_v5(v4: StorageV4) -> StorageV5 {
+    use crate::{MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME};
+
     let mut root = Folder::new_root();
 
     // Migrate flat structure to root folder
@@ -921,7 +981,14 @@ pub fn migrate_v4_to_v5(v4: StorageV4) -> StorageV5 {
             .insert(key.clone(), FolderItem::new_secret(key, secrets, 0));
     }
 
-    StorageV5 { root }
+    // Initialize encryption domains with master domain
+    let mut encryption_domains = std::collections::HashMap::new();
+    encryption_domains.insert(MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME.to_string());
+
+    StorageV5 {
+        root,
+        encryption_domains,
+    }
 }
 
 /// Convert V4 `ValueEntry` to V5 `SecretEntry`
