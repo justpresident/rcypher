@@ -36,42 +36,46 @@ fn find_updates_in_folder(
     };
 
     // Check secrets in this folder
-    for (key, update_entries) in &update_folder.secrets {
-        let update_latest = update_entries.last().expect("entries should not be empty");
-        let main_latest = main_storage
-            .get_folder(folder_path)
-            .and_then(|f| f.secrets.get(key))
-            .and_then(|entries| entries.last());
+    for (key, item) in update_folder.secrets() {
+        if let Some(update_entries) = item.get_entries() {
+            let update_latest = update_entries.last().expect("entries should not be empty");
+            let main_latest = main_storage
+                .get_folder(folder_path)
+                .and_then(|f| f.get_item(key))
+                .and_then(|item| item.get_entries())
+                .and_then(|entries| entries.last());
 
-        let should_update = main_latest.is_none_or(|main_entry| {
-            // Key exists - decrypt and compare values
-            let main_decrypted = main_entry
-                .encrypted_value()
-                .decrypt(main_cypher)
-                .expect("Failed to decrypt main file");
-            let update_decrypted = update_latest
-                .encrypted_value()
-                .decrypt(update_cypher)
-                .expect("Failed to decrypt update file");
+            let should_update = main_latest.is_none_or(|main_entry| {
+                // Key exists - decrypt and compare values
+                let main_decrypted = main_entry
+                    .encrypted_value()
+                    .decrypt(main_cypher)
+                    .expect("Failed to decrypt main file");
+                let update_decrypted = update_latest
+                    .encrypted_value()
+                    .decrypt(update_cypher)
+                    .expect("Failed to decrypt update file");
 
-            // Update if values differ and update is newer or same timestamp
-            *main_decrypted != *update_decrypted && update_latest.timestamp >= main_entry.timestamp
-        });
-
-        if should_update {
-            updates.push(UpdateEntry {
-                folder_path: folder_path.to_string(),
-                key: key.clone(),
-                new_value: update_latest.encrypted_value().clone(),
-                new_timestamp: update_latest.timestamp,
-                old_value: main_latest.map(|e| e.encrypted_value().clone()),
-                old_timestamp: main_latest.map(|e| e.timestamp),
+                // Update if values differ and update is newer or same timestamp
+                *main_decrypted != *update_decrypted
+                    && update_latest.timestamp >= main_entry.timestamp
             });
+
+            if should_update {
+                updates.push(UpdateEntry {
+                    folder_path: folder_path.to_string(),
+                    key: key.clone(),
+                    new_value: update_latest.encrypted_value().clone(),
+                    new_timestamp: update_latest.timestamp,
+                    old_value: main_latest.map(|e| e.encrypted_value().clone()),
+                    old_timestamp: main_latest.map(|e| e.timestamp),
+                });
+            }
         }
     }
 
     // Recursively check subfolders
-    for subfolder_name in update_folder.subfolders.keys() {
+    for (subfolder_name, _) in update_folder.navigable_folders() {
         let subfolder_path = if folder_path == "/" {
             format!("/{subfolder_name}")
         } else {

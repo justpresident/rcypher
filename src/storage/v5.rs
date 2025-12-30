@@ -38,7 +38,7 @@ impl StorageV5 {
         let mut current = &self.root;
 
         for part in parts {
-            current = current.subfolders.get(part)?;
+            current = current.get_subfolder(part)?;
         }
 
         Some(current)
@@ -54,7 +54,7 @@ impl StorageV5 {
         let mut current = &mut self.root;
 
         for part in parts {
-            current = current.subfolders.get_mut(part)?;
+            current = current.get_subfolder_mut(part)?;
         }
 
         Some(current)
@@ -66,13 +66,14 @@ impl StorageV5 {
             .get_folder_mut(path)
             .ok_or_else(|| anyhow::anyhow!("Parent folder '{path}' not found"))?;
 
-        if parent.subfolders.contains_key(folder_name) {
-            bail!("Folder '{folder_name}' already exists");
+        if parent.items.contains_key(folder_name) {
+            bail!("Item '{folder_name}' already exists");
         }
 
-        parent.subfolders.insert(
+        let new_folder = Folder::new(folder_name.to_string(), parent.encryption_domain);
+        parent.items.insert(
             folder_name.to_string(),
-            Folder::new(folder_name.to_string(), parent.encryption_domain),
+            FolderItem::new_folder(folder_name.to_string(), new_folder),
         );
 
         Ok(())
@@ -81,11 +82,17 @@ impl StorageV5 {
     /// Store a secret value at a specific path
     pub fn put_at_path(&mut self, path: &str, key: String, value: EncryptedValue, timestamp: u64) {
         if let Some(folder) = self.get_folder_mut(path) {
+            let entry = SecretEntry::new(value, timestamp);
+
             folder
-                .secrets
-                .entry(key)
-                .or_default()
-                .push(SecretEntry::new_plain(value, timestamp, 0));
+                .items
+                .entry(key.clone())
+                .and_modify(|item| {
+                    if let Some(entries) = item.get_entries_mut() {
+                        entries.push(entry.clone());
+                    }
+                })
+                .or_insert_with(|| FolderItem::new_secret(key, vec![entry], 0));
         }
     }
 
@@ -140,13 +147,15 @@ impl StorageV5 {
     }
 
     /// Returns an iterator over all historical values for a given key at a specific path.
+    /// Returns None for folders (regular or encrypted).
     pub fn history_at_path(
         &self,
         path: &str,
         key: &str,
     ) -> Option<impl Iterator<Item = &SecretEntry> + '_> {
         self.get_folder(path)
-            .and_then(|folder| folder.secrets.get(key))
+            .and_then(|folder| folder.get_item(key))
+            .and_then(|item| item.get_entries())
             .map(|entries| entries.iter())
     }
 
@@ -155,26 +164,27 @@ impl StorageV5 {
         self.delete_at_path("/", key)
     }
 
-    /// Delete a key and all its history from a specific path
+    /// Delete an item (secret, folder, or encrypted folder) from a specific path
     pub fn delete_at_path(&mut self, path: &str, key: &str) -> bool {
         self.get_folder_mut(path)
-            .and_then(|folder| folder.secrets.remove(key))
+            .and_then(|folder| folder.items.remove(key))
             .is_some()
     }
 
-    /// Move a key from one location to another (like shell mv)
-    /// `source_folder`: folder containing the key
-    /// key: the key to move
+    /// Move an item (secret, folder, or encrypted folder) from one location to another
+    /// Works like shell `mv` - handles both files and directories uniformly
+    /// `source_folder`: folder containing the item
+    /// `item_name`: name of the item to move
     /// `dest_folder`: destination folder
-    /// `dest_key`: optional new key name (if None, keeps same name)
-    pub fn move_key(
+    /// `dest_name`: optional new name (if None, keeps same name)
+    pub fn move_item(
         &mut self,
         source_folder: &str,
-        key: &str,
+        item_name: &str,
         dest_folder: &str,
-        dest_key: Option<&str>,
+        dest_name: Option<&str>,
     ) -> Result<()> {
-        let final_key = dest_key.unwrap_or(key);
+        let final_name = dest_name.unwrap_or(item_name);
 
         // Check destination folder exists and no collision (must do before removing from source)
         {
@@ -182,33 +192,53 @@ impl StorageV5 {
                 .get_folder(dest_folder)
                 .ok_or_else(|| anyhow::anyhow!("Destination folder '{dest_folder}' not found"))?;
 
-            if dest.secrets.contains_key(final_key) {
-                bail!("Key '{final_key}' already exists at destination '{dest_folder}'");
+            if dest.items.contains_key(final_name) {
+                bail!("Item '{final_name}' already exists at destination '{dest_folder}'");
             }
         }
 
         // Remove from source
-        let entries = self
+        let mut item = self
             .get_folder_mut(source_folder)
             .ok_or_else(|| anyhow::anyhow!("Source folder '{source_folder}' not found"))?
-            .secrets
-            .remove(key)
-            .ok_or_else(|| anyhow::anyhow!("Key '{key}' not found in '{source_folder}'"))?;
+            .items
+            .remove(item_name)
+            .ok_or_else(|| anyhow::anyhow!("Item '{item_name}' not found in '{source_folder}'"))?;
+
+        // Update the item's name if renaming
+        if final_name != item_name {
+            match &mut item {
+                FolderItem::Secret { name, .. }
+                | FolderItem::Folder { name, .. }
+                | FolderItem::EncryptedFolder { name, .. } => {
+                    *name = final_name.to_string();
+                }
+            }
+        }
 
         // Insert into dest
         self.get_folder_mut(dest_folder)
             .expect("dest folder exists")
-            .secrets
-            .insert(final_key.to_string(), entries);
+            .items
+            .insert(final_name.to_string(), item);
 
         Ok(())
     }
 
-    /// Move a folder from one location to another (like shell mv for directories)
-    /// `parent_path`: parent folder containing the folder to move
-    /// `folder_name`: name of the folder to move
-    /// `dest_parent`: destination parent folder
-    /// `dest_name`: optional new folder name (if None, keeps same name)
+    /// Legacy method - redirects to `move_item` for backwards compatibility
+    #[deprecated(note = "Use move_item instead")]
+    pub fn move_key(
+        &mut self,
+        source_folder: &str,
+        key: &str,
+        dest_folder: &str,
+        dest_key: Option<&str>,
+    ) -> Result<()> {
+        self.move_item(source_folder, key, dest_folder, dest_key)
+    }
+
+    /// Legacy method - redirects to `move_item` for backwards compatibility
+    #[deprecated(note = "Use move_item instead")]
     pub fn move_folder(
         &mut self,
         parent_path: &str,
@@ -216,36 +246,7 @@ impl StorageV5 {
         dest_parent: &str,
         dest_name: Option<&str>,
     ) -> Result<()> {
-        let final_name = dest_name.unwrap_or(folder_name);
-
-        // Check destination parent exists and no collision
-        {
-            let dest = self
-                .get_folder(dest_parent)
-                .ok_or_else(|| anyhow::anyhow!("Destination folder '{dest_parent}' not found"))?;
-
-            if dest.subfolders.contains_key(final_name) {
-                bail!("Folder '{final_name}' already exists at destination '{dest_parent}'");
-            }
-        }
-
-        // Remove from source
-        let folder = self
-            .get_folder_mut(parent_path)
-            .ok_or_else(|| anyhow::anyhow!("Source folder '{parent_path}' not found"))?
-            .subfolders
-            .remove(folder_name)
-            .ok_or_else(|| {
-                anyhow::anyhow!("Folder '{folder_name}' not found in '{parent_path}'")
-            })?;
-
-        // Insert into dest
-        self.get_folder_mut(dest_parent)
-            .expect("dest parent exists")
-            .subfolders
-            .insert(final_name.to_string(), folder);
-
-        Ok(())
+        self.move_item(parent_path, folder_name, dest_parent, dest_name)
     }
 
     /// Returns an iterator over all keys matching the given regex pattern in root folder.
@@ -287,34 +288,29 @@ impl StorageV5 {
 }
 
 // ============================================================================
-// Recursive Iterators - Zero-copy iteration through folder hierarchies
+// Zero-copy iterators through Folder structure
 // ============================================================================
 
-type SecretsIterator<'a> = std::collections::btree_map::Iter<'a, String, Vec<SecretEntry>>;
-type KeysIterator<'a> = std::collections::btree_map::Keys<'a, String, Vec<SecretEntry>>;
-type FolderIterator<'a> = std::collections::btree_map::Iter<'a, String, Folder>;
+type ItemsIterator<'a> = std::collections::btree_map::Iter<'a, String, FolderItem>;
+
 /// Iterator over secrets in a folder and optionally its subfolders
 pub struct RecursiveSecretIterator<'a> {
-    // Stack of (current_path, folder, secrets_iter) for depth-first traversal
-    stack: Vec<(String, &'a Folder, SecretsIterator<'a>)>,
+    // Single stack of (current_path, items_iter) for depth-first traversal
+    stack: Vec<(String, ItemsIterator<'a>)>,
     regex: Regex,
     recursive: bool,
-    // For tracking subfolders to visit - stores (current_path, subfolders_iter)
-    subfolders_stack: Vec<(String, FolderIterator<'a>)>,
     // Search root for computing relative paths in regex matching
     search_root: String,
 }
 
 impl<'a> RecursiveSecretIterator<'a> {
     fn new(folder: &'a Folder, regex: Regex, recursive: bool, initial_path: String) -> Self {
-        let secrets_iter = folder.secrets.iter();
-        let subfolders_iter = folder.subfolders.iter();
+        let items_iter = folder.items.iter();
 
         Self {
-            stack: vec![(initial_path.clone(), folder, secrets_iter)],
+            stack: vec![(initial_path.clone(), items_iter)],
             regex,
             recursive,
-            subfolders_stack: vec![(initial_path.clone(), subfolders_iter)],
             search_root: initial_path,
         }
     }
@@ -325,49 +321,57 @@ impl<'a> Iterator for RecursiveSecretIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
-            // Try to get next secret from current folder
-            if let Some((current_path, _, secrets_iter)) = self.stack.last_mut() {
+            // Try to get next item from current folder
+            let mut descended = false;
+            if let Some((current_path, items_iter)) = self.stack.last_mut() {
                 let path = current_path.clone();
                 // Compute relative path from search root for regex matching
                 let relative_folder = relative_path_from(&self.search_root, &path);
 
-                for (key, entries) in secrets_iter.by_ref() {
+                for (key, item) in items_iter.by_ref() {
                     // Match regex against full relative path (folder + key)
                     let full_path = format_full_path(&relative_folder, key, false);
+
+                    // Check if this is a secret with matching pattern
                     if self.regex.is_match(&full_path)
-                        && !entries.is_empty()
-                        && let Some(entry) = entries.last()
+                        && let Some(value) = item.get_latest_value()
                     {
-                        return Some((path, key.as_str(), entry.encrypted_value()));
+                        return Some((path, key.as_str(), value));
+                    }
+
+                    // If recursive and this is a navigable folder, descend into it
+                    if self.recursive
+                        && let Some(subfolder) = item.get_folder()
+                    {
+                        let new_path = format_full_path(&path, key, true);
+                        self.stack.push((new_path, subfolder.items.iter()));
+                        descended = true;
+                        // Break to process the new folder
+                        break;
                     }
                 }
             }
 
-            // Current folder exhausted, try to descend into subfolder
-            if self.recursive
-                && let Some((current_path, subfolders_iter)) = self.subfolders_stack.last_mut()
-                && let Some((subfolder_name, subfolder)) = subfolders_iter.next()
-            {
-                // Build path for the subfolder
-                let new_path = if current_path == "/" {
-                    format!("/{subfolder_name}")
-                } else {
-                    format!("{current_path}/{subfolder_name}")
-                };
-
-                // Push new folder onto stack
-                self.stack
-                    .push((new_path.clone(), subfolder, subfolder.secrets.iter()));
-                self.subfolders_stack
-                    .push((new_path, subfolder.subfolders.iter()));
+            // If we descended into a subfolder, continue to process it
+            if descended {
                 continue;
             }
 
-            // No more subfolders, pop the stack
-            self.stack.pop();
-            self.subfolders_stack.pop();
+            // Current folder exhausted, pop and continue with parent
+            if self.stack.len() > 1 {
+                self.stack.pop();
+                continue;
+            }
 
-            if self.stack.is_empty() {
+            // Nothing left to iterate
+            if self.stack.is_empty() || self.stack.len() == 1 {
+                // Check if the last stack has more items
+                if let Some((_, items_iter)) = self.stack.last_mut() {
+                    if items_iter.len() == 0 {
+                        return None;
+                    }
+                    continue;
+                }
                 return None;
             }
         }
@@ -376,26 +380,22 @@ impl<'a> Iterator for RecursiveSecretIterator<'a> {
 
 /// Iterator over keys in a folder and optionally its subfolders
 pub struct RecursiveKeyIterator<'a> {
-    // Stack of (current_path, keys_iter) for tracking keys in each folder
-    stack: Vec<(String, KeysIterator<'a>)>,
+    // Single stack of (current_path, items_iter) for depth-first traversal
+    stack: Vec<(String, ItemsIterator<'a>)>,
     regex: Regex,
     recursive: bool,
-    // Stack of (current_path, folder, subfolders_iter) for descending into subfolders
-    folder_stack: Vec<(String, &'a Folder, FolderIterator<'a>)>,
     // Search root for computing relative paths in regex matching
     search_root: String,
 }
 
 impl<'a> RecursiveKeyIterator<'a> {
     fn new(folder: &'a Folder, regex: Regex, recursive: bool, initial_path: String) -> Self {
-        let keys_iter = folder.secrets.keys();
-        let subfolders_iter = folder.subfolders.iter();
+        let items_iter = folder.items.iter();
 
         Self {
-            stack: vec![(initial_path.clone(), keys_iter)],
+            stack: vec![(initial_path.clone(), items_iter)],
             regex,
             recursive,
-            folder_stack: vec![(initial_path.clone(), folder, subfolders_iter)],
             search_root: initial_path,
         }
     }
@@ -406,46 +406,55 @@ impl<'a> Iterator for RecursiveKeyIterator<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
+            let mut descended = false;
             // Try to get next key from current folder
-            if let Some((current_path, keys_iter)) = self.stack.last_mut() {
+            if let Some((current_path, items_iter)) = self.stack.last_mut() {
                 let path = current_path.clone();
                 // Compute relative path from search root for regex matching
                 let relative_folder = relative_path_from(&self.search_root, &path);
 
-                for key in keys_iter.by_ref() {
+                for (key, item) in items_iter.by_ref() {
                     // Match regex against full relative path (folder + key)
                     let full_path = format_full_path(&relative_folder, key, false);
-                    if self.regex.is_match(&full_path) {
+
+                    // Check if this is a secret (not a folder) with matching pattern
+                    if self.regex.is_match(&full_path) && item.is_secret() {
                         return Some((path, key.as_str()));
+                    }
+
+                    // If recursive and this is a navigable folder, descend into it
+                    if self.recursive
+                        && let Some(subfolder) = item.get_folder()
+                    {
+                        let new_path = format_full_path(&path, key, true);
+                        self.stack.push((new_path, subfolder.items.iter()));
+                        descended = true;
+                        // Break to process the new folder
+                        break;
                     }
                 }
             }
 
-            // Current folder exhausted, try to descend into subfolder
-            if self.recursive
-                && let Some((current_path, _, subfolders_iter)) = self.folder_stack.last_mut()
-                && let Some((subfolder_name, subfolder)) = subfolders_iter.next()
-            {
-                // Build path for the subfolder
-                let new_path = if current_path == "/" {
-                    format!("/{subfolder_name}")
-                } else {
-                    format!("{current_path}/{subfolder_name}")
-                };
-
-                // Push new folder onto stack
-                self.stack
-                    .push((new_path.clone(), subfolder.secrets.keys()));
-                self.folder_stack
-                    .push((new_path, subfolder, subfolder.subfolders.iter()));
+            // If we descended into a subfolder, continue to process it
+            if descended {
                 continue;
             }
 
-            // No more subfolders, pop the stack
-            self.stack.pop();
-            self.folder_stack.pop();
+            // Current folder exhausted, pop and continue with parent
+            if self.stack.len() > 1 {
+                self.stack.pop();
+                continue;
+            }
 
-            if self.stack.is_empty() || self.folder_stack.is_empty() {
+            // Nothing left to iterate
+            if self.stack.is_empty() || self.stack.len() == 1 {
+                // Check if the last stack has more items
+                if let Some((_, items_iter)) = self.stack.last_mut() {
+                    if items_iter.len() == 0 {
+                        return None;
+                    }
+                    continue;
+                }
                 return None;
             }
         }
@@ -459,25 +468,274 @@ impl Default for StorageV5 {
 }
 
 // ============================================================================
-// Folder - Hierarchical container for secrets
+// FolderItem - Unified enum for secrets and folders
 // ============================================================================
 
-/// A folder containing secrets and subfolders
+/// An item in a folder - can be either a secret or a subfolder
+#[derive(Debug, Clone, Encode, Decode)]
+pub enum FolderItem {
+    /// Regular secret with history
+    Secret {
+        name: String,
+        entries: Vec<SecretEntry>,
+        encryption_domain: u32,
+    },
+
+    /// Regular folder that can be navigated
+    Folder { name: String, folder: Box<Folder> },
+
+    /// Encrypted folder - visible as encrypted, shows "**LOCKED**" when locked
+    EncryptedFolder {
+        name: String,
+        /// Serialized encrypted folder bytes
+        encrypted_data: Vec<u8>,
+        /// Which encryption domain key to use
+        encryption_domain: u32,
+        /// Decrypted folder when unlocked (always None when serialized, populated in memory only)
+        decrypted_folder: Option<Box<Folder>>,
+    },
+}
+
+impl FolderItem {
+    // ========== Constructors ==========
+
+    pub const fn new_secret(
+        name: String,
+        entries: Vec<SecretEntry>,
+        encryption_domain: u32,
+    ) -> Self {
+        Self::Secret {
+            name,
+            entries,
+            encryption_domain,
+        }
+    }
+
+    pub fn new_folder(name: String, folder: Folder) -> Self {
+        Self::Folder {
+            name,
+            folder: Box::new(folder),
+        }
+    }
+
+    pub const fn new_encrypted_folder(
+        name: String,
+        encrypted_data: Vec<u8>,
+        encryption_domain: u32,
+    ) -> Self {
+        Self::EncryptedFolder {
+            name,
+            encrypted_data,
+            encryption_domain,
+            decrypted_folder: None,
+        }
+    }
+
+    // ========== Basic Getters ==========
+
+    /// Get the name of this item
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Secret { name, .. }
+            | Self::Folder { name, .. }
+            | Self::EncryptedFolder { name, .. } => name,
+        }
+    }
+
+    /// Get the encryption domain for this item
+    /// Returns folder's default domain for regular folders
+    pub fn encryption_domain(&self) -> u32 {
+        match self {
+            Self::Secret {
+                encryption_domain, ..
+            }
+            | Self::EncryptedFolder {
+                encryption_domain, ..
+            } => *encryption_domain,
+            Self::Folder { folder, .. } => folder.encryption_domain,
+        }
+    }
+
+    // ========== Type Checking ==========
+
+    pub const fn is_secret(&self) -> bool {
+        matches!(self, Self::Secret { .. })
+    }
+
+    pub const fn is_folder(&self) -> bool {
+        matches!(self, Self::Folder { .. })
+    }
+
+    pub const fn is_encrypted_folder(&self) -> bool {
+        matches!(self, Self::EncryptedFolder { .. })
+    }
+
+    /// Check if this is any kind of folder (regular or encrypted)
+    pub const fn is_any_folder(&self) -> bool {
+        matches!(self, Self::Folder { .. } | Self::EncryptedFolder { .. })
+    }
+
+    /// Check if this is a locked encrypted folder
+    pub const fn is_locked(&self) -> bool {
+        matches!(
+            self,
+            Self::EncryptedFolder {
+                decrypted_folder: None,
+                ..
+            }
+        )
+    }
+
+    /// Check if this is an unlocked encrypted folder
+    pub const fn is_unlocked(&self) -> bool {
+        matches!(
+            self,
+            Self::EncryptedFolder {
+                decrypted_folder: Some(_),
+                ..
+            }
+        )
+    }
+
+    /// Check if this item can be navigated into (regular folder or unlocked encrypted folder)
+    pub const fn is_navigable(&self) -> bool {
+        matches!(
+            self,
+            Self::Folder { .. }
+                | Self::EncryptedFolder {
+                    decrypted_folder: Some(_),
+                    ..
+                }
+        )
+    }
+
+    // ========== Accessing Folder Data ==========
+
+    /// Get folder reference if this is a navigable folder
+    /// Returns regular folder or unlocked encrypted folder
+    pub fn get_folder(&self) -> Option<&Folder> {
+        match self {
+            Self::Folder { folder, .. }
+            | Self::EncryptedFolder {
+                decrypted_folder: Some(folder),
+                ..
+            } => Some(folder),
+            _ => None,
+        }
+    }
+
+    /// Get mutable folder reference if this is a navigable folder
+    pub fn get_folder_mut(&mut self) -> Option<&mut Folder> {
+        match self {
+            Self::Folder { folder, .. }
+            | Self::EncryptedFolder {
+                decrypted_folder: Some(folder),
+                ..
+            } => Some(folder),
+            _ => None,
+        }
+    }
+
+    /// Get the underlying Folder box (for moving folders around)
+    pub fn take_folder(self) -> Option<Box<Folder>> {
+        match self {
+            Self::Folder { folder, .. }
+            | Self::EncryptedFolder {
+                decrypted_folder: Some(folder),
+                ..
+            } => Some(folder),
+            _ => None,
+        }
+    }
+
+    // ========== Accessing Secret Data ==========
+
+    /// Get secret entries (only for secrets, not folders)
+    pub const fn get_entries(&self) -> Option<&Vec<SecretEntry>> {
+        match self {
+            Self::Secret { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// Get mutable secret entries (only for secrets)
+    pub const fn get_entries_mut(&mut self) -> Option<&mut Vec<SecretEntry>> {
+        match self {
+            Self::Secret { entries, .. } => Some(entries),
+            _ => None,
+        }
+    }
+
+    /// Get the latest secret entry (most recent value)
+    pub fn get_latest_entry(&self) -> Option<&SecretEntry> {
+        self.get_entries()?.last()
+    }
+
+    /// Get the latest encrypted value (for display/copy)
+    pub fn get_latest_value(&self) -> Option<&EncryptedValue> {
+        self.get_latest_entry().map(SecretEntry::encrypted_value)
+    }
+
+    // ========== Encrypted Folder Operations ==========
+
+    /// Unlock an encrypted folder with the decrypted data
+    /// Returns error if not an encrypted folder or already unlocked
+    pub fn unlock(&mut self, decrypted_folder: Folder) -> Result<()> {
+        match self {
+            Self::EncryptedFolder {
+                decrypted_folder: df,
+                ..
+            } => {
+                if df.is_some() {
+                    bail!("Folder already unlocked");
+                }
+                *df = Some(Box::new(decrypted_folder));
+                Ok(())
+            }
+            _ => bail!("Not an encrypted folder"),
+        }
+    }
+
+    /// Lock an encrypted folder (clear the decrypted data)
+    pub fn lock(&mut self) -> Result<()> {
+        match self {
+            Self::EncryptedFolder {
+                decrypted_folder: df,
+                ..
+            } => {
+                *df = None;
+                Ok(())
+            }
+            _ => bail!("Not an encrypted folder"),
+        }
+    }
+
+    /// Get the encrypted data bytes (for re-encryption or storage)
+    pub fn get_encrypted_data(&self) -> Option<&[u8]> {
+        match self {
+            Self::EncryptedFolder { encrypted_data, .. } => Some(encrypted_data),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Folder - Hierarchical container with unified items
+// ============================================================================
+
+/// A folder containing a unified collection of secrets and subfolders
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct Folder {
     /// Folder name (empty string for root)
     pub name: String,
 
-    /// Which encryption domain this folder belongs to
+    /// Default encryption domain for new items created in this folder
     /// - 0 = default domain (master key)
     /// - N > 0 = custom domain (requires separate password)
     pub encryption_domain: u32,
 
-    /// Secrets in this folder (key -> history of values)
-    pub secrets: BTreeMap<String, Vec<SecretEntry>>,
-
-    /// Subfolders
-    pub subfolders: BTreeMap<String, Folder>,
+    /// All items in this folder (secrets AND subfolders)
+    pub items: BTreeMap<String, FolderItem>,
 }
 
 impl Folder {
@@ -486,8 +744,7 @@ impl Folder {
         Self {
             name: String::new(),
             encryption_domain: 0,
-            secrets: BTreeMap::new(),
-            subfolders: BTreeMap::new(),
+            items: BTreeMap::new(),
         }
     }
 
@@ -496,9 +753,47 @@ impl Folder {
         Self {
             name,
             encryption_domain,
-            secrets: BTreeMap::new(),
-            subfolders: BTreeMap::new(),
+            items: BTreeMap::new(),
         }
+    }
+
+    // ========== Helper Methods ==========
+
+    /// Get all secrets (excluding folders)
+    pub fn secrets(&self) -> impl Iterator<Item = (&String, &FolderItem)> {
+        self.items.iter().filter(|(_, item)| item.is_secret())
+    }
+
+    /// Get all folders (regular, encrypted, locked or unlocked)
+    pub fn all_folders(&self) -> impl Iterator<Item = (&String, &FolderItem)> {
+        self.items.iter().filter(|(_, item)| item.is_any_folder())
+    }
+
+    /// Get all navigable folders (regular + unlocked encrypted)
+    pub fn navigable_folders(&self) -> impl Iterator<Item = (&String, &FolderItem)> {
+        self.items.iter().filter(|(_, item)| item.is_navigable())
+    }
+
+    /// Get an item by name
+    pub fn get_item(&self, name: &str) -> Option<&FolderItem> {
+        self.items.get(name)
+    }
+
+    /// Get a mutable item by name
+    pub fn get_item_mut(&mut self, name: &str) -> Option<&mut FolderItem> {
+        self.items.get_mut(name)
+    }
+
+    /// Get a subfolder by name (only if navigable)
+    pub fn get_subfolder(&self, name: &str) -> Option<&Self> {
+        self.items.get(name).and_then(|item| item.get_folder())
+    }
+
+    /// Get a mutable subfolder by name (only if navigable)
+    pub fn get_subfolder_mut(&mut self, name: &str) -> Option<&mut Self> {
+        self.items
+            .get_mut(name)
+            .and_then(|item| item.get_folder_mut())
     }
 }
 
@@ -509,8 +804,8 @@ impl Folder {
 /// A secret entry with timestamp and metadata
 #[derive(Debug, Clone, Encode, Decode)]
 pub struct SecretEntry {
-    /// The secret value (may be plain or encrypted folder)
-    pub value: SecretValue,
+    /// The encrypted secret value
+    pub value: EncryptedValue,
 
     /// When this version was created (seconds since UNIX epoch)
     pub timestamp: u64,
@@ -523,17 +818,10 @@ pub struct SecretEntry {
 }
 
 impl SecretEntry {
-    /// Create a new secret entry with plain value
-    pub fn new_plain(
-        encrypted_value: EncryptedValue,
-        timestamp: u64,
-        encryption_domain: u32,
-    ) -> Self {
+    /// Create a new secret entry
+    pub fn new(encrypted_value: EncryptedValue, timestamp: u64) -> Self {
         Self {
-            value: SecretValue::Plain {
-                data: encrypted_value,
-                encryption_domain,
-            },
+            value: encrypted_value,
             timestamp,
             secret_type: SecretType::Utf8String,
             metadata: HashMap::new(),
@@ -542,66 +830,7 @@ impl SecretEntry {
 
     /// Get the encrypted value from this entry
     pub const fn encrypted_value(&self) -> &EncryptedValue {
-        match &self.value {
-            SecretValue::Plain { data, .. } => data,
-            // For encrypted folders, we return the placeholder
-            // (actual folder decryption will be handled separately)
-            SecretValue::EncryptedFolder {
-                placeholder_data, ..
-            } => placeholder_data,
-        }
-    }
-}
-
-// ============================================================================
-// Secret Value - Either plain data or encrypted folder
-// ============================================================================
-
-/// The actual secret value
-#[derive(Debug, Clone, Encode, Decode)]
-pub enum SecretValue {
-    /// Regular secret encrypted with domain key
-    /// - Domain 0: encrypted with master key (like V4)
-    /// - Domain N: encrypted with custom domain key
-    Plain {
-        /// The encrypted data
-        data: EncryptedValue,
-
-        /// Which encryption domain encrypts this data
-        encryption_domain: u32,
-    },
-
-    /// Locked folder disguised as a regular secret
-    /// When locked, CLI shows `placeholder_data`
-    /// When unlocked, `encrypted_folder` is decrypted and merged into parent
-    EncryptedFolder {
-        /// What to show when locked (appears as regular secret value)
-        placeholder_data: EncryptedValue,
-
-        /// The actual folder serialized and encrypted with domain key
-        encrypted_folder: Vec<u8>,
-
-        /// Which encryption domain encrypts this folder
-        encryption_domain: u32,
-    },
-}
-
-impl SecretValue {
-    /// Check if this is an encrypted folder
-    pub const fn is_encrypted_folder(&self) -> bool {
-        matches!(self, Self::EncryptedFolder { .. })
-    }
-
-    /// Get the encryption domain for this value
-    pub const fn encryption_domain(&self) -> u32 {
-        match self {
-            Self::Plain {
-                encryption_domain, ..
-            }
-            | Self::EncryptedFolder {
-                encryption_domain, ..
-            } => *encryption_domain,
-        }
+        &self.value
     }
 }
 
@@ -675,12 +904,22 @@ pub fn deserialize_storage_v5_from_slice(data: &[u8]) -> Result<StorageV5> {
 
 /// Sort all secret entries by timestamp (recursive)
 fn sort_folder_entries(folder: &mut Folder) {
-    for entries in folder.secrets.values_mut() {
-        entries.sort_by_key(|e| e.timestamp);
-    }
-
-    for subfolder in folder.subfolders.values_mut() {
-        sort_folder_entries(subfolder);
+    for item in folder.items.values_mut() {
+        match item {
+            FolderItem::Secret { entries, .. } => {
+                entries.sort_by_key(|e| e.timestamp);
+            }
+            FolderItem::Folder { folder, .. } => {
+                sort_folder_entries(folder);
+            }
+            FolderItem::EncryptedFolder {
+                decrypted_folder, ..
+            } => {
+                if let Some(df) = decrypted_folder {
+                    sort_folder_entries(df);
+                }
+            }
+        }
     }
 }
 
@@ -700,7 +939,8 @@ pub fn migrate_v4_to_v5(v4: StorageV4) -> StorageV5 {
     for (key, entries) in v4.data {
         let secrets: Vec<SecretEntry> = entries.into_iter().map(value_entry_to_secret).collect();
 
-        root.secrets.insert(key, secrets);
+        root.items
+            .insert(key.clone(), FolderItem::new_secret(key, secrets, 0));
     }
 
     StorageV5 { root }
@@ -708,15 +948,7 @@ pub fn migrate_v4_to_v5(v4: StorageV4) -> StorageV5 {
 
 /// Convert V4 `ValueEntry` to V5 `SecretEntry`
 fn value_entry_to_secret(entry: ValueEntry) -> SecretEntry {
-    SecretEntry {
-        value: SecretValue::Plain {
-            data: entry.value,
-            encryption_domain: 0, // Default domain
-        },
-        timestamp: entry.timestamp,
-        secret_type: SecretType::Utf8String,
-        metadata: HashMap::new(),
-    }
+    SecretEntry::new(entry.value, entry.timestamp)
 }
 
 // ============================================================================
@@ -733,34 +965,39 @@ mod tests {
         let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
         let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-        assert!(deserialized.root.secrets.is_empty());
-        assert!(deserialized.root.subfolders.is_empty());
+        assert!(deserialized.root.items.is_empty());
     }
 
     #[test]
     fn test_simple_secret_v5() {
         let mut storage = StorageV5::new();
         let test_value = EncryptedValue::from_ciphertext(b"test_value".to_vec());
-        storage.root.secrets.insert(
+        storage.root.items.insert(
             "test_key".to_string(),
-            vec![SecretEntry::new_plain(test_value, 12345, 0)],
+            FolderItem::new_secret(
+                "test_key".to_string(),
+                vec![SecretEntry::new(test_value, 12345)],
+                0,
+            ),
         );
 
         let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
         let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-        assert_eq!(deserialized.root.secrets.len(), 1);
-        let entry = &deserialized.root.secrets["test_key"][0];
+        assert_eq!(deserialized.root.items.len(), 1);
+        let item = &deserialized.root.items["test_key"];
 
-        match &entry.value {
-            SecretValue::Plain {
-                data,
+        match item {
+            FolderItem::Secret {
+                entries,
                 encryption_domain,
+                ..
             } => {
-                assert_eq!(data.as_bytes(), b"test_value");
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].encrypted_value().as_bytes(), b"test_value");
                 assert_eq!(*encryption_domain, 0);
             }
-            _ => panic!("Expected Plain variant"),
+            _ => panic!("Expected Secret variant"),
         }
     }
 
@@ -771,50 +1008,55 @@ mod tests {
         // Add a subfolder
         let mut subfolder = Folder::new("work".to_string(), 0);
         let api_key_value = EncryptedValue::from_ciphertext(b"secret123".to_vec());
-        subfolder.secrets.insert(
+        subfolder.items.insert(
             "api_key".to_string(),
-            vec![SecretEntry::new_plain(api_key_value, 12345, 0)],
+            FolderItem::new_secret(
+                "api_key".to_string(),
+                vec![SecretEntry::new(api_key_value, 12345)],
+                0,
+            ),
         );
 
-        storage
-            .root
-            .subfolders
-            .insert("work".to_string(), subfolder);
+        storage.root.items.insert(
+            "work".to_string(),
+            FolderItem::new_folder("work".to_string(), subfolder),
+        );
 
         let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
         let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-        assert_eq!(deserialized.root.subfolders.len(), 1);
-        assert!(deserialized.root.subfolders.contains_key("work"));
-        assert_eq!(deserialized.root.subfolders["work"].secrets.len(), 1);
+        assert_eq!(deserialized.root.items.len(), 1);
+        assert!(deserialized.root.items.contains_key("work"));
+        let work_item = &deserialized.root.items["work"];
+        assert!(work_item.is_folder());
+        if let Some(work_folder) = work_item.get_folder() {
+            assert_eq!(work_folder.items.len(), 1);
+        } else {
+            panic!("Expected folder");
+        }
     }
 
     #[test]
     fn test_encrypted_folder_variant() {
         let mut storage = StorageV5::new();
 
-        // Create an encrypted folder secret
-        let placeholder = EncryptedValue::from_ciphertext(b"placeholder".to_vec());
-        storage.root.secrets.insert(
+        // Create an encrypted folder
+        storage.root.items.insert(
             "secret_folder".to_string(),
-            vec![SecretEntry {
-                value: SecretValue::EncryptedFolder {
-                    placeholder_data: placeholder,
-                    encrypted_folder: vec![1, 2, 3, 4], // Mock encrypted data
-                    encryption_domain: 1,
-                },
-                timestamp: 12345,
-                secret_type: SecretType::Utf8String,
-                metadata: HashMap::new(),
-            }],
+            FolderItem::new_encrypted_folder(
+                "secret_folder".to_string(),
+                vec![1, 2, 3, 4], // Mock encrypted data
+                1,
+            ),
         );
 
         let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
         let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-        let entry = &deserialized.root.secrets["secret_folder"][0];
-        assert!(entry.value.is_encrypted_folder());
-        assert_eq!(entry.value.encryption_domain(), 1);
+        let item = &deserialized.root.items["secret_folder"];
+        assert!(item.is_encrypted_folder());
+        assert!(item.is_locked());
+        assert_eq!(item.encryption_domain(), 1);
     }
 
     #[test]
@@ -825,9 +1067,9 @@ mod tests {
 
         let v5 = migrate_v4_to_v5(v4);
 
-        assert_eq!(v5.root.secrets.len(), 2);
-        assert!(v5.root.secrets.contains_key("key1"));
-        assert!(v5.root.secrets.contains_key("key2"));
+        assert_eq!(v5.root.items.len(), 2);
+        assert!(v5.root.items.contains_key("key1"));
+        assert!(v5.root.items.contains_key("key2"));
         assert_eq!(v5.root.encryption_domain, 0);
     }
 

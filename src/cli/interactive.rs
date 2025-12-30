@@ -354,170 +354,91 @@ impl InteractiveCli {
         destination: &str,
         storage: &mut StorageV5,
     ) -> Result<()> {
+        use regex::Regex;
         let current_path = self.get_current_path();
 
-        // Find matching keys and folders
-        let key_count = storage
-            .get_at_path(&current_path, source_pattern, true)?
-            .count();
-        let folder_count = storage
-            .search_at_path(&current_path, source_pattern, true)?
-            .filter(|(path, name)| {
-                // Only count folders (check if it exists as a subfolder)
-                let check_path = if path == "/" {
-                    format!("/{name}")
-                } else {
-                    format!("{path}/{name}")
-                };
-                storage.get_folder(&check_path).is_some()
-            })
-            .count();
+        // Parse the source pattern to extract folder path and item pattern
+        let (source_folder, item_pattern) = parse_key_path(&current_path, source_pattern);
+        let re = Regex::new(&format!("^{item_pattern}$"))?;
 
-        let total_matches = key_count + folder_count;
+        // Find all matching items, avoiding double-counting when folder matches
+        let mut matches = Vec::new();
+        find_matching_items(storage, &source_folder, &re, &mut matches);
 
-        if total_matches == 0 {
+        if matches.is_empty() {
             bail!("No keys or folders matching pattern '{source_pattern}'");
         }
 
-        if total_matches == 1 {
-            // Single match: could be a key or a folder
-            // Get the actual matched item (not the pattern)
-            let (source_path, source_name, is_folder) = if key_count == 1 {
-                // It's a key
-                let (folder, key, _) = storage
-                    .get_at_path(&current_path, source_pattern, true)?
-                    .next()
-                    .expect("key_count is 1");
-                (folder, key.to_string(), false)
+        // Determine if destination is an existing folder
+        let dest_is_folder = destination.ends_with('/')
+            || storage
+                .get_folder(&resolve_path(&current_path, destination))
+                .is_some();
+
+        if matches.len() == 1 {
+            // Single match: can move to folder or rename
+            let (parent_path, item_name, is_folder) = &matches[0];
+
+            let (dest_parent, dest_name) = if dest_is_folder {
+                // Move into existing folder, keep name
+                (resolve_path(&current_path, destination), None)
             } else {
-                // It's a folder
-                let (path, name) = storage
-                    .search_at_path(&current_path, source_pattern, true)?
-                    .find(|(path, name)| {
-                        let check_path = if path == "/" {
-                            format!("/{name}")
-                        } else {
-                            format!("{path}/{name}")
-                        };
-                        storage.get_folder(&check_path).is_some()
-                    })
-                    .expect("folder_count is 1");
-                (path, name.to_string(), true)
+                // Rename to new path
+                let (folder, name) = parse_key_path(&current_path, destination);
+                (folder, Some(name))
             };
 
-            // Determine destination
-            let dest_is_existing_folder = destination.ends_with('/')
-                || storage
-                    .get_folder(&resolve_path(&current_path, destination))
-                    .is_some();
+            storage.move_item(parent_path, item_name, &dest_parent, dest_name)?;
 
-            if is_folder {
-                // Moving a folder
-                let dest_parent = if dest_is_existing_folder {
-                    // Destination is a folder, move into it
-                    resolve_path(&current_path, destination)
-                } else {
-                    // Destination is a new name (rename)
-                    let (dest_parent, _) = parse_key_path(&current_path, destination);
-                    dest_parent
-                };
+            let final_name = dest_name.unwrap_or(item_name.as_str());
+            let dest_display = format_full_path(&dest_parent, final_name, *is_folder);
+            let source_display = format_full_path(parent_path, item_name, *is_folder);
 
-                let dest_name = if dest_is_existing_folder {
-                    None // Keep same name
-                } else {
-                    let (_, name) = parse_key_path(&current_path, destination);
-                    Some(name)
-                };
-
-                storage.move_folder(&source_path, &source_name, &dest_parent, dest_name)?;
-
-                let dest_display = if let Some(dn) = dest_name {
-                    format_full_path(&dest_parent, dn, true)
-                } else {
-                    format_full_path(&dest_parent, &source_name, true)
-                };
-
-                secure_print(
-                    format!(
-                        "Moved folder {} -> {}",
-                        format_full_path(&source_path, &source_name, true),
-                        dest_display
-                    ),
-                    self.insecure_stdout,
-                )?;
+            let message = if *is_folder {
+                format!("Moved folder {source_display} -> {dest_display}")
             } else {
-                // Moving a key
-                let (dest_folder, dest_key_opt) = parse_key_path(&current_path, destination);
-
-                let dest_key = if dest_is_existing_folder {
-                    None
-                } else {
-                    Some(dest_key_opt)
-                };
-
-                storage.move_key(&source_path, &source_name, &dest_folder, dest_key)?;
-
-                let dest_display = if let Some(dk) = dest_key {
-                    format_full_path(&dest_folder, dk, false)
-                } else {
-                    format_full_path(&dest_folder, &source_name, false)
-                };
-
-                secure_print(
-                    format!(
-                        "Moved {} -> {}",
-                        format_full_path(&source_path, &source_name, false),
-                        dest_display
-                    ),
-                    self.insecure_stdout,
-                )?;
-            }
+                format!("Moved {source_display} -> {dest_display}")
+            };
+            secure_print(message, self.insecure_stdout)?;
         } else {
             // Multiple matches: destination must be a folder
+            if !dest_is_folder {
+                bail!("Destination must be a folder when moving multiple items");
+            }
+
             let dest_folder = resolve_path(&current_path, destination);
-
             if storage.get_folder(&dest_folder).is_none() {
-                bail!(
-                    "Destination '{destination}' is not a folder (required when moving multiple items)"
-                );
+                bail!("Destination folder '{dest_folder}' does not exist");
             }
 
-            // Collect keys to move
-            let keys_to_move: Vec<(String, String)> = storage
-                .get_at_path(&current_path, source_pattern, true)?
-                .map(|(folder, key, _)| (folder, key.to_string()))
-                .collect();
+            // Count keys and folders
+            let key_count = matches
+                .iter()
+                .filter(|(_, _, is_folder)| !is_folder)
+                .count();
+            let folder_count = matches
+                .iter()
+                .filter(|(_, _, is_folder)| *is_folder)
+                .count();
 
-            // Collect folders to move
-            let folders_to_move: Vec<(String, String)> = storage
-                .search_at_path(&current_path, source_pattern, true)?
-                .filter_map(|(path, name)| {
-                    let check_path = if path == "/" {
-                        format!("/{name}")
-                    } else {
-                        format!("{path}/{name}")
-                    };
-                    if storage.get_folder(&check_path).is_some() {
-                        Some((path, name.to_string()))
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-
-            // Move all keys
-            for (source_folder, source_key) in &keys_to_move {
-                storage.move_key(source_folder, source_key, &dest_folder, None)?;
+            // Move all items
+            for (parent_path, item_name, _) in &matches {
+                storage.move_item(parent_path, item_name, &dest_folder, None)?;
             }
 
-            // Move all folders
-            for (parent_path, folder_name) in &folders_to_move {
-                storage.move_folder(parent_path, folder_name, &dest_folder, None)?;
-            }
-
-            let message = match (keys_to_move.len(), folders_to_move.len()) {
-                (k, 0) => format!("Moved {k} keys to {dest_folder}"),
-                (0, f) => format!("Moved {f} folders to {dest_folder}"),
+            let message = match (key_count, folder_count) {
+                (0, n) => format!(
+                    "Moved {} {} to {}",
+                    n,
+                    if n == 1 { "folder" } else { "folders" },
+                    dest_folder
+                ),
+                (n, 0) => format!(
+                    "Moved {} {} to {}",
+                    n,
+                    if n == 1 { "key" } else { "keys" },
+                    dest_folder
+                ),
                 (k, f) => format!("Moved {k} keys and {f} folders to {dest_folder}"),
             };
             secure_print(message, self.insecure_stdout)?;
@@ -529,6 +450,32 @@ impl InteractiveCli {
 
     fn cmd_pwd(&self) {
         println!("{}", self.get_current_path());
+    }
+}
+fn find_matching_items(
+    storage: &StorageV5,
+    path: &str,
+    pattern: &regex::Regex,
+    results: &mut Vec<(String, String, bool)>,
+) {
+    let Some(folder) = storage.get_folder(path) else {
+        return;
+    };
+
+    for (name, item) in &folder.items {
+        let matches = pattern.is_match(name);
+
+        if matches {
+            // Item matches - add it to results
+            let is_folder = item.is_folder() || item.is_locked();
+            results.push((path.to_string(), name.clone(), is_folder));
+            // KEY: Don't recurse into matched folders to avoid double-counting
+        } else if item.is_folder() {
+            // Item doesn't match but is a folder - recurse to find matches inside
+            let subfolder_path = format_full_path(path, name, true);
+            find_matching_items(storage, &subfolder_path, pattern, results);
+        }
+        // Locked folders that don't match are skipped (can't recurse into them)
     }
 }
 

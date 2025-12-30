@@ -11,27 +11,32 @@
 - Comprehensive test coverage for nested folders
 
 ## encryption domains
-⚠️ **PARTIALLY COMPLETED**
-- Data structures exist: `Folder` has `encryption_domain: u32` field
-- `SecretValue` enum supports both plain and encrypted folder variants
+⚠️ **IN PROGRESS - Refactoring to unified structure**
+- ✅ `FolderItem` enum with Secret/Folder/EncryptedFolder variants
+- ✅ Unified `items` BTreeMap in Folder (no separate secrets/subfolders)
+- ✅ Helper methods on FolderItem for ergonomic access
 - Default encryption domain (0) uses the master key (same as storage v4)
 
-⏳ **TODO: CLI commands and functionality**
-- Non-default domains should encrypt secrets with a custom key requiring another password
-- Can be attached to either individual keys or folders
-- When a folder has a non-default encrypted domain, all its contents should be encrypted together, such that it is impossible to know what is stored inside
-- Should appear in the CLI UI as a regular key/value instead of a folder with a user-set value to confuse attackers in case master key is stolen
-- "unlock" command for such a key asks for a password, decrypts its content and opens it for querying by all commands as if it was unencrypted
+⏳ **TODO: Simplified encryption approach**
+- Non-default domains encrypt secrets/folders with a custom key requiring password
+- Can be attached to individual secrets or entire folders
+- Encrypted folders are VISIBLE as encrypted folders (no hiding with placeholder values)
+- When locked: `get` returns "**LOCKED**" indicator
+- When unlocked: folder becomes navigable, contents accessible
+- "unlock {folder}" command asks for password, decrypts and populates in-memory
+- "lock {folder}" command clears decrypted data from memory
+- Delete operation works uniformly for secrets, folders, and encrypted folders
 
-**Use case**
+**Simplified Use Case**
 Encryption:
-- User can call a command "lock {folder/key}" which would ask which encryption domain to use or to create a new one, password for it and a PlaceholderSecret value to show when it is locked.
-- The value or a folder is immediately encrypted and stored encrypted in memory
-- get/set/history commands work as if a PlaceholderSecret is a real stored secret value.
+- User calls "lock {folder/key}" which asks for encryption domain and password
+- Content is immediately encrypted and stored encrypted
+- Locked items show "**LOCKED**" when accessed
 
 Decryption:
-- get/set/history commands work as always as if a PlaceHolderSecret was a real value. set command can override the value even if it holds an encrypted folder underneath.
-- "unlock key" command checks encryption domain and if a key for this domain is already cached, then it performs decryption and if it is a folder, decrypts its contents into memory making its contents available for get/set/history commands
+- "unlock {item}" asks for password
+- Decrypts into memory, making content accessible
+- Subsequent commands work normally on decrypted content
 
 ## move command
 ✅ **COMPLETED: move command**

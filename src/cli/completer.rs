@@ -40,29 +40,26 @@ impl CypherCompleter {
 
         let mut matches: Vec<Pair> = Vec::new();
         if let Some(folder) = storage.get_folder(&target_path) {
-            // Add matching secret keys
-            if include_keys {
-                for key in folder.secrets.keys() {
-                    if key.starts_with(prefix) {
-                        let full_path = format_full_path(dir_part, key, false);
-                        matches.push(Pair {
-                            display: full_path.clone(),
-                            replacement: full_path,
-                        });
-                    }
+            // Iterate through all items in the folder
+            for (name, item) in &folder.items {
+                if !name.starts_with(prefix) {
+                    continue;
                 }
-            }
 
-            // Add matching folder names
-            if include_folders {
-                for name in folder.subfolders.keys() {
-                    if name.starts_with(prefix) {
-                        let full_path = format_full_path(dir_part, name, true);
-                        matches.push(Pair {
-                            display: full_path.clone(),
-                            replacement: full_path,
-                        });
-                    }
+                // Check if we should include this item based on its type
+                let should_include = match item {
+                    _ if item.is_secret() => include_keys,
+                    _ if item.is_navigable() || item.is_locked() => include_folders,
+                    _ => false,
+                };
+
+                if should_include {
+                    let is_folder = item.is_any_folder();
+                    let full_path = format_full_path(dir_part, name, is_folder);
+                    matches.push(Pair {
+                        display: full_path.clone(),
+                        replacement: full_path,
+                    });
                 }
             }
         }

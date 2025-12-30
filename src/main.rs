@@ -157,12 +157,14 @@ fn run_upgrade_storage(
 
     let mut new_storage = StorageV5::new();
     let new_cypher = Cypher::new(new_key);
-    for (key, entries) in old_storage.root.secrets {
-        for entry in entries {
-            let mut secret = entry.encrypted_value().decrypt(&old_cypher)?;
-            let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
-            new_storage.put_at_path("/", key.clone(), new_value, entry.timestamp);
-            secret.zeroize();
+    for (key, item) in old_storage.root.secrets() {
+        if let Some(entries) = item.get_entries() {
+            for entry in entries {
+                let mut secret = entry.encrypted_value().decrypt(&old_cypher)?;
+                let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
+                new_storage.put_at_path("/", key.clone(), new_value, entry.timestamp);
+                secret.zeroize();
+            }
         }
     }
 

@@ -13,7 +13,7 @@ fn temp_test_file() -> (TempDir, PathBuf) {
 #[test]
 fn test_storage_new() {
     let storage = StorageV5::new();
-    assert_eq!(storage.root.secrets.len(), 0);
+    assert_eq!(storage.root.items.len(), 0);
 }
 
 #[test]
@@ -104,7 +104,7 @@ fn test_storage_delete() {
     storage.put_at_path("/", "key2".to_string(), "value2".into(), 0);
 
     assert!(storage.delete("key1"));
-    assert_eq!(storage.root.secrets.len(), 1);
+    assert_eq!(storage.root.items.len(), 1);
 
     assert!(!storage.delete("key1")); // Already deleted
     assert!(!storage.delete("nonexistent"));
@@ -141,7 +141,7 @@ fn test_serialize_deserialize_empty() {
     let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
     let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-    assert_eq!(deserialized.root.secrets.len(), 0);
+    assert_eq!(deserialized.root.items.len(), 0);
 }
 
 #[test]
@@ -152,8 +152,8 @@ fn test_serialize_deserialize_single_entry() {
     let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
     let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-    assert_eq!(deserialized.root.secrets.len(), 1);
-    let entry = &deserialized.root.secrets["key1"][0];
+    assert_eq!(deserialized.root.items.len(), 1);
+    let entry = &deserialized.root.items["key1"].get_entries().unwrap()[0];
     assert_eq!(entry.encrypted_value().as_bytes(), "value1".as_bytes());
 }
 
@@ -167,9 +167,15 @@ fn test_serialize_deserialize_multiple_entries() {
     let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
     let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-    assert_eq!(deserialized.root.secrets.len(), 2);
-    assert_eq!(deserialized.root.secrets["key1"].len(), 2);
-    assert_eq!(deserialized.root.secrets["key2"].len(), 1);
+    assert_eq!(deserialized.root.items.len(), 2);
+    assert_eq!(
+        deserialized.root.items["key1"].get_entries().unwrap().len(),
+        2
+    );
+    assert_eq!(
+        deserialized.root.items["key2"].get_entries().unwrap().len(),
+        1
+    );
 }
 
 #[test]
@@ -181,15 +187,15 @@ fn test_serialize_deserialize_unicode() {
     let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
     let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-    assert_eq!(deserialized.root.secrets.len(), 2);
+    assert_eq!(deserialized.root.items.len(), 2);
     assert_eq!(
-        deserialized.root.secrets["ключ"][0]
+        deserialized.root.items["ключ"].get_entries().unwrap()[0]
             .encrypted_value()
             .as_bytes(),
         "значение".as_bytes()
     );
     assert_eq!(
-        deserialized.root.secrets["🔑"][0]
+        deserialized.root.items["🔑"].get_entries().unwrap()[0]
             .encrypted_value()
             .as_bytes(),
         "🎁".as_bytes()
@@ -223,13 +229,17 @@ fn test_load_save_storage_v5() {
     assert!(path.exists());
 
     let loaded = load_storage_v5(&cypher, &path).unwrap();
-    assert_eq!(loaded.root.secrets.len(), 2);
+    assert_eq!(loaded.root.items.len(), 2);
     assert_eq!(
-        loaded.root.secrets["key1"][0].encrypted_value().as_bytes(),
+        loaded.root.items["key1"].get_entries().unwrap()[0]
+            .encrypted_value()
+            .as_bytes(),
         "value1".as_bytes()
     );
     assert_eq!(
-        loaded.root.secrets["key2"][0].encrypted_value().as_bytes(),
+        loaded.root.items["key2"].get_entries().unwrap()[0]
+            .encrypted_value()
+            .as_bytes(),
         "value2".as_bytes()
     );
 }
@@ -241,7 +251,7 @@ fn test_load_nonexistent_file() {
     let cypher = Cypher::new(EncryptionKey::for_file("test_password", &path).unwrap());
 
     let storage = load_storage_v5(&cypher, &path).unwrap();
-    assert_eq!(storage.root.secrets.len(), 0);
+    assert_eq!(storage.root.items.len(), 0);
 }
 
 #[test]
@@ -257,7 +267,7 @@ fn test_load_with_wrong_password() {
 
     // Should fail or return garbage
     let result = load_storage_v5(&cypher2, &path);
-    assert!(result.is_err() || result.unwrap().root.secrets.is_empty());
+    assert!(result.is_err() || result.unwrap().root.items.is_empty());
 }
 
 #[test]
@@ -284,7 +294,7 @@ fn test_special_characters_in_keys() {
     storage.put_at_path("/", "key.with.dots".to_string(), "value3".into(), 0);
     storage.put_at_path("/", "key@with@at".to_string(), "value4".into(), 0);
 
-    assert_eq!(storage.root.secrets.len(), 4);
+    assert_eq!(storage.root.items.len(), 4);
 
     let result: Vec<_> = storage.get("key-with-dash").unwrap().collect();
     assert_eq!(result[0].2.as_bytes(), "value1".as_bytes());
@@ -322,7 +332,7 @@ fn test_concurrent_operations() {
     }
 
     let final_storage = storage.lock().unwrap();
-    assert_eq!(final_storage.root.secrets.len(), 10);
+    assert_eq!(final_storage.root.items.len(), 10);
 }
 
 #[test]
@@ -340,7 +350,7 @@ fn test_storage_persistence_across_sessions() {
     // Session 2: Load and add
     {
         let mut storage = load_storage_v5(&cypher, &path).unwrap();
-        assert_eq!(storage.root.secrets.len(), 1);
+        assert_eq!(storage.root.items.len(), 1);
         storage.put_at_path("/", "session2_key".to_string(), "session2_value".into(), 0);
         save_storage_v5(&cypher, &storage, &path).unwrap();
     }
@@ -348,9 +358,9 @@ fn test_storage_persistence_across_sessions() {
     // Session 3: Verify both keys exist
     {
         let storage = load_storage_v5(&cypher, &path).unwrap();
-        assert_eq!(storage.root.secrets.len(), 2);
-        assert!(storage.root.secrets.contains_key("session1_key"));
-        assert!(storage.root.secrets.contains_key("session2_key"));
+        assert_eq!(storage.root.items.len(), 2);
+        assert!(storage.root.items.contains_key("session1_key"));
+        assert!(storage.root.items.contains_key("session2_key"));
     }
 }
 
@@ -360,20 +370,20 @@ fn test_empty_key_value() {
     storage.put_at_path("/", "".to_string(), "value".into(), 0);
     storage.put_at_path("/", "key".to_string(), "".into(), 0);
 
-    assert_eq!(storage.root.secrets.len(), 2);
+    assert_eq!(storage.root.items.len(), 2);
 
     let serialized = serialize_storage_v5_to_vec(&storage).unwrap();
     let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
-    assert_eq!(deserialized.root.secrets.len(), 2);
+    assert_eq!(deserialized.root.items.len(), 2);
     assert_eq!(
-        deserialized.root.secrets[""][0]
+        deserialized.root.items[""].get_entries().unwrap()[0]
             .encrypted_value()
             .as_bytes(),
         "value".as_bytes()
     );
     assert_eq!(
-        deserialized.root.secrets["key"][0]
+        deserialized.root.items["key"].get_entries().unwrap()[0]
             .encrypted_value()
             .as_bytes(),
         "".as_bytes()
@@ -392,7 +402,7 @@ fn test_very_long_key_value() {
     let deserialized = deserialize_storage_v5_from_slice(&serialized).unwrap();
 
     assert_eq!(
-        deserialized.root.secrets[&long_key][0]
+        deserialized.root.items[&long_key].get_entries().unwrap()[0]
             .encrypted_value()
             .as_bytes(),
         long_value.as_bytes()
