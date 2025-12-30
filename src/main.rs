@@ -249,12 +249,11 @@ fn main() -> Result<()> {
 
     let _dbg_stop_guard = start_background_debugger_checks();
 
+    let argon2_params = get_argon2_params(&params);
     let mut password = params.insecure_password.take().unwrap_or_else(|| {
         let need_confirmation = params.encrypt || !params.filename.exists();
         get_password(&params.filename, need_confirmation).expect("password")
     });
-
-    let argon2_params = get_argon2_params(&params);
 
     if params.encrypt {
         let key = EncryptionKey::from_password_with_params(
