@@ -38,7 +38,7 @@ pub use path_utils::{
 };
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 pub use storage::{
-    EncryptedValue, SecretEntry, StorageV4, StorageV5, deserialize_storage_v4,
+    EncryptedValue, Folder, FolderItem, SecretEntry, StorageV4, StorageV5, deserialize_storage_v4,
     deserialize_storage_v5_from_slice, load_storage_v4, load_storage_v5, save_storage_v4,
     save_storage_v5, serialize_storage_v4, serialize_storage_v5_to_vec,
 };

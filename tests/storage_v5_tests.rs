@@ -1053,3 +1053,114 @@ fn test_move_folder_collision_error() {
     // Source should still have it
     assert!(storage.get_folder("/source/folder1").is_some());
 }
+
+#[test]
+fn test_encrypted_folder_decrypted_state_not_serialized() {
+    // This test verifies that decrypted_folder (in-memory state) is NOT serialized
+    // Thanks to #[serde(skip)], unlocked folders return to locked state on load
+
+    use rcypher::*;
+
+    let (_dir, path) = temp_test_file();
+    let cypher = Cypher::new(
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
+    );
+
+    // Create storage with an encrypted folder
+    let mut storage = StorageV5::new();
+
+    // Create a regular folder with some content
+    storage.mkdir("/", "subfolder").unwrap();
+    storage.put_at_path(
+        "/subfolder",
+        "secret1".to_string(),
+        EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+        0,
+    );
+
+    // Create an encrypted folder with some encrypted_data
+    use std::collections::BTreeMap;
+    let mut encrypted_folder = FolderItem::new_encrypted_folder(
+        "locked_folder".to_string(),
+        vec![1, 2, 3, 4, 5], // dummy encrypted bytes
+        1,                   // custom domain
+    );
+
+    // Create a decrypted folder with content
+    let mut decrypted = Folder {
+        name: "decrypted_content".to_string(),
+        encryption_domain: 1,
+        items: BTreeMap::new(),
+    };
+    decrypted.items.insert(
+        "inner_secret".to_string(),
+        FolderItem::new_secret(
+            "inner_secret".to_string(),
+            vec![SecretEntry::new(
+                EncryptedValue::encrypt(&cypher, "sensitive_data").unwrap(),
+                12345,
+            )],
+            1,
+        ),
+    );
+
+    // Simulate unlocking: populate decrypted_folder (test helper only available in test/debug)
+    encrypted_folder
+        .test_set_decrypted_folder(decrypted)
+        .unwrap();
+
+    // Verify folder is unlocked before save
+    assert!(
+        encrypted_folder.test_has_decrypted_folder(),
+        "Folder should be unlocked before serialization"
+    );
+
+    // Add to storage
+    storage
+        .root
+        .items
+        .insert("locked_folder".to_string(), encrypted_folder);
+
+    // Save storage
+    save_storage_v5(&cypher, &storage, &path).unwrap();
+
+    // Load storage back
+    let loaded_storage = load_storage_v5(&cypher, &path).unwrap();
+
+    // CRITICAL TEST: decrypted_folder should be None after deserialization
+    // This verifies #[serde(skip)] works correctly
+    let loaded_item = loaded_storage.root.items.get("locked_folder").unwrap();
+    assert!(
+        !loaded_item.test_has_decrypted_folder(),
+        "Folder MUST be locked after deserialization - decrypted_folder should be None"
+    );
+
+    // Verify encrypted_data is preserved
+    assert_eq!(
+        loaded_item.test_get_encrypted_data(),
+        Some(&[1, 2, 3, 4, 5][..]),
+        "encrypted_data should be preserved"
+    );
+
+    // Verify encryption_domain is preserved
+    assert_eq!(
+        loaded_item.encryption_domain(),
+        1,
+        "encryption_domain should be preserved"
+    );
+
+    // Verify other content is still there
+    assert_eq!(loaded_storage.root.items.len(), 2, "Should have 2 items");
+    assert!(
+        loaded_storage.get_folder("/subfolder").is_some(),
+        "Regular folder should still exist"
+    );
+
+    println!("✓ Critical test passed: decrypted_folder is NOT serialized");
+    println!("✓ Unlocked folders return to locked state on disk");
+}

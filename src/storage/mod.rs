@@ -9,6 +9,7 @@ pub use serialization::{
 };
 pub use store::StorageV4;
 pub use v5::{
-    SecretEntry, StorageV5, deserialize_storage_v5_from_slice, serialize_storage_v5_to_vec,
+    Folder, FolderItem, SecretEntry, StorageV5, deserialize_storage_v5_from_slice,
+    serialize_storage_v5_to_vec,
 };
 pub use value::EncryptedValue;

@@ -508,7 +508,7 @@ impl Default for StorageV5 {
 // ============================================================================
 
 /// An item in a folder - can be either a secret or a subfolder
-#[derive(Debug, Clone, Encode, Decode)]
+#[derive(Debug, Clone)]
 pub enum FolderItem {
     /// Regular secret with history
     Secret {
@@ -753,7 +753,134 @@ impl FolderItem {
             _ => None,
         }
     }
+
+    // ========================================================================
+    // Test/Debug helpers
+    // ========================================================================
+
+    #[cfg(any(test, debug_assertions))]
+    /// Test helper: Manually set `decrypted_folder` (to test serialization behavior)
+    /// Only available in test/debug builds
+    pub fn test_set_decrypted_folder(&mut self, folder: Folder) -> Result<()> {
+        match self {
+            Self::EncryptedFolder {
+                decrypted_folder, ..
+            } => {
+                *decrypted_folder = Some(Box::new(folder));
+                Ok(())
+            }
+            _ => bail!("Not an encrypted folder"),
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    /// Test helper: Check if `decrypted_folder` is populated
+    /// Only available in test/debug builds
+    pub const fn test_has_decrypted_folder(&self) -> bool {
+        matches!(
+            self,
+            Self::EncryptedFolder {
+                decrypted_folder: Some(_),
+                ..
+            }
+        )
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    /// Test helper: Get `encrypted_data` bytes
+    /// Only available in test/debug builds
+    pub fn test_get_encrypted_data(&self) -> Option<&[u8]> {
+        match self {
+            Self::EncryptedFolder { encrypted_data, .. } => Some(encrypted_data),
+            _ => None,
+        }
+    }
 }
+
+// Custom Encode/Decode implementations to ensure decrypted_folder is never serialized
+impl Encode for FolderItem {
+    fn encode<E: bincode::enc::Encoder>(
+        &self,
+        encoder: &mut E,
+    ) -> core::result::Result<(), bincode::error::EncodeError> {
+        match self {
+            Self::Secret {
+                name,
+                entries,
+                encryption_domain,
+            } => {
+                // Variant 0
+                Encode::encode(&0u32, encoder)?;
+                Encode::encode(name, encoder)?;
+                Encode::encode(entries, encoder)?;
+                Encode::encode(encryption_domain, encoder)?;
+            }
+            Self::Folder { name, folder } => {
+                // Variant 1
+                Encode::encode(&1u32, encoder)?;
+                Encode::encode(name, encoder)?;
+                Encode::encode(folder, encoder)?;
+            }
+            Self::EncryptedFolder {
+                name,
+                encrypted_data,
+                encryption_domain,
+                decrypted_folder: _, // Always skip this field
+            } => {
+                // Variant 2
+                Encode::encode(&2u32, encoder)?;
+                Encode::encode(name, encoder)?;
+                Encode::encode(encrypted_data, encoder)?;
+                Encode::encode(encryption_domain, encoder)?;
+                // CRITICAL: decrypted_folder is NEVER encoded (security requirement)
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<Context> Decode<Context> for FolderItem {
+    fn decode<D: bincode::de::Decoder<Context = Context>>(
+        decoder: &mut D,
+    ) -> core::result::Result<Self, bincode::error::DecodeError> {
+        let variant = <u32 as Decode<Context>>::decode(decoder)?;
+        match variant {
+            0 => {
+                let name = <String as Decode<Context>>::decode(decoder)?;
+                let entries = <Vec<SecretEntry> as Decode<Context>>::decode(decoder)?;
+                let encryption_domain = <u32 as Decode<Context>>::decode(decoder)?;
+                Ok(Self::Secret {
+                    name,
+                    entries,
+                    encryption_domain,
+                })
+            }
+            1 => {
+                let name = <String as Decode<Context>>::decode(decoder)?;
+                let folder = <Box<Folder> as Decode<Context>>::decode(decoder)?;
+                Ok(Self::Folder { name, folder })
+            }
+            2 => {
+                let name = <String as Decode<Context>>::decode(decoder)?;
+                let encrypted_data = <Vec<u8> as Decode<Context>>::decode(decoder)?;
+                let encryption_domain = <u32 as Decode<Context>>::decode(decoder)?;
+                // CRITICAL: decrypted_folder is always None after deserialization
+                Ok(Self::EncryptedFolder {
+                    name,
+                    encrypted_data,
+                    encryption_domain,
+                    decrypted_folder: None,
+                })
+            }
+            _ => Err(bincode::error::DecodeError::UnexpectedVariant {
+                found: variant,
+                allowed: &bincode::error::AllowedEnumVariants::Range { min: 0, max: 2 },
+                type_name: "FolderItem",
+            }),
+        }
+    }
+}
+bincode::impl_borrow_decode!(FolderItem);
 
 // ============================================================================
 // Folder - Hierarchical container with unified items
@@ -1126,8 +1253,9 @@ mod tests {
 
         let results: Vec<_> = storage.get("test_key").unwrap().collect();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].0, "test_key");
-        assert_eq!(results[0].1.as_bytes(), b"test_value");
+        assert_eq!(results[0].0, "/"); // full_path
+        assert_eq!(results[0].1, "test_key"); // key name
+        assert_eq!(results[0].2.as_bytes(), b"test_value"); // value
     }
 
     #[test]
