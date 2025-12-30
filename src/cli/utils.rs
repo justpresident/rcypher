@@ -10,6 +10,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, Zeroizing};
 
+// Re-export path utilities for backward compatibility
+pub use crate::path_utils::{
+    format_full_path, normalize_path, parse_key_path, relative_path_from, resolve_path,
+};
+
 pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
         return "N/A".to_string();

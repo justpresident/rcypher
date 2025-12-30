@@ -1,5 +1,5 @@
-use crate::cli::utils::{format_timestamp, secure_print};
-use crate::{Cypher, EncryptedValue, EncryptionKey, Storage, load_storage, save_storage};
+use crate::cli::utils::{format_full_path, format_timestamp, secure_print};
+use crate::{Cypher, EncryptedValue, EncryptionKey, StorageV5, load_storage_v5, save_storage_v5};
 use anyhow::Result;
 use std::io;
 use std::io::Write;
@@ -8,6 +8,7 @@ use zeroize::Zeroize;
 
 #[derive(Debug)]
 struct UpdateEntry {
+    folder_path: String,
     key: String,
     new_value: EncryptedValue,
     new_timestamp: u64,
@@ -21,50 +22,97 @@ impl UpdateEntry {
     }
 }
 
+/// Recursively find updates in a folder and its subfolders
+fn find_updates_in_folder(
+    folder_path: &str,
+    main_storage: &StorageV5,
+    update_storage: &StorageV5,
+    main_cypher: &Cypher,
+    update_cypher: &Cypher,
+    updates: &mut Vec<UpdateEntry>,
+) {
+    let Some(update_folder) = update_storage.get_folder(folder_path) else {
+        return;
+    };
+
+    // Check secrets in this folder
+    for (key, item) in update_folder.secrets() {
+        if let Some(update_entries) = item.get_entries() {
+            let update_latest = update_entries.last().expect("entries should not be empty");
+            let main_latest = main_storage
+                .get_folder(folder_path)
+                .and_then(|f| f.get_item(key))
+                .and_then(|item| item.get_entries())
+                .and_then(|entries| entries.last());
+
+            let should_update = main_latest.is_none_or(|main_entry| {
+                // Key exists - decrypt and compare values
+                let main_decrypted = main_entry
+                    .encrypted_value()
+                    .decrypt(main_cypher)
+                    .expect("Failed to decrypt main file");
+                let update_decrypted = update_latest
+                    .encrypted_value()
+                    .decrypt(update_cypher)
+                    .expect("Failed to decrypt update file");
+
+                // Update if values differ and update is newer or same timestamp
+                *main_decrypted != *update_decrypted
+                    && update_latest.timestamp >= main_entry.timestamp
+            });
+
+            if should_update {
+                updates.push(UpdateEntry {
+                    folder_path: folder_path.to_string(),
+                    key: key.clone(),
+                    new_value: update_latest.encrypted_value().clone(),
+                    new_timestamp: update_latest.timestamp,
+                    old_value: main_latest.map(|e| e.encrypted_value().clone()),
+                    old_timestamp: main_latest.map(|e| e.timestamp),
+                });
+            }
+        }
+    }
+
+    // Recursively check subfolders
+    for (subfolder_name, _) in update_folder.navigable_folders() {
+        let subfolder_path = format_full_path(folder_path, subfolder_name, true);
+        find_updates_in_folder(
+            &subfolder_path,
+            main_storage,
+            update_storage,
+            main_cypher,
+            update_cypher,
+            updates,
+        );
+    }
+}
+
 /// Find entries that need updating by comparing latest values from both storages
 fn find_updates(
-    main_storage: &Storage,
-    update_storage: &Storage,
+    main_storage: &StorageV5,
+    update_storage: &StorageV5,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
 ) -> Vec<UpdateEntry> {
     let mut updates = Vec::new();
 
-    for (key, update_entries) in &update_storage.data {
-        let update_latest = update_entries.last().expect("entries should not be empty");
-        let main_latest = main_storage
-            .data
-            .get(key)
-            .and_then(|entries| entries.last());
+    // Start recursive search from root
+    find_updates_in_folder(
+        "/",
+        main_storage,
+        update_storage,
+        main_cypher,
+        update_cypher,
+        &mut updates,
+    );
 
-        let should_update = main_latest.is_none_or(|main_entry| {
-            // Key exists - decrypt and compare values
-            let main_decrypted = main_entry
-                .value
-                .decrypt(main_cypher)
-                .expect("Failed to decrypt main file");
-            let update_decrypted = update_latest
-                .value
-                .decrypt(update_cypher)
-                .expect("Failed to decrypt update file");
-
-            // Update if values differ and update is newer or same timestamp
-            *main_decrypted != *update_decrypted && update_latest.timestamp >= main_entry.timestamp
-        });
-
-        if should_update {
-            updates.push(UpdateEntry {
-                key: key.clone(),
-                new_value: update_latest.value.clone(),
-                new_timestamp: update_latest.timestamp,
-                old_value: main_latest.map(|e| e.value.clone()),
-                old_timestamp: main_latest.map(|e| e.timestamp),
-            });
-        }
-    }
-
-    // Sort by key name for consistent presentation
-    updates.sort_by(|a, b| a.key.cmp(&b.key));
+    // Sort by folder path then key name for consistent presentation
+    updates.sort_by(|a, b| {
+        a.folder_path
+            .cmp(&b.folder_path)
+            .then_with(|| a.key.cmp(&b.key))
+    });
     updates
 }
 
@@ -75,13 +123,16 @@ fn display_update_entry(
     update_cypher: &Cypher,
     insecure_stdout: bool,
 ) -> Result<()> {
+    use crate::cli::utils::format_full_path;
+    let full_path = format_full_path(&update.folder_path, &update.key, false);
+
     // Compact format for summary view
     if update.is_new_key() {
         let new_decrypted = update.new_value.decrypt(update_cypher)?;
         secure_print(
             format!(
                 "  [NEW] {}\n    New: {} ({})",
-                update.key,
+                full_path,
                 &*new_decrypted,
                 format_timestamp(update.new_timestamp)
             ),
@@ -97,7 +148,7 @@ fn display_update_entry(
         secure_print(
             format!(
                 "  [CONFLICT] {}\n    Current: {} ({})\n    Update:  {} ({})",
-                update.key,
+                full_path,
                 &*old_decrypted,
                 format_timestamp(update.old_timestamp.expect("old timestamp exists")),
                 &*new_decrypted,
@@ -147,10 +198,34 @@ fn display_update_summary(
     Ok((new_keys, conflicts))
 }
 
+/// Ensure all parent folders exist for a given path, creating them if needed
+fn ensure_folder_path(storage: &mut StorageV5, path: &str) -> Result<()> {
+    if path == "/" || path.is_empty() {
+        return Ok(());
+    }
+
+    let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+    let mut current_path = String::from("/");
+
+    for part in parts {
+        // Check if folder exists
+        let folder_path = format_full_path(&current_path, part, true);
+
+        if storage.get_folder(&folder_path).is_none() {
+            // Create the folder
+            storage.mkdir(&current_path, part)?;
+        }
+
+        current_path = folder_path;
+    }
+
+    Ok(())
+}
+
 /// Apply all updates at once
 fn apply_all_updates(
     updates: Vec<UpdateEntry>,
-    main_storage: &mut Storage,
+    main_storage: &mut StorageV5,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
     filename: &Path,
@@ -159,10 +234,19 @@ fn apply_all_updates(
         let mut decrypted = update.new_value.decrypt(update_cypher)?;
         let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
         decrypted.zeroize();
-        main_storage.put_ts(update.key, re_encrypted, update.new_timestamp);
+
+        // Ensure folder path exists before putting the key
+        ensure_folder_path(main_storage, &update.folder_path)?;
+
+        main_storage.put_at_path(
+            &update.folder_path,
+            update.key,
+            re_encrypted,
+            update.new_timestamp,
+        );
     }
 
-    save_storage(main_cypher, main_storage, filename)?;
+    save_storage_v5(main_cypher, main_storage, filename)?;
     println!("✓ All updates applied successfully.");
     Ok(())
 }
@@ -170,7 +254,7 @@ fn apply_all_updates(
 /// Apply updates interactively, prompting for each one
 fn apply_updates_interactive(
     updates: Vec<UpdateEntry>,
-    main_storage: &mut Storage,
+    main_storage: &mut StorageV5,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
     filename: &Path,
@@ -193,7 +277,16 @@ fn apply_updates_interactive(
                 let mut decrypted = update.new_value.decrypt(update_cypher)?;
                 let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
                 decrypted.zeroize();
-                main_storage.put_ts(update.key, re_encrypted, update.new_timestamp);
+
+                // Ensure folder path exists before putting the key
+                ensure_folder_path(main_storage, &update.folder_path)?;
+
+                main_storage.put_at_path(
+                    &update.folder_path,
+                    update.key,
+                    re_encrypted,
+                    update.new_timestamp,
+                );
                 applied += 1;
                 println!("✓ Applied");
             }
@@ -209,7 +302,7 @@ fn apply_updates_interactive(
     }
 
     if applied > 0 {
-        save_storage(main_cypher, main_storage, filename)?;
+        save_storage_v5(main_cypher, main_storage, filename)?;
         println!(
             "\n✓ Applied {} update{}, skipped {}.",
             applied,
@@ -242,10 +335,10 @@ pub fn run_update_with(
     insecure_stdout: bool,
 ) -> Result<()> {
     let main_cypher = Cypher::new(main_key);
-    let mut main_storage = load_storage(&main_cypher, filename)?;
+    let mut main_storage = load_storage_v5(&main_cypher, filename)?;
 
     let update_cypher = Cypher::new(update_key);
-    let update_storage = load_storage(&update_cypher, update_file)?;
+    let update_storage = load_storage_v5(&update_cypher, update_file)?;
 
     // Find what needs updating
     let updates = find_updates(&main_storage, &update_storage, &main_cypher, &update_cypher);
@@ -293,11 +386,15 @@ pub fn run_update_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CypherVersion, Storage};
+    use crate::{Argon2Params, CypherVersion, StorageV5};
 
     fn create_test_cypher() -> Cypher {
-        let key = EncryptionKey::from_password(CypherVersion::default(), "test_password")
-            .expect("Failed to create key");
+        let key = EncryptionKey::from_password_with_params(
+            CypherVersion::default(),
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .expect("Failed to create key");
         Cypher::new(key)
     }
 
@@ -307,6 +404,7 @@ mod tests {
         let value = EncryptedValue::encrypt(&cypher, "test").unwrap();
 
         let new_entry = UpdateEntry {
+            folder_path: "/".to_string(),
             key: "key1".to_string(),
             new_value: value.clone(),
             new_timestamp: 100,
@@ -317,6 +415,7 @@ mod tests {
         assert!(new_entry.is_new_key());
 
         let existing_entry = UpdateEntry {
+            folder_path: "/".to_string(),
             key: "key2".to_string(),
             new_value: value.clone(),
             new_timestamp: 100,
@@ -330,21 +429,27 @@ mod tests {
     #[test]
     fn test_find_updates_new_keys() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = StorageV5::new();
+        let mut update_storage = StorageV5::new();
 
         // Main has key1, update has key1 and key2
-        main_storage.put(
+        main_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+            0,
         );
-        update_storage.put(
+        update_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+            0,
         );
-        update_storage.put(
+        update_storage.put_at_path(
+            "/",
             "key2".to_string(),
             EncryptedValue::encrypt(&cypher, "value2").unwrap(),
+            0,
         );
 
         let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
@@ -357,16 +462,18 @@ mod tests {
     #[test]
     fn test_find_updates_conflicts() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = StorageV5::new();
+        let mut update_storage = StorageV5::new();
 
         // Both have key1 but with different values
-        main_storage.put_ts(
+        main_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "old_value").unwrap(),
             100,
         );
-        update_storage.put_ts(
+        update_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "new_value").unwrap(),
             200,
@@ -382,17 +489,21 @@ mod tests {
     #[test]
     fn test_find_updates_no_changes() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = StorageV5::new();
+        let mut update_storage = StorageV5::new();
 
         // Both have same key with same value
-        main_storage.put(
+        main_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+            0,
         );
-        update_storage.put(
+        update_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "value1").unwrap(),
+            0,
         );
 
         let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
@@ -403,17 +514,19 @@ mod tests {
     #[test]
     fn test_find_updates_ignores_older_timestamp() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = StorageV5::new();
+        let mut update_storage = StorageV5::new();
 
         // Update has older value
-        update_storage.put_ts(
+        update_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "old_value").unwrap(),
             100,
         );
 
-        main_storage.put_ts(
+        main_storage.put_at_path(
+            "/",
             "key1".to_string(),
             EncryptedValue::encrypt(&cypher, "new_value").unwrap(),
             200,

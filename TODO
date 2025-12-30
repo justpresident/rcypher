@@ -1,0 +1,64 @@
+# Implement a new extensible storage format that supports
+
+## grouping secrets into folders
+✅ **COMPLETED**
+- Hierarchical folder structure with unlimited nesting depth
+- Everything is in the root folder (/) by default
+- Commands: `mkdir`, `cd`, `pwd` for folder navigation
+- Full path support: `/work/projects/api_key`
+- Relative paths: `../other_folder`, `./subfolder`
+- Keys can be moved between folders using `mv` command
+- Comprehensive test coverage for nested folders
+
+## encryption domains
+⚠️ **IN PROGRESS - Refactoring to unified structure**
+- ✅ `FolderItem` enum with Secret/Folder/EncryptedFolder variants
+- ✅ Unified `items` BTreeMap in Folder (no separate secrets/subfolders)
+- ✅ Helper methods on FolderItem for ergonomic access
+- Default encryption domain (0) uses the master key (same as storage v4)
+
+⏳ **TODO: Simplified encryption approach**
+- Non-default domains encrypt secrets/folders with a custom key requiring password
+- Can be attached to individual secrets or entire folders
+- Encrypted folders are VISIBLE as encrypted folders (no hiding with placeholder values)
+- When locked: `get` returns "**LOCKED**" indicator
+- When unlocked: folder becomes navigable, contents accessible
+- "unlock {folder}" command asks for password, decrypts and populates in-memory
+- "lock {folder}" command clears decrypted data from memory
+- Delete operation works uniformly for secrets, folders, and encrypted folders
+
+**Simplified Use Case**
+Encryption:
+- User calls "lock {folder/key}" which asks for encryption domain and password
+- Content is immediately encrypted and stored encrypted
+- Locked items show "**LOCKED**" when accessed
+
+Decryption:
+- "unlock {item}" asks for password
+- Decrypts into memory, making content accessible
+- Subsequent commands work normally on decrypted content
+
+## move command
+✅ **COMPLETED: move command**
+- `mv SOURCE_PATTERN DESTINATION` - shell-like move behavior
+- Single match: destination can be folder or full path (move+rename)
+- Multiple matches: destination must be a folder
+- Recursive pattern matching with regex support
+- Preserves full key history during move
+- Collision detection with pre-validation
+
+⏳ **TODO: encryption domain support for move**
+- Encrypted folders must be unlocked to allow moving/renaming keys from them
+- Re-encryption should be performed with key from corresponding encryption domain when moving between domains
+
+## support SecretType and optional metadata HashMap
+⚠️ **PARTIALLY COMPLETED**
+- Data structures exist: `SecretEntry` has `secret_type: SecretType` and `metadata: HashMap<String, String>` fields
+- Currently only `SecretType::Utf8String` is implemented
+- Metadata field exists but not exposed in CLI
+
+⏳ **TODO**
+- Add `SecretType::File` variant for file storage support
+- Implement CLI commands to set/view metadata
+- Add file upload/download functionality
+- Support for binary data storage
