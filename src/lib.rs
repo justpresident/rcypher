@@ -29,7 +29,10 @@ mod version;
 
 // Public re-exports (maintaining exact same API)
 pub use cli::utils::{Spinner, ThreadStopGuard, copy_to_clipboard, format_timestamp, secure_print};
-pub use crypto::{Argon2Params, Cypher, EncryptionKey};
+pub use crypto::{
+    Argon2Params, Cypher, EncryptionDomain, EncryptionDomainManager, EncryptionKey,
+    MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME,
+};
 pub use path_utils::{
     format_full_path, normalize_path, parse_key_path, relative_path_from, resolve_path,
 };
