@@ -1,4 +1,4 @@
-use crate::cli::utils::{format_timestamp, secure_print};
+use crate::cli::utils::{format_full_path, format_timestamp, secure_print};
 use crate::{Cypher, EncryptedValue, EncryptionKey, StorageV5, load_storage_v5, save_storage_v5};
 use anyhow::Result;
 use std::io;
@@ -76,11 +76,7 @@ fn find_updates_in_folder(
 
     // Recursively check subfolders
     for (subfolder_name, _) in update_folder.navigable_folders() {
-        let subfolder_path = if folder_path == "/" {
-            format!("/{subfolder_name}")
-        } else {
-            format!("{folder_path}/{subfolder_name}")
-        };
+        let subfolder_path = format_full_path(folder_path, subfolder_name, true);
         find_updates_in_folder(
             &subfolder_path,
             main_storage,
@@ -213,11 +209,7 @@ fn ensure_folder_path(storage: &mut StorageV5, path: &str) -> Result<()> {
 
     for part in parts {
         // Check if folder exists
-        let folder_path = if current_path == "/" {
-            format!("/{part}")
-        } else {
-            format!("{current_path}/{part}")
-        };
+        let folder_path = format_full_path(&current_path, part, true);
 
         if storage.get_folder(&folder_path).is_none() {
             // Create the folder

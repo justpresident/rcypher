@@ -22,6 +22,7 @@
 pub mod cli;
 mod constants;
 mod crypto;
+pub mod path_utils;
 mod security;
 mod storage;
 mod version;
@@ -29,6 +30,9 @@ mod version;
 // Public re-exports (maintaining exact same API)
 pub use cli::utils::{Spinner, ThreadStopGuard, copy_to_clipboard, format_timestamp, secure_print};
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};
+pub use path_utils::{
+    format_full_path, normalize_path, parse_key_path, relative_path_from, resolve_path,
+};
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 pub use storage::{
     EncryptedValue, SecretEntry, StorageV4, StorageV5, deserialize_storage_v4,

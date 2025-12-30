@@ -801,7 +801,7 @@ fn test_move_key_same_folder() {
 
     // Move with rename in same folder
     storage
-        .move_key("/", "old_name", "/", Some("new_name"))
+        .move_item("/", "old_name", "/", Some("new_name"))
         .unwrap();
 
     // Old key should be gone
@@ -828,7 +828,7 @@ fn test_move_key_between_folders() {
     storage.put_at_path("/source", "key1".to_string(), "value1".into(), 0);
 
     // Move to different folder keeping same name
-    storage.move_key("/source", "key1", "/dest", None).unwrap();
+    storage.move_item("/source", "key1", "/dest", None).unwrap();
 
     // Should be gone from source
     let results: Vec<_> = storage
@@ -855,7 +855,7 @@ fn test_move_key_with_rename_between_folders() {
 
     // Move and rename
     storage
-        .move_key("/source", "old_key", "/dest", Some("new_key"))
+        .move_item("/source", "old_key", "/dest", Some("new_key"))
         .unwrap();
 
     // Should be gone from source
@@ -892,7 +892,7 @@ fn test_move_key_preserves_history() {
     storage.put_at_path("/source", "key1".to_string(), "v3".into(), timestamp.add(2));
 
     // Move the key
-    storage.move_key("/source", "key1", "/dest", None).unwrap();
+    storage.move_item("/source", "key1", "/dest", None).unwrap();
 
     // Check history is preserved
     let history: Vec<_> = storage.history_at_path("/dest", "key1").unwrap().collect();
@@ -911,7 +911,7 @@ fn test_move_key_collision_error() {
     storage.put_at_path("/dest", "key1".to_string(), "existing".into(), 0);
 
     // Should fail due to collision
-    let result = storage.move_key("/source", "key1", "/dest", None);
+    let result = storage.move_item("/source", "key1", "/dest", None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already exists"));
 
@@ -928,7 +928,7 @@ fn test_move_key_nonexistent_source() {
     let mut storage = StorageV5::new();
     storage.mkdir("/", "dest").unwrap();
 
-    let result = storage.move_key("/", "nonexistent", "/dest", None);
+    let result = storage.move_item("/", "nonexistent", "/dest", None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
@@ -938,7 +938,7 @@ fn test_move_key_nonexistent_dest_folder() {
     let mut storage = StorageV5::new();
     storage.put_at_path("/", "key1".to_string(), "value".into(), 0);
 
-    let result = storage.move_key("/", "key1", "/nonexistent", None);
+    let result = storage.move_item("/", "key1", "/nonexistent", None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("not found"));
 }
@@ -953,7 +953,7 @@ fn test_move_folder_between_parents() {
 
     // Move folder1 from /source to /dest
     storage
-        .move_folder("/source", "folder1", "/dest", None)
+        .move_item("/source", "folder1", "/dest", None)
         .unwrap();
 
     // Should be gone from source
@@ -977,7 +977,7 @@ fn test_move_folder_with_rename() {
 
     // Rename folder
     storage
-        .move_folder("/", "old_name", "/", Some("new_name"))
+        .move_item("/", "old_name", "/", Some("new_name"))
         .unwrap();
 
     // Old should be gone
@@ -1008,7 +1008,7 @@ fn test_move_folder_preserves_nested_structure() {
 
     // Move entire folder tree
     storage
-        .move_folder("/source", "folder1", "/dest", None)
+        .move_item("/source", "folder1", "/dest", None)
         .unwrap();
 
     // Verify nested structure preserved
@@ -1031,7 +1031,7 @@ fn test_move_folder_collision_error() {
     storage.mkdir("/dest", "folder1").unwrap(); // Collision
 
     // Should fail
-    let result = storage.move_folder("/source", "folder1", "/dest", None);
+    let result = storage.move_item("/source", "folder1", "/dest", None);
     assert!(result.is_err());
     assert!(result.unwrap_err().to_string().contains("already exists"));
 

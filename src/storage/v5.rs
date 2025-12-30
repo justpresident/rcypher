@@ -6,7 +6,7 @@ use bincode::{Decode, Encode, config};
 use regex::Regex;
 
 use super::value::EncryptedValue;
-use crate::cli::utils::{format_full_path, relative_path_from};
+use crate::path_utils::{format_full_path, relative_path_from};
 use crate::version::StoreVersion;
 
 // ============================================================================
@@ -225,30 +225,6 @@ impl StorageV5 {
         Ok(())
     }
 
-    /// Legacy method - redirects to `move_item` for backwards compatibility
-    #[deprecated(note = "Use move_item instead")]
-    pub fn move_key(
-        &mut self,
-        source_folder: &str,
-        key: &str,
-        dest_folder: &str,
-        dest_key: Option<&str>,
-    ) -> Result<()> {
-        self.move_item(source_folder, key, dest_folder, dest_key)
-    }
-
-    /// Legacy method - redirects to `move_item` for backwards compatibility
-    #[deprecated(note = "Use move_item instead")]
-    pub fn move_folder(
-        &mut self,
-        parent_path: &str,
-        folder_name: &str,
-        dest_parent: &str,
-        dest_name: Option<&str>,
-    ) -> Result<()> {
-        self.move_item(parent_path, folder_name, dest_parent, dest_name)
-    }
-
     /// Returns an iterator over all keys matching the given regex pattern in root folder.
     ///
     /// # Sorting
@@ -343,7 +319,8 @@ impl<'a> Iterator for RecursiveSecretIterator<'a> {
                     if self.recursive
                         && let Some(subfolder) = item.get_folder()
                     {
-                        let new_path = format_full_path(&path, key, true);
+                        // Use is_folder=false to avoid trailing slash in internal path tracking
+                        let new_path = format_full_path(&path, key, false);
                         self.stack.push((new_path, subfolder.items.iter()));
                         descended = true;
                         // Break to process the new folder
@@ -426,7 +403,8 @@ impl<'a> Iterator for RecursiveKeyIterator<'a> {
                     if self.recursive
                         && let Some(subfolder) = item.get_folder()
                     {
-                        let new_path = format_full_path(&path, key, true);
+                        // Use is_folder=false to avoid trailing slash in internal path tracking
+                        let new_path = format_full_path(&path, key, false);
                         self.stack.push((new_path, subfolder.items.iter()));
                         descended = true;
                         // Break to process the new folder
