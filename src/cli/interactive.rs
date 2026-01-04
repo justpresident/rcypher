@@ -1,13 +1,17 @@
 use crate::Cypher;
-use crate::EncryptedValue;
-use crate::Storage;
+use crate::EncryptionDomainManager;
+use crate::FolderItem;
+use crate::StorageV5;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::STANDBY_TIMEOUT;
 use crate::cli::completer::CypherCompleter;
-use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
+use crate::cli::utils::{
+    copy_to_clipboard, format_full_path, format_timestamp, parse_key_path, resolve_path,
+    secure_print,
+};
 use crate::is_debugger_attached;
-use crate::load_storage;
-use crate::save_storage;
+use crate::load_storage_v5;
+use crate::save_storage_v5;
 use anyhow::{Result, bail};
 use rustyline::CompletionType;
 use rustyline::Config;
@@ -21,27 +25,51 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    cypher: Cypher,
     filename: PathBuf,
+    current_path: Arc<Mutex<String>>,
+    domain_manager: EncryptionDomainManager,
 }
 
 impl InteractiveCli {
-    pub const fn new(
+    pub fn new(
         prompt: String,
         insecure_stdout: bool,
-        cypher: Cypher,
+        domain_manager: EncryptionDomainManager,
         filename: PathBuf,
     ) -> Self {
         Self {
             prompt,
             insecure_stdout,
-            cypher,
             filename,
+            current_path: Arc::new(Mutex::new(String::from("/"))),
+            domain_manager,
         }
     }
 
-    pub fn run(&self) -> Result<()> {
-        let storage = Arc::new(Mutex::new(load_storage(&self.cypher, &self.filename)?));
+    /// Get the master cypher for direct encryption/decryption operations
+    fn get_master_cypher(&self) -> &Cypher {
+        self.domain_manager.get_master_cypher()
+    }
+
+    fn get_current_path(&self) -> String {
+        let path = self.current_path.lock().expect("able to lock");
+        if path.is_empty() {
+            String::from("/")
+        } else {
+            path.clone()
+        }
+    }
+
+    fn get_prompt(&self) -> String {
+        let path = self.current_path.lock().expect("able to lock");
+        self.prompt.replace("%p", path.as_ref())
+    }
+
+    pub fn run(&mut self) -> Result<()> {
+        let storage = Arc::new(Mutex::new(load_storage_v5(
+            self.get_master_cypher(),
+            &self.filename,
+        )?));
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -51,7 +79,7 @@ impl InteractiveCli {
             .max_history_size(5)?
             .build();
 
-        let completer = CypherCompleter::new(storage.clone());
+        let completer = CypherCompleter::new(storage.clone(), self.current_path.clone());
         let mut rl = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
 
@@ -63,12 +91,13 @@ impl InteractiveCli {
                 bail!("Debugger detected");
             }
 
-            let readline = rl.readline(&self.prompt);
+            let prompt = self.get_prompt();
+            let readline = rl.readline(&prompt);
 
             // Check timeout
             if last_use_time
                 .elapsed()
-                .expect("time moves forward")
+                .expect("time goes forward")
                 .as_secs()
                 > STANDBY_TIMEOUT
             {
@@ -109,7 +138,7 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn process_cmd(&self, line: &str, storage: &mut Storage) -> Result<()> {
+    fn process_cmd(&self, line: &str, storage: &mut StorageV5) -> Result<()> {
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         let cmd = parts[0];
         match cmd {
@@ -147,6 +176,26 @@ impl InteractiveCli {
                 }
                 self.cmd_delete(parts[1], storage)
             }
+            "mkdir" => {
+                if parts.len() < 2 {
+                    bail!("syntax: mkdir FOLDER_NAME");
+                }
+                self.cmd_mkdir(parts[1], storage)
+            }
+            "cd" => {
+                let path = if parts.len() > 1 { parts[1] } else { "/" };
+                self.cmd_cd(path, storage)
+            }
+            "mv" | "move" => {
+                if parts.len() < 3 {
+                    bail!("syntax: mv SOURCE_PATTERN DESTINATION");
+                }
+                self.cmd_move(parts[1], parts[2], storage)
+            }
+            "pwd" => {
+                self.cmd_pwd();
+                Ok(())
+            }
             "help" => {
                 print_help();
                 Ok(())
@@ -157,24 +206,51 @@ impl InteractiveCli {
         }
     }
 
-    fn cmd_put(&self, key: &str, value: &str, storage: &mut Storage) -> Result<()> {
-        let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
-        storage.put(key.to_string(), encrypted_value);
+    fn cmd_put(&self, key: &str, value: &str, storage: &mut StorageV5) -> Result<()> {
+        let (folder_path, key_name) = parse_key_path(&self.get_current_path(), key);
+        let timestamp = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("time goes forward")
+            .as_secs();
+
+        // Determine encryption domain:
+        // 1. If item already exists, preserve its encryption domain
+        // 2. Otherwise, inherit from parent folder hierarchy
+        let encryption_domain_id = storage
+            .get_folder(&folder_path)
+            .and_then(|folder| folder.get_item(key_name))
+            .and_then(FolderItem::encryption_domain)
+            .unwrap_or_else(|| storage.get_encryption_domain_for_path(&folder_path));
+
+        storage.put_at_path(
+            &folder_path,
+            key_name.to_string(),
+            value,
+            timestamp,
+            encryption_domain_id,
+            &self.domain_manager,
+        )?;
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
-        save_storage(&self.cypher, storage, &self.filename)?;
+        save_storage_v5(&self.domain_manager, storage, &self.filename)?;
         Ok(())
     }
 
-    fn cmd_get(&self, pattern: &str, storage: &Storage) -> Result<()> {
-        match storage.get(pattern) {
+    fn cmd_get(&self, pattern: &str, storage: &mut StorageV5) -> Result<()> {
+        let (folder_path, key_pattern) = parse_key_path(&self.get_current_path(), pattern);
+        match storage.get_at_path(&folder_path, key_pattern, true, &self.domain_manager) {
+            // Recursive search
             Ok(results) => {
                 let mut found = false;
-                for (key, val) in results {
+                for (folder_path, key, val) in results {
                     found = true;
-                    let mut secret = val.decrypt(&self.cypher)?;
-                    let output = format!("{}: {}", key, &*secret);
+                    let mut secret = val.decrypt(self.get_master_cypher())?;
+                    let output = format!(
+                        "{}: {}",
+                        format_full_path(&folder_path, key, false),
+                        &*secret
+                    );
                     secret.zeroize();
                     secure_print(output, self.insecure_stdout)?;
                 }
@@ -187,31 +263,40 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_copy(&self, key: &str, storage: &Storage) -> Result<()> {
-        match storage.get(key) {
+    fn cmd_copy(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
+        let current_path = self.get_current_path();
+        match storage.get_at_path(&current_path, key, true, &self.domain_manager) {
             Ok(mut results) => {
                 let first = results.next();
                 let second = results.next();
 
                 match (first, second) {
                     (None, _) => bail!("No key '{key}' found!"),
-                    (Some((first_key, _)), Some((second_key, _))) => {
+                    (Some((first_path, first_key, _)), Some((second_path, second_key, _))) => {
                         // Multiple results - print all
                         println!("Multiple keys found! Plese specify exact key name:");
-                        secure_print(first_key.to_string(), self.insecure_stdout)?;
-                        secure_print(second_key.to_string(), self.insecure_stdout)?;
-                        for (key, _) in results {
-                            secure_print(key.to_string(), self.insecure_stdout)?;
+                        secure_print(
+                            format_full_path(&first_path, first_key, false),
+                            self.insecure_stdout,
+                        )?;
+                        secure_print(
+                            format_full_path(&second_path, second_key, false),
+                            self.insecure_stdout,
+                        )?;
+                        for (folder_path, key, _) in results {
+                            secure_print(
+                                format_full_path(&folder_path, key, false),
+                                self.insecure_stdout,
+                            )?;
                         }
                     }
-                    (Some((_, val)), None) => {
+                    (Some((_, _, val)), None) => {
                         // Exactly one result - copy to clipboard
-                        let mut secret = val.decrypt(&self.cypher)?;
+                        let secret = val.decrypt(self.get_master_cypher())?;
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
                         )?;
-                        secret.zeroize();
                     }
                 }
             }
@@ -220,10 +305,12 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_history(&self, key: &str, storage: &Storage) -> Result<()> {
-        if let Some(entries) = storage.history(key) {
+    fn cmd_history(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
+        let (folder_path, key_name) = parse_key_path(&self.get_current_path(), key);
+        if let Some(entries) = storage.history_at_path(&folder_path, key_name, &self.domain_manager)
+        {
             for entry in entries {
-                let mut secret = entry.value.decrypt(&self.cypher)?;
+                let mut secret = entry.encrypted_value().decrypt(self.get_master_cypher())?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 secure_print(output, self.insecure_stdout)?;
@@ -234,11 +321,16 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_search(&self, pattern: &str, storage: &Storage) -> Result<()> {
-        match storage.search(pattern) {
+    fn cmd_search(&self, pattern: &str, storage: &mut StorageV5) -> Result<()> {
+        let (folder_path, key_pattern) = parse_key_path(&self.get_current_path(), pattern);
+        match storage.search_at_path(&folder_path, key_pattern, true, &self.domain_manager) {
+            // Recursive search
             Ok(keys) => {
-                for key in keys {
-                    secure_print(key.to_string(), self.insecure_stdout)?;
+                for (folder_path, key) in keys {
+                    secure_print(
+                        format_full_path(&folder_path, key, false),
+                        self.insecure_stdout,
+                    )?;
                 }
             }
             Err(e) => bail!("Error: {e}"),
@@ -246,14 +338,183 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_delete(&self, key: &str, storage: &mut Storage) -> Result<()> {
-        if storage.delete(key) {
+    fn cmd_delete(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
+        let (folder_path, key_name) = parse_key_path(&self.get_current_path(), key);
+        if storage.delete_at_path(&folder_path, key_name, &self.domain_manager) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
-            save_storage(&self.cypher, storage, &self.filename)?;
+            save_storage_v5(&self.domain_manager, storage, &self.filename)?;
         } else {
             bail!("No such key '{key}' found");
         }
         Ok(())
+    }
+
+    fn cmd_mkdir(&self, folder_name: &str, storage: &mut StorageV5) -> Result<()> {
+        let (parent_path, new_folder_name) = parse_key_path(&self.get_current_path(), folder_name);
+        storage.mkdir(&parent_path, new_folder_name, &self.domain_manager)?;
+        secure_print(
+            format!("Folder '{folder_name}' created"),
+            self.insecure_stdout,
+        )?;
+        save_storage_v5(&self.domain_manager, storage, &self.filename)?;
+        Ok(())
+    }
+
+    fn cmd_cd(&self, path: &str, storage: &StorageV5) -> Result<()> {
+        let current = self.get_current_path();
+        let new_path = resolve_path(&current, path);
+
+        // Verify the folder exists
+        if storage.get_folder(&new_path).is_none() {
+            bail!("Folder '{new_path}' not found");
+        }
+
+        *self.current_path.lock().expect("able to lock") = new_path;
+        Ok(())
+    }
+
+    fn cmd_move(
+        &self,
+        source_pattern: &str,
+        destination: &str,
+        storage: &mut StorageV5,
+    ) -> Result<()> {
+        use regex::Regex;
+        let current_path = self.get_current_path();
+
+        // Parse the source pattern to extract folder path and item pattern
+        let (source_folder, item_pattern) = parse_key_path(&current_path, source_pattern);
+        let re = Regex::new(&format!("^{item_pattern}$"))?;
+
+        // Find all matching items, avoiding double-counting when folder matches
+        let mut matches = Vec::new();
+        find_matching_items(storage, &source_folder, &re, &mut matches);
+
+        if matches.is_empty() {
+            bail!("No keys or folders matching pattern '{source_pattern}'");
+        }
+
+        // Determine if destination is an existing folder
+        let dest_is_folder = destination.ends_with('/')
+            || storage
+                .get_folder(&resolve_path(&current_path, destination))
+                .is_some();
+
+        if matches.len() == 1 {
+            // Single match: can move to folder or rename
+            let (parent_path, item_name, is_folder) = &matches[0];
+
+            let (dest_parent, dest_name) = if dest_is_folder {
+                // Move into existing folder, keep name
+                (resolve_path(&current_path, destination), None)
+            } else {
+                // Rename to new path
+                let (folder, name) = parse_key_path(&current_path, destination);
+                (folder, Some(name))
+            };
+
+            storage.move_item(
+                parent_path,
+                item_name,
+                &dest_parent,
+                dest_name,
+                None,
+                &self.domain_manager,
+            )?;
+
+            let final_name = dest_name.unwrap_or(item_name.as_str());
+            let dest_display = format_full_path(&dest_parent, final_name, *is_folder);
+            let source_display = format_full_path(parent_path, item_name, *is_folder);
+
+            let message = if *is_folder {
+                format!("Moved folder {source_display} -> {dest_display}")
+            } else {
+                format!("Moved {source_display} -> {dest_display}")
+            };
+            secure_print(message, self.insecure_stdout)?;
+        } else {
+            // Multiple matches: destination must be a folder
+            if !dest_is_folder {
+                bail!("Destination must be a folder when moving multiple items");
+            }
+
+            let dest_folder = resolve_path(&current_path, destination);
+            if storage.get_folder(&dest_folder).is_none() {
+                bail!("Destination folder '{dest_folder}' does not exist");
+            }
+
+            // Count keys and folders
+            let key_count = matches
+                .iter()
+                .filter(|(_, _, is_folder)| !is_folder)
+                .count();
+            let folder_count = matches
+                .iter()
+                .filter(|(_, _, is_folder)| *is_folder)
+                .count();
+
+            // Move all items
+            for (parent_path, item_name, _) in &matches {
+                storage.move_item(
+                    parent_path,
+                    item_name,
+                    &dest_folder,
+                    None,
+                    None,
+                    &self.domain_manager,
+                )?;
+            }
+
+            let message = match (key_count, folder_count) {
+                (0, n) => format!(
+                    "Moved {} {} to {}",
+                    n,
+                    if n == 1 { "folder" } else { "folders" },
+                    dest_folder
+                ),
+                (n, 0) => format!(
+                    "Moved {} {} to {}",
+                    n,
+                    if n == 1 { "key" } else { "keys" },
+                    dest_folder
+                ),
+                (k, f) => format!("Moved {k} keys and {f} folders to {dest_folder}"),
+            };
+            secure_print(message, self.insecure_stdout)?;
+        }
+
+        save_storage_v5(&self.domain_manager, storage, &self.filename)?;
+        Ok(())
+    }
+
+    fn cmd_pwd(&self) {
+        println!("{}", self.get_current_path());
+    }
+}
+fn find_matching_items(
+    storage: &StorageV5,
+    path: &str,
+    pattern: &regex::Regex,
+    results: &mut Vec<(String, String, bool)>,
+) {
+    let Some(folder) = storage.get_folder(path) else {
+        return;
+    };
+
+    for (name, item) in &folder.items {
+        let matches = pattern.is_match(name);
+
+        if matches {
+            // Item matches - add it to results
+            let is_folder = item.is_folder() || item.is_locked();
+            results.push((path.to_string(), name.clone(), is_folder));
+            // KEY: Don't recurse into matched folders to avoid double-counting
+        } else if item.is_folder() {
+            // Item doesn't match but is a folder - recurse to find matches inside
+            let subfolder_path = format_full_path(path, name, true);
+            find_matching_items(storage, &subfolder_path, pattern, results);
+        }
+        // Locked folders that don't match are skipped (can't recurse into them)
     }
 }
 
@@ -262,12 +523,20 @@ fn clear_screen() {
 }
 
 fn print_help() {
-    println!("USER COMMANDS:");
-    println!("  put KEY VAL     - Store a key-value pair");
-    println!("  get REGEXP      - Get values for keys matching regexp");
-    println!("  copy KEY        - Copy key value into system clipboard");
-    println!("  history KEY     - Show history of changes for a key");
-    println!("  search REGEXP   - Search for keys matching regexp");
-    println!("  del|rm KEY      - Delete a key");
+    println!("BASE COMMANDS:");
+    println!("  put KEY VAL     - Store a key-value pair in current folder");
+    println!("  get REGEXP      - Get values for keys matching regexp (recursive)");
+    println!("  copy KEY        - Copy key value into system clipboard (recursive)");
+    println!("  history KEY     - Show history of changes for a key in current folder");
+    println!("  search REGEXP   - Search for keys matching regexp (recursive)");
+    println!("  del|rm KEY      - Delete a key from current folder");
+    println!("  mv|move SRC DST - Move key(s) matching SRC to DST (folder or full path)");
+    println!();
+    println!("FOLDER COMMANDS:");
+    println!("  mkdir FOLDER    - Create a new folder in current directory");
+    println!("  cd [PATH]       - Change to directory (use .. to go up, / for root)");
+    println!("  pwd             - Print current working directory");
+    println!();
+    println!("OTHER:");
     println!("  help            - Show this help");
 }

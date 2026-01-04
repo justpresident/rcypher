@@ -16,7 +16,12 @@ fn temp_test_file() -> (TempDir, PathBuf) {
 #[test]
 fn test_encrypt_decrypt_basic() {
     let cypher = Cypher::new(
-        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
     );
     let data = b"Hello, World!";
 
@@ -31,7 +36,12 @@ fn test_encrypt_decrypt_basic() {
 #[test]
 fn test_encrypt_decrypt_empty() {
     let cypher = Cypher::new(
-        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
     );
     let data = b"";
 
@@ -43,7 +53,12 @@ fn test_encrypt_decrypt_empty() {
 #[test]
 fn test_encrypt_decrypt_large_data() {
     let cypher = Cypher::new(
-        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
     );
     let data = vec![42u8; 10000]; // 10KB of data
 
@@ -54,10 +69,22 @@ fn test_encrypt_decrypt_large_data() {
 
 #[test]
 fn test_decrypt_wrong_password() {
-    let cypher1 =
-        Cypher::new(EncryptionKey::from_password(CypherVersion::V7WithKdf, "password1").unwrap());
-    let cypher2 =
-        Cypher::new(EncryptionKey::from_password(CypherVersion::V7WithKdf, "password2").unwrap());
+    let cypher1 = Cypher::new(
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "password1",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
+    );
+    let cypher2 = Cypher::new(
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "password2",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
+    );
     let data = b"Secret data";
 
     let encrypted = cypher1.encrypt(data).unwrap();
@@ -72,7 +99,12 @@ fn test_decrypt_wrong_password() {
 #[test]
 fn test_decrypt_corrupted_data() {
     let cypher = Cypher::new(
-        EncryptionKey::from_password(CypherVersion::V7WithKdf, "test_password").unwrap(),
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
     );
 
     // Too short
@@ -91,9 +123,10 @@ fn encrypt_decrypt(
     output_path: &Path,
     in_between: impl FnOnce() -> (),
 ) -> Result<Vec<u8>> {
-    let cypher = Cypher::new(EncryptionKey::from_password(
+    let cypher = Cypher::new(EncryptionKey::from_password_with_params(
         CypherVersion::V7WithKdf,
         "test_password",
+        &Argon2Params::insecure(),
     )?);
 
     // Encrypt

@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use super::value::{EncryptedValue, ValueEntry};
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct Storage {
+pub struct StorageV4 {
     pub data: BTreeMap<String, Vec<ValueEntry>>,
 }
 
-impl Storage {
+impl StorageV4 {
     pub const fn new() -> Self {
         Self {
             data: BTreeMap::new(),
@@ -79,7 +79,7 @@ impl Storage {
     }
 }
 
-impl Default for Storage {
+impl Default for StorageV4 {
     fn default() -> Self {
         Self::new()
     }

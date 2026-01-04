@@ -14,7 +14,8 @@
     clippy::missing_errors_doc,
     clippy::must_use_candidate,
     clippy::multiple_crate_versions,
-    clippy::missing_panics_doc
+    clippy::missing_panics_doc,
+    clippy::option_if_let_else
 )]
 
 use anyhow::{Result, bail};
@@ -22,8 +23,8 @@ use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::cli::utils::get_password;
 use rcypher::{
-    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage,
-    ThreadStopGuard, load_storage, serialize_storage,
+    Argon2Params, Cypher, CypherVersion, EncryptionDomainManager, EncryptionKey, MASTER_DOMAIN_ID,
+    Spinner, StorageV5, ThreadStopGuard, load_storage_v5, save_storage_v5,
 }; // Import from lib
 use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -32,7 +33,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
 #[derive(Parser)]
@@ -80,7 +80,9 @@ struct CliParams {
     #[arg(long, action, default_value_t = false, hide(true))]
     quiet: bool,
 
-    #[arg(long, default_value = "cypher > ")]
+    /// Prompt for interactive mode.
+    /// %p is replaced with the current folder path
+    #[arg(long, default_value = "cypher : %p > ")]
     prompt: String,
 
     /// Upgrade file with stored secrets to the latest supported encryption format. The file will
@@ -151,29 +153,29 @@ fn run_upgrade_storage(
     let spinner = Spinner::new("Converting", params.quiet);
 
     let old_cypher = Cypher::new(old_key);
-    let old_storage = load_storage(&old_cypher, &params.filename)?;
+    let old_storage = load_storage_v5(&old_cypher, &params.filename)?;
 
-    let mut new_storage = Storage::new();
+    let mut new_storage = StorageV5::new();
     let new_cypher = Cypher::new(new_key);
-    for (key, entries) in old_storage.data {
-        for entry in entries {
-            let mut secret = entry.value.decrypt(&old_cypher)?;
-            let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
-            new_storage.put_ts(key.clone(), new_value, entry.timestamp);
-            secret.zeroize();
+    let new_domain_manager = EncryptionDomainManager::new(new_cypher);
+
+    for (key, item) in old_storage.root.secrets() {
+        if let Some(entries) = item.get_entries() {
+            for entry in entries {
+                let secret = entry.encrypted_value().decrypt(&old_cypher)?;
+                new_storage.put_at_path(
+                    "/",
+                    key.clone(),
+                    &secret,
+                    entry.timestamp,
+                    MASTER_DOMAIN_ID,
+                    &new_domain_manager,
+                )?;
+            }
         }
     }
-    let dir = &params
-        .filename
-        .parent()
-        .expect("Can't get parent dir of a file");
-    let mut temp = NamedTempFile::new_in(dir)?;
 
-    let serialized = serialize_storage(&new_storage);
-    let encrypted = new_cypher.encrypt(&serialized)?;
-
-    temp.write_all(&encrypted)?;
-    temp.persist(&params.filename)?;
+    save_storage_v5(&new_domain_manager, &mut new_storage, &params.filename)?;
 
     spinner.finish_and_clear();
     Ok(())
@@ -181,11 +183,12 @@ fn run_upgrade_storage(
 
 fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
     let cypher = Cypher::new(key);
+    let domain_manager = EncryptionDomainManager::new(cypher);
 
-    let interactive_cli = cli::InteractiveCli::new(
+    let mut interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
-        cypher,
+        domain_manager,
         params.filename.clone(),
     );
     interactive_cli.run()?;

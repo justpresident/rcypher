@@ -4,14 +4,17 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use tempfile::NamedTempFile;
+use zeroize::Zeroize;
 
+use crate::EncryptionDomainManager;
 use crate::crypto::Cypher;
 use crate::version::StoreVersion;
 
-use super::store::Storage;
+use super::v4::StorageV4;
+use super::v5::{self, StorageV5};
 use super::value::{EncryptedValue, ValueEntry};
 
-pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
+pub fn serialize_storage_v4(storage: &StorageV4) -> Vec<u8> {
     let mut result = Vec::new();
 
     // Version
@@ -46,20 +49,13 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
     result
 }
 
-pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
-    let version = StoreVersion::probe_data(data)?;
-    match version {
-        StoreVersion::Version4 => deserialize_storage_v4(data),
-    }
-}
-
-pub fn deserialize_storage_v4(data: &[u8]) -> Result<Storage> {
+pub fn deserialize_storage_v4(data: &[u8]) -> Result<StorageV4> {
     if data.len() < 6 {
         bail!("Data too short");
     }
 
     let count = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);
-    let mut storage = Storage::new();
+    let mut storage = StorageV4::new();
     let mut pos = 6;
 
     for _ in 0..count {
@@ -122,23 +118,76 @@ pub fn deserialize_storage_v4(data: &[u8]) -> Result<Storage> {
     Ok(storage)
 }
 
-pub fn load_storage(cypher: &Cypher, path: &Path) -> Result<Storage> {
+pub fn load_storage_v4(cypher: &Cypher, path: &Path) -> Result<StorageV4> {
     if !path.exists() {
-        return Ok(Storage::new());
+        return Ok(StorageV4::new());
+    }
+    let encrypted = fs::read(path)?;
+    let decrypted = cypher.decrypt(&encrypted)?;
+
+    deserialize_storage_v4(&decrypted)
+}
+
+pub fn save_storage_v4(cypher: &Cypher, storage: &StorageV4, path: &Path) -> Result<()> {
+    let dir = path.parent().expect("Can't get parent dir of a file");
+    let mut temp = NamedTempFile::new_in(dir)?;
+
+    let serialized = serialize_storage_v4(storage);
+    let encrypted = cypher.encrypt(&serialized)?;
+
+    temp.write_all(&encrypted)?;
+    temp.persist(path)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// V5 Storage Functions
+// ============================================================================
+
+/// Load storage from file, automatically converting V4 to V5 if needed
+/// This is the main entry point for loading storage - always returns V5
+pub fn load_storage_v5(cypher: &Cypher, path: &Path) -> Result<StorageV5> {
+    if !path.exists() {
+        return Ok(StorageV5::new());
     }
 
     let encrypted = fs::read(path)?;
     let decrypted = cypher.decrypt(&encrypted)?;
 
-    deserialize_storage(&decrypted)
+    // Determine version and deserialize accordingly
+    let version = StoreVersion::probe_data(&decrypted)?;
+    match version {
+        StoreVersion::Version4 => {
+            // Load V4 and convert to V5
+            let v4 = deserialize_storage_v4(&decrypted)?;
+            Ok(v5::migrate_v4_to_v5(v4))
+        }
+        StoreVersion::Version5 => {
+            // Load V5 directly
+            v5::deserialize_storage_v5_from_slice(&decrypted)
+        }
+    }
 }
 
-pub fn save_storage(cypher: &Cypher, storage: &Storage, path: &Path) -> Result<()> {
+/// Save V5 storage to file
+pub fn save_storage_v5(
+    domain_manager: &EncryptionDomainManager,
+    storage: &mut StorageV5,
+    path: &Path,
+) -> Result<()> {
+    // Re-encrypt all unlocked encrypted folders before saving
+    storage.prepare_for_save(domain_manager)?;
+
     let dir = path.parent().expect("Can't get parent dir of a file");
     let mut temp = NamedTempFile::new_in(dir)?;
 
-    let serialized = serialize_storage(storage);
-    let encrypted = cypher.encrypt(&serialized)?;
+    let mut serialized = v5::serialize_storage_v5_to_vec(storage)?;
+
+    // Encrypt the file with the master cypher
+    let encrypted = domain_manager.get_master_cypher().encrypt(&serialized)?;
+
+    serialized.zeroize();
 
     temp.write_all(&encrypted)?;
     temp.persist(path)?;
