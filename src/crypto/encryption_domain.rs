@@ -2,15 +2,11 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 
-use crate::{Argon2Params, Cypher, CypherVersion, EncryptionKey};
+use crate::Cypher;
 
-/// Master domain ID (uses the storage file password)
 pub const MASTER_DOMAIN_ID: u32 = 0;
-
-/// Master domain name
 pub const MASTER_DOMAIN_NAME: &str = "master";
 
-/// Encryption domain with a name and cypher
 pub struct EncryptionDomain {
     pub name: String,
     pub cypher: Cypher,
@@ -55,30 +51,15 @@ impl EncryptionDomainManager {
     /// # Arguments
     /// * `domain_id` - The domain to unlock
     /// * `name` - Name of the domain (from `StorageV5` metadata)
-    /// * `password` - Password to derive the domain key from
-    /// * `argon2_params` - Argon2 parameters for key derivation
+    /// * `cypher` - `Cypher` for the domain
     ///
     /// # Errors
     /// * If the domain is already unlocked
-    /// * If key derivation fails
-    pub fn unlock_domain(
-        &mut self,
-        domain_id: u32,
-        name: String,
-        password: &str,
-        argon2_params: &Argon2Params,
-    ) -> Result<()> {
+    pub fn unlock_domain(&mut self, domain_id: u32, name: String, cypher: Cypher) -> Result<()> {
         if self.domains.contains_key(&domain_id) {
             bail!("Domain {domain_id} is already unlocked");
         }
 
-        let key = EncryptionKey::from_password_with_params(
-            CypherVersion::default(),
-            password,
-            argon2_params,
-        )?;
-
-        let cypher = Cypher::new(key);
         self.domains
             .insert(domain_id, EncryptionDomain::new(name, cypher));
 
@@ -127,6 +108,9 @@ impl EncryptionDomainManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Argon2Params;
+    use crate::CypherVersion;
+    use crate::EncryptionKey;
 
     fn create_test_cypher() -> Cypher {
         let key = EncryptionKey::from_password_with_params(
@@ -155,13 +139,14 @@ mod tests {
         let cypher = create_test_cypher();
         let mut manager = EncryptionDomainManager::new(cypher);
 
+        let key1 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "domain1_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
         manager
-            .unlock_domain(
-                1,
-                "work".to_string(),
-                "domain1_password",
-                &Argon2Params::insecure(),
-            )
+            .unlock_domain(1, "work".to_string(), Cypher::new(key1))
             .unwrap();
 
         assert!(manager.is_domain_unlocked(1));
@@ -176,12 +161,17 @@ mod tests {
         let cypher = create_test_cypher();
         let mut manager = EncryptionDomainManager::new(cypher);
 
+        let key1 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "domain1_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
         manager
-            .unlock_domain(1, "test".to_string(), "password", &Argon2Params::insecure())
+            .unlock_domain(1, "work".to_string(), Cypher::new(key1.clone()))
             .unwrap();
 
-        let result =
-            manager.unlock_domain(1, "test".to_string(), "password", &Argon2Params::insecure());
+        let result = manager.unlock_domain(1, "work".to_string(), Cypher::new(key1));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already unlocked"));
     }
@@ -191,8 +181,14 @@ mod tests {
         let cypher = create_test_cypher();
         let mut manager = EncryptionDomainManager::new(cypher);
 
+        let key1 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "domain1_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
         manager
-            .unlock_domain(1, "test".to_string(), "password", &Argon2Params::insecure())
+            .unlock_domain(1, "work".to_string(), Cypher::new(key1))
             .unwrap();
         assert!(manager.is_domain_unlocked(1));
 
@@ -226,19 +222,32 @@ mod tests {
         let cypher = create_test_cypher();
         let mut manager = EncryptionDomainManager::new(cypher);
 
+        let key1 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "pass1",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
+        let key2 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "pass2",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
+        let key3 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "pass3",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
         manager
-            .unlock_domain(
-                1,
-                "personal".to_string(),
-                "pass1",
-                &Argon2Params::insecure(),
-            )
+            .unlock_domain(1, "personal".to_string(), Cypher::new(key1))
             .unwrap();
         manager
-            .unlock_domain(2, "work".to_string(), "pass2", &Argon2Params::insecure())
+            .unlock_domain(2, "work".to_string(), Cypher::new(key2))
             .unwrap();
         manager
-            .unlock_domain(3, "shared".to_string(), "pass3", &Argon2Params::insecure())
+            .unlock_domain(3, "shared".to_string(), Cypher::new(key3))
             .unwrap();
 
         assert!(manager.is_domain_unlocked(1));
@@ -261,13 +270,14 @@ mod tests {
         let cypher = create_test_cypher();
         let mut manager = EncryptionDomainManager::new(cypher);
 
+        let key1 = EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "domain1_password",
+            &Argon2Params::insecure(),
+        )
+        .unwrap();
         manager
-            .unlock_domain(
-                1,
-                "test".to_string(),
-                "domain_password",
-                &Argon2Params::insecure(),
-            )
+            .unlock_domain(1, "work".to_string(), Cypher::new(key1))
             .unwrap();
 
         let domain_cypher = manager.get_cypher(1).unwrap();

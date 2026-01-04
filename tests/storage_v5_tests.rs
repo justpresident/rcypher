@@ -1831,13 +1831,14 @@ fn test_encrypted_folder_decrypted_state_not_serialized() {
     let mut dm = EncryptionDomainManager::new(cypher);
 
     // Create and unlock domain 1 (needed for re-encryption during save)
-    dm.unlock_domain(
-        1,
-        "domain1".to_string(),
+    let key1 = EncryptionKey::from_password_with_params(
+        CypherVersion::V7WithKdf,
         "domain1_password",
         &Argon2Params::insecure(),
     )
     .unwrap();
+    dm.unlock_domain(1, "domain1".to_string(), Cypher::new(key1))
+        .unwrap();
 
     // Create storage with an encrypted folder
     let mut storage = StorageV5::new();
