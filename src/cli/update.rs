@@ -1,10 +1,12 @@
 use crate::cli::utils::{format_full_path, format_timestamp, secure_print};
-use crate::{Cypher, EncryptedValue, EncryptionKey, StorageV5, load_storage_v5, save_storage_v5};
+use crate::{
+    Cypher, EncryptedValue, EncryptionDomainManager, EncryptionKey, StorageV5, load_storage_v5,
+    save_storage_v5,
+};
 use anyhow::Result;
 use std::io;
 use std::io::Write;
 use std::path::Path;
-use zeroize::Zeroize;
 
 #[derive(Debug)]
 struct UpdateEntry {
@@ -27,16 +29,28 @@ fn find_updates_in_folder(
     folder_path: &str,
     main_storage: &StorageV5,
     update_storage: &StorageV5,
-    main_cypher: &Cypher,
-    update_cypher: &Cypher,
+    main_domain_manager: &EncryptionDomainManager,
+    update_domain_manager: &EncryptionDomainManager,
     updates: &mut Vec<UpdateEntry>,
+    skipped_count: &mut usize,
 ) {
     let Some(update_folder) = update_storage.get_folder(folder_path) else {
         return;
     };
 
+    let main_cypher = main_domain_manager.get_master_cypher();
+    let update_cypher = update_domain_manager.get_master_cypher();
+
     // Check secrets in this folder
     for (key, item) in update_folder.secrets() {
+        // Skip items in non-default encryption domains
+        if let Some(domain) = item.encryption_domain()
+            && domain != crate::MASTER_DOMAIN_ID
+        {
+            *skipped_count += 1;
+            continue;
+        }
+
         if let Some(update_entries) = item.get_entries() {
             let update_latest = update_entries.last().expect("entries should not be empty");
             let main_latest = main_storage
@@ -74,16 +88,25 @@ fn find_updates_in_folder(
         }
     }
 
-    // Recursively check subfolders
-    for (subfolder_name, _) in update_folder.navigable_folders() {
+    // Recursively check subfolders (only navigable = unlocked or regular folders)
+    for (subfolder_name, item) in update_folder.navigable_folders() {
+        // Skip encrypted folders in non-default domains
+        if let Some(domain) = item.encryption_domain()
+            && domain != crate::MASTER_DOMAIN_ID
+        {
+            *skipped_count += 1;
+            continue;
+        }
+
         let subfolder_path = format_full_path(folder_path, subfolder_name, true);
         find_updates_in_folder(
             &subfolder_path,
             main_storage,
             update_storage,
-            main_cypher,
-            update_cypher,
+            main_domain_manager,
+            update_domain_manager,
             updates,
+            skipped_count,
         );
     }
 }
@@ -92,19 +115,21 @@ fn find_updates_in_folder(
 fn find_updates(
     main_storage: &StorageV5,
     update_storage: &StorageV5,
-    main_cypher: &Cypher,
-    update_cypher: &Cypher,
-) -> Vec<UpdateEntry> {
+    main_domain_manager: &EncryptionDomainManager,
+    update_domain_manager: &EncryptionDomainManager,
+) -> (Vec<UpdateEntry>, usize) {
     let mut updates = Vec::new();
+    let mut skipped_count = 0;
 
     // Start recursive search from root
     find_updates_in_folder(
         "/",
         main_storage,
         update_storage,
-        main_cypher,
-        update_cypher,
+        main_domain_manager,
+        update_domain_manager,
         &mut updates,
+        &mut skipped_count,
     );
 
     // Sort by folder path then key name for consistent presentation
@@ -113,7 +138,7 @@ fn find_updates(
             .cmp(&b.folder_path)
             .then_with(|| a.key.cmp(&b.key))
     });
-    updates
+    (updates, skipped_count)
 }
 
 /// Format and display a single update entry
@@ -164,10 +189,13 @@ fn display_update_entry(
 /// Display summary of updates to the user
 fn display_update_summary(
     updates: &[UpdateEntry],
-    main_cypher: &Cypher,
-    update_cypher: &Cypher,
+    main_domain_manager: &EncryptionDomainManager,
+    update_domain_manager: &EncryptionDomainManager,
     insecure_stdout: bool,
 ) -> Result<(usize, usize)> {
+    let main_cypher = main_domain_manager.get_master_cypher();
+    let update_cypher = update_domain_manager.get_master_cypher();
+
     println!(
         "\nFound {} key{} with different values:",
         updates.len(),
@@ -199,7 +227,11 @@ fn display_update_summary(
 }
 
 /// Ensure all parent folders exist for a given path, creating them if needed
-fn ensure_folder_path(storage: &mut StorageV5, path: &str) -> Result<()> {
+fn ensure_folder_path(
+    storage: &mut StorageV5,
+    path: &str,
+    domain_manager: &EncryptionDomainManager,
+) -> Result<()> {
     if path == "/" || path.is_empty() {
         return Ok(());
     }
@@ -213,7 +245,7 @@ fn ensure_folder_path(storage: &mut StorageV5, path: &str) -> Result<()> {
 
         if storage.get_folder(&folder_path).is_none() {
             // Create the folder
-            storage.mkdir(&current_path, part)?;
+            storage.mkdir(&current_path, part, domain_manager)?;
         }
 
         current_path = folder_path;
@@ -226,27 +258,29 @@ fn ensure_folder_path(storage: &mut StorageV5, path: &str) -> Result<()> {
 fn apply_all_updates(
     updates: Vec<UpdateEntry>,
     main_storage: &mut StorageV5,
-    main_cypher: &Cypher,
-    update_cypher: &Cypher,
+    main_domain_manager: &EncryptionDomainManager,
+    update_domain_manager: &EncryptionDomainManager,
     filename: &Path,
 ) -> Result<()> {
+    let update_cypher = update_domain_manager.get_master_cypher();
+
     for update in updates {
-        let mut decrypted = update.new_value.decrypt(update_cypher)?;
-        let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
-        decrypted.zeroize();
+        let decrypted = update.new_value.decrypt(update_cypher)?;
 
         // Ensure folder path exists before putting the key
-        ensure_folder_path(main_storage, &update.folder_path)?;
+        ensure_folder_path(main_storage, &update.folder_path, main_domain_manager)?;
 
         main_storage.put_at_path(
             &update.folder_path,
             update.key,
-            re_encrypted,
+            &decrypted,
             update.new_timestamp,
-        );
+            crate::MASTER_DOMAIN_ID,
+            main_domain_manager,
+        )?;
     }
 
-    save_storage_v5(main_cypher, main_storage, filename)?;
+    save_storage_v5(main_domain_manager, main_storage, filename)?;
     println!("✓ All updates applied successfully.");
     Ok(())
 }
@@ -255,11 +289,14 @@ fn apply_all_updates(
 fn apply_updates_interactive(
     updates: Vec<UpdateEntry>,
     main_storage: &mut StorageV5,
-    main_cypher: &Cypher,
-    update_cypher: &Cypher,
+    main_domain_manager: &EncryptionDomainManager,
+    update_domain_manager: &EncryptionDomainManager,
     filename: &Path,
     insecure_stdout: bool,
 ) -> Result<()> {
+    let main_cypher = main_domain_manager.get_master_cypher();
+    let update_cypher = update_domain_manager.get_master_cypher();
+
     let mut applied = 0;
     let mut skipped = 0;
 
@@ -274,19 +311,19 @@ fn apply_updates_interactive(
 
         match response.trim().to_lowercase().as_str() {
             "y" | "yes" => {
-                let mut decrypted = update.new_value.decrypt(update_cypher)?;
-                let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
-                decrypted.zeroize();
-
                 // Ensure folder path exists before putting the key
-                ensure_folder_path(main_storage, &update.folder_path)?;
+                ensure_folder_path(main_storage, &update.folder_path, main_domain_manager)?;
+
+                let decrypted = update.new_value.decrypt(update_cypher)?;
 
                 main_storage.put_at_path(
                     &update.folder_path,
                     update.key,
-                    re_encrypted,
+                    &decrypted,
                     update.new_timestamp,
-                );
+                    crate::MASTER_DOMAIN_ID,
+                    main_domain_manager,
+                )?;
                 applied += 1;
                 println!("✓ Applied");
             }
@@ -302,7 +339,7 @@ fn apply_updates_interactive(
     }
 
     if applied > 0 {
-        save_storage_v5(main_cypher, main_storage, filename)?;
+        save_storage_v5(main_domain_manager, main_storage, filename)?;
         println!(
             "\n✓ Applied {} update{}, skipped {}.",
             applied,
@@ -340,8 +377,26 @@ pub fn run_update_with(
     let update_cypher = Cypher::new(update_key);
     let update_storage = load_storage_v5(&update_cypher, update_file)?;
 
-    // Find what needs updating
-    let updates = find_updates(&main_storage, &update_storage, &main_cypher, &update_cypher);
+    // Create domain managers with only master domain unlocked
+    // We only sync secrets in the default domain (0) for safety and simplicity
+    let main_domain_manager = EncryptionDomainManager::new(main_cypher);
+    let update_domain_manager = EncryptionDomainManager::new(update_cypher);
+
+    // Find what needs updating (only master domain items)
+    let (updates, skipped_count) = find_updates(
+        &main_storage,
+        &update_storage,
+        &main_domain_manager,
+        &update_domain_manager,
+    );
+
+    if skipped_count > 0 {
+        println!("⚠️  Skipped {skipped_count} items in non-default encryption domains.");
+        println!(
+            "   These items are likely more sensitive and should be synced manually if needed."
+        );
+        println!();
+    }
 
     if updates.is_empty() {
         println!("No updates found. Storage files are in sync.");
@@ -349,7 +404,12 @@ pub fn run_update_with(
     }
 
     // Display summary
-    display_update_summary(&updates, &main_cypher, &update_cypher, insecure_stdout)?;
+    display_update_summary(
+        &updates,
+        &main_domain_manager,
+        &update_domain_manager,
+        insecure_stdout,
+    )?;
 
     // Prompt for action
     let choice = prompt_merge_mode()?;
@@ -360,8 +420,8 @@ pub fn run_update_with(
             apply_all_updates(
                 updates,
                 &mut main_storage,
-                &main_cypher,
-                &update_cypher,
+                &main_domain_manager,
+                &update_domain_manager,
                 filename,
             )?;
         }
@@ -369,8 +429,8 @@ pub fn run_update_with(
             apply_updates_interactive(
                 updates,
                 &mut main_storage,
-                &main_cypher,
-                &update_cypher,
+                &main_domain_manager,
+                &update_domain_manager,
                 filename,
                 insecure_stdout,
             )?;
@@ -429,112 +489,176 @@ mod tests {
     #[test]
     fn test_find_updates_new_keys() {
         let cypher = create_test_cypher();
+        let domain_manager = EncryptionDomainManager::new(cypher);
         let mut main_storage = StorageV5::new();
         let mut update_storage = StorageV5::new();
 
         // Main has key1, update has key1 and key2
-        main_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
-            0,
-        );
-        update_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
-            0,
-        );
-        update_storage.put_at_path(
-            "/",
-            "key2".to_string(),
-            EncryptedValue::encrypt(&cypher, "value2").unwrap(),
-            0,
-        );
+        main_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "value1",
+                0,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
+        update_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "value1",
+                0,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
+        update_storage
+            .put_at_path(
+                "/",
+                "key2".to_string(),
+                "value2",
+                0,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
 
-        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+        let (updates, skipped_count) = find_updates(
+            &main_storage,
+            &update_storage,
+            &domain_manager,
+            &domain_manager,
+        );
 
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "key2");
         assert!(updates[0].is_new_key());
+        assert_eq!(skipped_count, 0);
     }
 
     #[test]
     fn test_find_updates_conflicts() {
         let cypher = create_test_cypher();
+        let domain_manager = EncryptionDomainManager::new(cypher);
         let mut main_storage = StorageV5::new();
         let mut update_storage = StorageV5::new();
 
         // Both have key1 but with different values
-        main_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "old_value").unwrap(),
-            100,
-        );
-        update_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "new_value").unwrap(),
-            200,
-        );
+        main_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "old_value",
+                100,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
+        update_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "new_value",
+                200,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
 
-        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+        let (updates, skipped_count) = find_updates(
+            &main_storage,
+            &update_storage,
+            &domain_manager,
+            &domain_manager,
+        );
 
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].key, "key1");
         assert!(!updates[0].is_new_key());
+        assert_eq!(skipped_count, 0);
     }
 
     #[test]
     fn test_find_updates_no_changes() {
         let cypher = create_test_cypher();
+        let domain_manager = EncryptionDomainManager::new(cypher);
         let mut main_storage = StorageV5::new();
         let mut update_storage = StorageV5::new();
 
         // Both have same key with same value
-        main_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
-            0,
-        );
-        update_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "value1").unwrap(),
-            0,
-        );
+        main_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "value1",
+                0,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
+        update_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "value1",
+                0,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
 
-        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+        let (updates, skipped_count) = find_updates(
+            &main_storage,
+            &update_storage,
+            &domain_manager,
+            &domain_manager,
+        );
 
         assert_eq!(updates.len(), 0);
+        assert_eq!(skipped_count, 0);
     }
 
     #[test]
     fn test_find_updates_ignores_older_timestamp() {
         let cypher = create_test_cypher();
+        let domain_manager = EncryptionDomainManager::new(cypher);
         let mut main_storage = StorageV5::new();
         let mut update_storage = StorageV5::new();
 
         // Update has older value
-        update_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "old_value").unwrap(),
-            100,
-        );
+        update_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "old_value",
+                100,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
 
-        main_storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::encrypt(&cypher, "new_value").unwrap(),
-            200,
-        );
+        main_storage
+            .put_at_path(
+                "/",
+                "key1".to_string(),
+                "new_value",
+                200,
+                crate::MASTER_DOMAIN_ID,
+                &domain_manager,
+            )
+            .unwrap();
 
-        let updates = find_updates(&main_storage, &update_storage, &cypher, &cypher);
+        let (updates, skipped_count) = find_updates(
+            &main_storage,
+            &update_storage,
+            &domain_manager,
+            &domain_manager,
+        );
 
         // Should not include update since main is newer
         assert_eq!(updates.len(), 0);
+        assert_eq!(skipped_count, 0);
     }
 }

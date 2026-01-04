@@ -1,13 +1,17 @@
+use anyhow::anyhow;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
+use zeroize::Zeroizing;
 
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode, config};
 use regex::Regex;
 
 use super::value::EncryptedValue;
+use crate::EncryptionDomainManager;
 use crate::path_utils::{format_full_path, relative_path_from};
 use crate::version::StoreVersion;
+use crate::{MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME};
 
 // ============================================================================
 // Storage V5 - Hierarchical folders with encryption domains
@@ -26,7 +30,6 @@ pub struct StorageV5 {
 impl StorageV5 {
     /// Create a new empty V5 storage
     pub fn new() -> Self {
-        use crate::{MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME};
         let mut encryption_domains = std::collections::HashMap::new();
         encryption_domains.insert(MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME.to_string());
 
@@ -36,7 +39,10 @@ impl StorageV5 {
         }
     }
 
-    /// Get a folder by path (e.g., "/" or "/work/personal")
+    /// Get a folder by path (read-only, no decryption)
+    ///
+    /// Returns None if path doesn't exist or contains locked encrypted folders
+    /// Use `get_folder_mut` if you need to decrypt folders during traversal
     pub fn get_folder(&self, path: &str) -> Option<&Folder> {
         if path == "/" || path.is_empty() {
             return Some(&self.root);
@@ -46,39 +52,140 @@ impl StorageV5 {
         let mut current = &self.root;
 
         for part in parts {
-            current = current.get_subfolder(part)?;
+            let item = current.items.get(part)?;
+            current = item.get_folder()?; // Returns None if locked
         }
 
         Some(current)
     }
 
-    /// Get a mutable folder by path
-    pub fn get_folder_mut(&mut self, path: &str) -> Option<&mut Folder> {
+    /// Get a mutable folder by path with transparent decryption
+    ///
+    /// Automatically decrypts `EncryptedFolders` during traversal if domain is unlocked
+    ///
+    /// # Errors
+    /// * If path doesn't exist
+    /// * If an encrypted folder's domain is locked
+    /// * If decryption fails
+    pub fn get_folder_mut(
+        &mut self,
+        path: &str,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<&mut Folder> {
         if path == "/" || path.is_empty() {
-            return Some(&mut self.root);
+            return Ok(&mut self.root);
         }
 
         let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
         let mut current = &mut self.root;
 
         for part in parts {
-            current = current.get_subfolder_mut(part)?;
+            // Get the item
+            let item = current
+                .items
+                .get_mut(part)
+                .ok_or_else(|| anyhow::anyhow!("Folder '{part}' not found in path '{path}'"))?;
+
+            // Decrypt if it's an encrypted folder (transparent, idempotent)
+            if item.is_encrypted_folder() {
+                item.decrypt_folder(domain_manager)?;
+            }
+
+            // Navigate into the folder
+            current = item
+                .get_folder_mut()
+                .ok_or_else(|| anyhow::anyhow!("'{part}' is not a folder"))?;
         }
 
-        Some(current)
+        Ok(current)
+    }
+
+    /// Get the encryption domain for a given path by traversing from root
+    /// Returns the encryption domain of the deepest encrypted folder in the path,
+    /// or `MASTER_DOMAIN_ID` if no encrypted folders are found
+    pub fn get_encryption_domain_for_path(&self, path: &str) -> u32 {
+        if path == "/" || path.is_empty() {
+            return crate::MASTER_DOMAIN_ID;
+        }
+
+        let parts: Vec<&str> = path.trim_matches('/').split('/').collect();
+        let mut current = &self.root;
+        let mut domain = crate::MASTER_DOMAIN_ID;
+
+        for part in parts {
+            if let Some(item) = current.items.get(part) {
+                // Update domain if this folder has an encryption domain
+                if let Some(item_domain) = item.encryption_domain() {
+                    domain = item_domain;
+                }
+
+                // Try to get the folder for next iteration
+                if let Some(folder) = item.get_folder() {
+                    current = folder;
+                } else {
+                    // Can't traverse further, return current domain
+                    break;
+                }
+            } else {
+                // Path doesn't exist, return current domain
+                break;
+            }
+        }
+
+        domain
+    }
+
+    /// Recursively re-encrypt all unlocked encrypted folders before saving
+    /// This ensures that any modifications made to encrypted folders are persisted
+    pub fn prepare_for_save(&mut self, domain_manager: &EncryptionDomainManager) -> Result<()> {
+        Self::reencrypt_folders_recursive(&mut self.root, domain_manager)
+    }
+
+    /// Helper function to recursively re-encrypt encrypted folders
+    fn reencrypt_folders_recursive(
+        folder: &mut Folder,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<()> {
+        for item in folder.items.values_mut() {
+            match item {
+                FolderItem::EncryptedFolder {
+                    decrypted_folder, ..
+                } => {
+                    // If the folder is unlocked, recursively process its contents first
+                    if let Some(decrypted) = decrypted_folder {
+                        Self::reencrypt_folders_recursive(decrypted, domain_manager)?;
+                    }
+                    // Then re-encrypt this folder
+                    item.reencrypt_folder(domain_manager)?;
+                }
+                FolderItem::Folder {
+                    folder: subfolder, ..
+                } => {
+                    // Recursively process regular subfolders
+                    Self::reencrypt_folders_recursive(subfolder, domain_manager)?;
+                }
+                FolderItem::Secret { .. } => {
+                    // Secrets don't need special handling
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Create a new folder at the given path
-    pub fn mkdir(&mut self, path: &str, folder_name: &str) -> Result<()> {
-        let parent = self
-            .get_folder_mut(path)
-            .ok_or_else(|| anyhow::anyhow!("Parent folder '{path}' not found"))?;
+    pub fn mkdir(
+        &mut self,
+        path: &str,
+        folder_name: &str,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<()> {
+        let parent = self.get_folder_mut(path, domain_manager)?;
 
         if parent.items.contains_key(folder_name) {
             bail!("Item '{folder_name}' already exists");
         }
 
-        let new_folder = Folder::new(folder_name.to_string(), parent.encryption_domain);
+        let new_folder = Folder::new(folder_name.to_string());
         parent.items.insert(
             folder_name.to_string(),
             FolderItem::new_folder(folder_name.to_string(), new_folder),
@@ -88,49 +195,54 @@ impl StorageV5 {
     }
 
     /// Store a secret value at a specific path
-    pub fn put_at_path(&mut self, path: &str, key: String, value: EncryptedValue, timestamp: u64) {
-        if let Some(folder) = self.get_folder_mut(path) {
-            let entry = SecretEntry::new(value, timestamp);
+    pub fn put_at_path(
+        &mut self,
+        path: &str,
+        key: String,
+        value: &str,
+        timestamp: u64,
+        encryption_domain: u32,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<()> {
+        let folder = self.get_folder_mut(path, domain_manager)?;
+        let encrypted_value = EncryptedValue::from_ciphertext(
+            domain_manager
+                .get_cypher(encryption_domain)
+                .ok_or_else(|| anyhow!("target domain is locked"))?
+                .encrypt(value.as_bytes())?,
+        );
+        let entry = SecretEntry::new(encrypted_value, timestamp);
 
-            folder
-                .items
-                .entry(key.clone())
-                .and_modify(|item| {
-                    if let Some(entries) = item.get_entries_mut() {
-                        entries.push(entry.clone());
-                    }
-                })
-                .or_insert_with(|| FolderItem::new_secret(key, vec![entry], 0));
-        }
-    }
+        folder
+            .items
+            .entry(key.clone())
+            .and_modify(|item| {
+                if let Some(entries) = item.get_entries_mut() {
+                    entries.push(entry.clone());
+                }
+            })
+            .or_insert_with(|| FolderItem::new_secret(key, vec![entry], encryption_domain));
 
-    /// Returns an iterator over key-value pairs matching the given regex pattern in root folder.
-    ///
-    /// # Sorting
-    /// - Keys are returned in sorted order (guaranteed by `BTreeMap`)
-    /// - Returns the latest value for each key (entries sorted by timestamp)
-    ///
-    /// Returns (`full_path`, key, value) tuples where `full_path` is like "/work/personal"
-    pub fn get(
-        &self,
-        pattern: &str,
-    ) -> Result<impl Iterator<Item = (String, &str, &EncryptedValue)> + '_> {
-        self.get_at_path("/", pattern, false)
+        Ok(())
     }
 
     /// Returns an iterator over key-value pairs matching pattern at a specific path.
     /// If recursive is true, searches through all subfolders.
     /// Returns (`full_path`, key, value) tuples where `full_path` is like "/work/personal"
-    pub fn get_at_path(
-        &self,
+    pub fn get_at_path<'a>(
+        &'a mut self,
         path: &str,
         pattern: &str,
         recursive: bool,
-    ) -> Result<impl Iterator<Item = (String, &str, &EncryptedValue)> + '_> {
+        domain_manager: &'a EncryptionDomainManager,
+    ) -> Result<impl Iterator<Item = (String, &'a str, &'a EncryptedValue)> + 'a> {
         let re = Regex::new(&format!("^{pattern}$"))?;
-        let folder = self
-            .get_folder(path)
-            .ok_or_else(|| anyhow::anyhow!("Folder '{path}' not found"))?;
+        let folder = self.get_folder_mut(path, domain_manager)?;
+
+        // Decrypt the entire tree upfront if recursive (avoids borrow checker issues during iteration)
+        if recursive {
+            Self::decrypt_tree_recursive(folder, domain_manager);
+        }
 
         let normalized_path = if path == "/" || path.is_empty() {
             String::from("/")
@@ -146,59 +258,58 @@ impl StorageV5 {
         ))
     }
 
-    /// Returns an iterator over all historical values for a given key in root folder.
-    ///
-    /// # Sorting
-    /// Entries are returned in chronological order (oldest to newest).
-    pub fn history(&self, key: &str) -> Option<impl Iterator<Item = &SecretEntry> + '_> {
-        self.history_at_path("/", key)
-    }
-
     /// Returns an iterator over all historical values for a given key at a specific path.
     /// Returns None for folders (regular or encrypted).
     pub fn history_at_path(
-        &self,
+        &mut self,
         path: &str,
         key: &str,
+        domain_manager: &EncryptionDomainManager,
     ) -> Option<impl Iterator<Item = &SecretEntry> + '_> {
-        self.get_folder(path)
+        self.get_folder_mut(path, domain_manager)
+            .ok()
             .and_then(|folder| folder.get_item(key))
             .and_then(|item| item.get_entries())
             .map(|entries| entries.iter())
     }
 
-    /// Delete a key and all its history from root folder
-    pub fn delete(&mut self, key: &str) -> bool {
-        self.delete_at_path("/", key)
-    }
-
     /// Delete an item (secret, folder, or encrypted folder) from a specific path
-    pub fn delete_at_path(&mut self, path: &str, key: &str) -> bool {
-        self.get_folder_mut(path)
+    pub fn delete_at_path(
+        &mut self,
+        path: &str,
+        key: &str,
+        domain_manager: &EncryptionDomainManager,
+    ) -> bool {
+        self.get_folder_mut(path, domain_manager)
+            .ok()
             .and_then(|folder| folder.items.remove(key))
             .is_some()
     }
 
     /// Move an item (secret, folder, or encrypted folder) from one location to another
     /// Works like shell `mv` - handles both files and directories uniformly
-    /// `source_folder`: folder containing the item
-    /// `item_name`: name of the item to move
-    /// `dest_folder`: destination folder
-    /// `dest_name`: optional new name (if None, keeps same name)
+    ///
+    /// # Arguments
+    /// * `source_folder` - Path to folder containing the item
+    /// * `item_name` - Name of the item to move
+    /// * `dest_folder` - Destination folder path
+    /// * `dest_name` - Optional new name (if None, keeps same name)
+    /// * `target_domain_id` - If Some, re-encrypt item to this domain
+    /// * `domain_manager` - Domain manager for transparent decryption and re-encryption
     pub fn move_item(
         &mut self,
         source_folder: &str,
         item_name: &str,
         dest_folder: &str,
         dest_name: Option<&str>,
+        target_domain_id: Option<u32>,
+        domain_manager: &EncryptionDomainManager,
     ) -> Result<()> {
         let final_name = dest_name.unwrap_or(item_name);
 
         // Check destination folder exists and no collision (must do before removing from source)
         {
-            let dest = self
-                .get_folder(dest_folder)
-                .ok_or_else(|| anyhow::anyhow!("Destination folder '{dest_folder}' not found"))?;
+            let dest = self.get_folder_mut(dest_folder, domain_manager)?;
 
             if dest.items.contains_key(final_name) {
                 bail!("Item '{final_name}' already exists at destination '{dest_folder}'");
@@ -206,12 +317,12 @@ impl StorageV5 {
         }
 
         // Remove from source
-        let mut item = self
-            .get_folder_mut(source_folder)
-            .ok_or_else(|| anyhow::anyhow!("Source folder '{source_folder}' not found"))?
-            .items
-            .remove(item_name)
-            .ok_or_else(|| anyhow::anyhow!("Item '{item_name}' not found in '{source_folder}'"))?;
+        let mut item = {
+            let source = self.get_folder_mut(source_folder, domain_manager)?;
+            source.items.remove(item_name).ok_or_else(|| {
+                anyhow::anyhow!("Item '{item_name}' not found in '{source_folder}'")
+            })?
+        };
 
         // Update the item's name if renaming
         if final_name != item_name {
@@ -224,37 +335,128 @@ impl StorageV5 {
             }
         }
 
+        // Re-encrypt to target domain if requested
+        if let Some(domain_id) = target_domain_id {
+            Self::reencrypt_item(&mut item, domain_id, domain_manager)?;
+        }
+
         // Insert into dest
-        self.get_folder_mut(dest_folder)
-            .expect("dest folder exists")
-            .items
-            .insert(final_name.to_string(), item);
+        let dest = self.get_folder_mut(dest_folder, domain_manager)?;
+        dest.items.insert(final_name.to_string(), item);
 
         Ok(())
     }
 
-    /// Returns an iterator over all keys matching the given regex pattern in root folder.
+    /// Re-encrypt an item from its current domain to a target domain
     ///
-    /// # Sorting
-    /// Keys are returned in sorted order (guaranteed by `BTreeMap`).
-    /// Returns (`folder_path`, key) tuples where `folder_path` is like "/work/personal"
-    pub fn search(&self, pattern: &str) -> Result<impl Iterator<Item = (String, &str)> + '_> {
-        self.search_at_path("/", pattern, false)
+    /// # Arguments
+    /// * `item` - The item to re-encrypt (Secret, Folder, or `EncryptedFolder`)
+    /// * `target_domain_id` - The domain ID to re-encrypt to
+    /// * `domain_manager` - Manager containing unlocked domain cyphers
+    ///
+    /// # Errors
+    /// * If the source domain (current item's domain) is not unlocked
+    /// * If the target domain is not unlocked
+    /// * If encryption/decryption fails
+    fn reencrypt_item(
+        item: &mut FolderItem,
+        target_domain_id: u32,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<()> {
+        use zeroize::Zeroize;
+
+        match item {
+            FolderItem::Secret {
+                entries,
+                encryption_domain: source_domain_id,
+                ..
+            } => {
+                // Verify target domain is unlocked
+                let target_cypher =
+                    domain_manager.get_cypher(target_domain_id).ok_or_else(|| {
+                        anyhow::anyhow!("Target domain {target_domain_id} is not unlocked")
+                    })?;
+
+                // Get source cypher for decryption
+                let source_cypher =
+                    domain_manager
+                        .get_cypher(*source_domain_id)
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("Source domain {source_domain_id} is not unlocked")
+                        })?;
+
+                // Re-encrypt all entries
+                for entry in entries {
+                    let mut plaintext = source_cypher.decrypt(entry.value.as_bytes())?;
+                    let ciphertext = target_cypher.encrypt(&plaintext)?;
+                    plaintext.zeroize(); // Clear decrypted content from memory
+                    entry.value = EncryptedValue::from_ciphertext(ciphertext);
+                }
+
+                // Update domain
+                *source_domain_id = target_domain_id;
+                Ok(())
+            }
+            FolderItem::Folder { .. } | FolderItem::EncryptedFolder { .. } => {
+                // Delegate to encrypt_folder for both folder types
+                item.encrypt_folder(target_domain_id, domain_manager)
+            }
+        }
+    }
+
+    /// Lock an item to a specific encryption domain (re-encrypts the item)
+    ///
+    /// # Arguments
+    /// * `item_path` - Full path to the item (e.g., "/`work/api_key`" or "/personal/passwords")
+    /// * `target_domain_id` - The domain ID to lock the item to
+    /// * `domain_manager` - Manager containing unlocked domain cyphers
+    ///
+    /// # Errors
+    /// * If the item doesn't exist
+    /// * If the target domain is not unlocked
+    /// * If the source domain (for re-encryption) is not unlocked
+    /// * If encryption/decryption fails
+    pub fn lock_item(
+        &mut self,
+        item_path: &str,
+        target_domain_id: u32,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<()> {
+        // Parse the path using path_utils (from root)
+        let (folder_path, item_name) = crate::parse_key_path("/", item_path);
+
+        // Get the folder containing the item (with transparent decryption)
+        let folder = self.get_folder_mut(&folder_path, domain_manager)?;
+
+        // Get the item
+        let item = folder
+            .items
+            .get_mut(item_name)
+            .ok_or_else(|| anyhow::anyhow!("Item '{item_name}' not found in '{folder_path}'"))?;
+
+        // Re-encrypt the item
+        Self::reencrypt_item(item, target_domain_id, domain_manager)?;
+
+        Ok(())
     }
 
     /// Returns an iterator over all keys matching pattern at a specific path.
     /// If recursive is true, searches through all subfolders.
     /// Returns (`folder_path`, key) tuples where `folder_path` is like "/work/personal"
-    pub fn search_at_path(
-        &self,
+    pub fn search_at_path<'a>(
+        &'a mut self,
         path: &str,
         pattern: &str,
         recursive: bool,
-    ) -> Result<impl Iterator<Item = (String, &str)> + '_> {
+        domain_manager: &'a EncryptionDomainManager,
+    ) -> Result<impl Iterator<Item = (String, &'a str)> + 'a> {
         let re = Regex::new(pattern)?;
-        let folder = self
-            .get_folder(path)
-            .ok_or_else(|| anyhow::anyhow!("Folder '{path}' not found"))?;
+        let folder = self.get_folder_mut(path, domain_manager)?;
+
+        // Decrypt the entire tree upfront if recursive (avoids borrow checker issues during iteration)
+        if recursive {
+            Self::decrypt_tree_recursive(folder, domain_manager);
+        }
 
         let normalized_path = if path == "/" || path.is_empty() {
             String::from("/")
@@ -268,6 +470,35 @@ impl StorageV5 {
             recursive,
             normalized_path,
         ))
+    }
+
+    // ========================================================================
+    // Internal Helpers
+    // ========================================================================
+
+    /// Recursively decrypt all unlocked encrypted folders in the tree
+    /// This is called before creating iterators to avoid borrow checker issues
+    fn decrypt_tree_recursive(folder: &mut Folder, domain_manager: &EncryptionDomainManager) {
+        for item in folder.items.values_mut() {
+            match item {
+                FolderItem::EncryptedFolder { .. } => {
+                    // Try to decrypt (idempotent, fails silently if domain locked)
+                    let _ = item.decrypt_folder(domain_manager);
+
+                    // If successfully decrypted, recurse into it
+                    if let Some(subfolder) = item.get_folder_mut() {
+                        Self::decrypt_tree_recursive(subfolder, domain_manager);
+                    }
+                }
+                FolderItem::Folder { folder, .. } => {
+                    // Regular folder - just recurse
+                    Self::decrypt_tree_recursive(folder, domain_manager);
+                }
+                FolderItem::Secret { .. } => {
+                    // Secrets don't contain subfolders
+                }
+            }
+        }
     }
 
     // ========================================================================
@@ -322,12 +553,13 @@ impl StorageV5 {
 }
 
 // ============================================================================
-// Zero-copy iterators through Folder structure
+// Iterators through Folder structure (tree is pre-decrypted before iteration)
 // ============================================================================
 
 type ItemsIterator<'a> = std::collections::btree_map::Iter<'a, String, FolderItem>;
 
 /// Iterator over secrets in a folder and optionally its subfolders
+/// Note: Encrypted folders must be decrypted before iteration (done automatically in `get_at_path`)
 pub struct RecursiveSecretIterator<'a> {
     // Single stack of (current_path, items_iter) for depth-first traversal
     stack: Vec<(String, ItemsIterator<'a>)>,
@@ -374,6 +606,7 @@ impl<'a> Iterator for RecursiveSecretIterator<'a> {
                     }
 
                     // If recursive and this is a navigable folder, descend into it
+                    // (Tree is already decrypted, so we only traverse navigable folders)
                     if self.recursive
                         && let Some(subfolder) = item.get_folder()
                     {
@@ -414,6 +647,7 @@ impl<'a> Iterator for RecursiveSecretIterator<'a> {
 }
 
 /// Iterator over keys in a folder and optionally its subfolders
+/// Note: Encrypted folders must be decrypted before iteration (done automatically in `search_at_path`)
 pub struct RecursiveKeyIterator<'a> {
     // Single stack of (current_path, items_iter) for depth-first traversal
     stack: Vec<(String, ItemsIterator<'a>)>,
@@ -458,6 +692,7 @@ impl<'a> Iterator for RecursiveKeyIterator<'a> {
                     }
 
                     // If recursive and this is a navigable folder, descend into it
+                    // (Tree is already decrypted, so we only traverse navigable folders)
                     if self.recursive
                         && let Some(subfolder) = item.get_folder()
                     {
@@ -579,16 +814,16 @@ impl FolderItem {
     }
 
     /// Get the encryption domain for this item
-    /// Returns folder's default domain for regular folders
-    pub fn encryption_domain(&self) -> u32 {
+    /// Returns None for regular (unencrypted) folders
+    pub const fn encryption_domain(&self) -> Option<u32> {
         match self {
             Self::Secret {
                 encryption_domain, ..
             }
             | Self::EncryptedFolder {
                 encryption_domain, ..
-            } => *encryption_domain,
-            Self::Folder { folder, .. } => folder.encryption_domain,
+            } => Some(*encryption_domain),
+            Self::Folder { .. } => None,
         }
     }
 
@@ -672,18 +907,6 @@ impl FolderItem {
         }
     }
 
-    /// Get the underlying Folder box (for moving folders around)
-    pub fn take_folder(self) -> Option<Box<Folder>> {
-        match self {
-            Self::Folder { folder, .. }
-            | Self::EncryptedFolder {
-                decrypted_folder: Some(folder),
-                ..
-            } => Some(folder),
-            _ => None,
-        }
-    }
-
     // ========== Accessing Secret Data ==========
 
     /// Get secret entries (only for secrets, not folders)
@@ -714,32 +937,136 @@ impl FolderItem {
 
     // ========== Encrypted Folder Operations ==========
 
-    /// Unlock an encrypted folder with the decrypted data
-    /// Returns error if not an encrypted folder or already unlocked
-    pub fn unlock(&mut self, decrypted_folder: Folder) -> Result<()> {
+    /// Encrypt a folder to a specific domain (converts Folder → `EncryptedFolder` or syncs changes)
+    ///
+    /// # Use cases
+    /// - CLI `lock <folder> <domain>` command - encrypts folder to target domain
+    /// - Before save - syncs in-memory changes back to `encrypted_data`
+    ///
+    /// # Behavior
+    /// - Regular Folder: serialize, encrypt to target domain, convert to `EncryptedFolder`
+    /// - `EncryptedFolder` with `decrypted_folder` (unlocked): serialize from memory, re-encrypt, **keeps folder unlocked**
+    /// - `EncryptedFolder` without `decrypted_folder` (locked): decrypt from current domain, re-encrypt to target domain
+    ///
+    /// # Errors
+    /// * If source or target domain is not unlocked
+    /// * If serialization or encryption fails
+    pub fn encrypt_folder(
+        &mut self,
+        target_domain_id: u32,
+        domain_manager: &EncryptionDomainManager,
+    ) -> Result<()> {
+        
+
         match self {
-            Self::EncryptedFolder {
-                decrypted_folder: df,
-                ..
-            } => {
-                if df.is_some() {
-                    bail!("Folder already unlocked");
-                }
-                *df = Some(Box::new(decrypted_folder));
+            Self::Folder { folder, name } => {
+                // Convert regular folder to encrypted folder
+                let cypher = domain_manager
+                    .get_cypher(target_domain_id)
+                    .ok_or_else(|| anyhow::anyhow!("Domain {target_domain_id} is not unlocked"))?;
+
+                let folder_bytes = serialize_folder_to_vec(folder)?;
+                let encrypted_data = cypher.encrypt(&folder_bytes)?;
+
+                *self = Self::new_encrypted_folder(name.clone(), encrypted_data, target_domain_id);
                 Ok(())
             }
-            _ => bail!("Not an encrypted folder"),
+            Self::EncryptedFolder {
+                encrypted_data,
+                encryption_domain: source_domain_id,
+                decrypted_folder,
+                ..
+            } => {
+                let target_cypher =
+                    domain_manager.get_cypher(target_domain_id).ok_or_else(|| {
+                        anyhow::anyhow!("Target domain {target_domain_id} is not unlocked")
+                    })?;
+
+                let folder_bytes = if let Some(folder) = decrypted_folder.as_ref() {
+                    // Use in-memory version (has latest changes)
+                    serialize_folder_to_vec(folder)?
+                } else {
+                    // Decrypt from current domain first
+                    let source_cypher =
+                        domain_manager
+                            .get_cypher(*source_domain_id)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("Source domain {source_domain_id} is not unlocked")
+                            })?;
+                    source_cypher.decrypt(encrypted_data)?
+                };
+
+                // Re-encrypt to target domain
+                let new_encrypted_data = target_cypher.encrypt(&folder_bytes)?;
+
+                *encrypted_data = new_encrypted_data;
+                *source_domain_id = target_domain_id;
+                Ok(())
+            }
+            Self::Secret { .. } => {
+                bail!("Bug! should only be called for folders")
+            }
         }
     }
 
-    /// Lock an encrypted folder (clear the decrypted data)
-    pub fn lock(&mut self) -> Result<()> {
+    /// Re-encrypt an encrypted folder with its own domain's cypher
+    /// This is used before saving to persist any changes made to unlocked folders
+    /// Only re-encrypts if the folder is unlocked (has `decrypted_folder` populated)
+    pub fn reencrypt_folder(&mut self, domain_manager: &EncryptionDomainManager) -> Result<()> {
         match self {
             Self::EncryptedFolder {
-                decrypted_folder: df,
+                encryption_domain,
+                decrypted_folder,
                 ..
             } => {
-                *df = None;
+                // Only re-encrypt if the folder is unlocked (has been decrypted/modified)
+                if decrypted_folder.is_some() {
+                    let domain_id = *encryption_domain;
+                    self.encrypt_folder(domain_id, domain_manager)
+                } else {
+                    // Folder is locked - no changes to persist, skip re-encryption
+                    Ok(())
+                }
+            }
+            Self::Folder { .. } | Self::Secret { .. } => {
+                // Regular folders and secrets don't need re-encryption
+                Ok(())
+            }
+        }
+    }
+
+    /// Decrypt an encrypted folder for access (lazy, idempotent)
+    /// Populates `decrypted_folder` if not already populated
+    ///
+    /// # Errors
+    /// * If not an encrypted folder
+    /// * If the domain is not unlocked
+    /// * If decryption or deserialization fails
+    pub fn decrypt_folder(&mut self, domain_manager: &EncryptionDomainManager) -> Result<()> {
+        match self {
+            Self::EncryptedFolder {
+                encrypted_data,
+                encryption_domain,
+                decrypted_folder,
+                ..
+            } => {
+                // Idempotent - if already decrypted, do nothing
+                if decrypted_folder.is_some() {
+                    return Ok(());
+                }
+
+                // Get the domain's cypher
+                let cypher = domain_manager
+                    .get_cypher(*encryption_domain)
+                    .ok_or_else(|| anyhow::anyhow!("Domain {encryption_domain} is not unlocked"))?;
+
+                // Decrypt the folder data
+                let folder_bytes = cypher.decrypt(encrypted_data)?;
+                let folder = deserialize_folder_from_slice(&folder_bytes)?;
+
+                // Populate the decrypted_folder field
+                *decrypted_folder = Some(Box::new(folder));
+
                 Ok(())
             }
             _ => bail!("Not an encrypted folder"),
@@ -892,30 +1219,23 @@ pub struct Folder {
     /// Folder name (empty string for root)
     pub name: String,
 
-    /// Default encryption domain for new items created in this folder
-    /// - 0 = default domain (master key)
-    /// - N > 0 = custom domain (requires separate password)
-    pub encryption_domain: u32,
-
     /// All items in this folder (secrets AND subfolders)
     pub items: BTreeMap<String, FolderItem>,
 }
 
 impl Folder {
-    /// Create a new root folder (domain 0)
+    /// Create a new root folder
     pub const fn new_root() -> Self {
         Self {
             name: String::new(),
-            encryption_domain: 0,
             items: BTreeMap::new(),
         }
     }
 
     /// Create a new named folder
-    pub const fn new(name: String, encryption_domain: u32) -> Self {
+    pub const fn new(name: String) -> Self {
         Self {
             name,
-            encryption_domain,
             items: BTreeMap::new(),
         }
     }
@@ -1053,10 +1373,10 @@ pub fn deserialize_storage_v5<R: Read>(reader: &mut R) -> Result<StorageV5> {
 // Convenience functions for Vec<u8>
 
 /// Serialize V5 storage to bytes (convenience wrapper)
-pub fn serialize_storage_v5_to_vec(storage: &StorageV5) -> Result<Vec<u8>> {
+pub fn serialize_storage_v5_to_vec(storage: &StorageV5) -> Result<Zeroizing<Vec<u8>>> {
     let mut buffer = Vec::new();
     serialize_storage_v5(&mut buffer, storage)?;
-    Ok(buffer)
+    Ok(Zeroizing::new(buffer))
 }
 
 /// Deserialize V5 storage from bytes (convenience wrapper)
@@ -1064,6 +1384,30 @@ pub fn deserialize_storage_v5_from_slice(data: &[u8]) -> Result<StorageV5> {
     let mut cursor = std::io::Cursor::new(data);
     deserialize_storage_v5(&mut cursor)
 }
+
+// ============================================================================
+// Folder Serialization Helpers
+// ============================================================================
+
+/// Serialize a Folder to bytes using bincode
+/// Used for encrypting folders into `EncryptedFolder` variant
+pub fn serialize_folder_to_vec(folder: &Folder) -> Result<Zeroizing<Vec<u8>>> {
+    let config = config::standard();
+    let bytes = bincode::encode_to_vec(folder, config)?;
+    Ok(Zeroizing::new(bytes))
+}
+
+/// Deserialize a Folder from bytes using bincode
+/// Used for decrypting `EncryptedFolder` variant
+pub fn deserialize_folder_from_slice(data: &[u8]) -> Result<Folder> {
+    let config = config::standard();
+    let (folder, _len) = bincode::decode_from_slice(data, config)?;
+    Ok(folder)
+}
+
+// ============================================================================
+// Internal Helpers
+// ============================================================================
 
 /// Sort all secret entries by timestamp (recursive)
 fn sort_folder_entries(folder: &mut Folder) {
@@ -1096,16 +1440,16 @@ use super::value::ValueEntry;
 /// Migrate V4 storage to V5 format
 /// All secrets go into root folder with default encryption domain (0)
 pub fn migrate_v4_to_v5(v4: StorageV4) -> StorageV5 {
-    use crate::{MASTER_DOMAIN_ID, MASTER_DOMAIN_NAME};
-
     let mut root = Folder::new_root();
 
     // Migrate flat structure to root folder
     for (key, entries) in v4.data {
         let secrets: Vec<SecretEntry> = entries.into_iter().map(value_entry_to_secret).collect();
 
-        root.items
-            .insert(key.clone(), FolderItem::new_secret(key, secrets, 0));
+        root.items.insert(
+            key.clone(),
+            FolderItem::new_secret(key, secrets, MASTER_DOMAIN_ID),
+        );
     }
 
     // Initialize encryption domains with master domain
@@ -1130,6 +1474,20 @@ fn value_entry_to_secret(entry: ValueEntry) -> SecretEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Argon2Params, Cypher, CypherVersion, EncryptionKey};
+
+    /// Test helper: Create a domain manager with master key
+    fn test_domain_manager() -> EncryptionDomainManager {
+        // Use insecure params for testing (faster)
+        let key = EncryptionKey::from_password_with_params(
+            CypherVersion::default(),
+            "test_password",
+            &Argon2Params::insecure(),
+        )
+        .expect("Failed to create key");
+        let master_cypher = Cypher::new(key);
+        EncryptionDomainManager::new(master_cypher)
+    }
 
     #[test]
     fn test_empty_storage_v5() {
@@ -1178,7 +1536,7 @@ mod tests {
         let mut storage = StorageV5::new();
 
         // Add a subfolder
-        let mut subfolder = Folder::new("work".to_string(), 0);
+        let mut subfolder = Folder::new("work".to_string());
         let api_key_value = EncryptedValue::from_ciphertext(b"secret123".to_vec());
         subfolder.items.insert(
             "api_key".to_string(),
@@ -1228,30 +1586,43 @@ mod tests {
         let item = &deserialized.root.items["secret_folder"];
         assert!(item.is_encrypted_folder());
         assert!(item.is_locked());
-        assert_eq!(item.encryption_domain(), 1);
+        assert_eq!(item.encryption_domain(), Some(1));
     }
 
     #[test]
     fn test_v4_migration() {
         let mut v4 = StorageV4::new();
-        v4.put("key1".to_string(), "value1".into());
-        v4.put("key2".to_string(), "value2".into());
+        v4.put(
+            "key1".to_string(),
+            EncryptedValue::from_ciphertext("value1".into()),
+        );
+        v4.put(
+            "key2".to_string(),
+            EncryptedValue::from_ciphertext("value2".into()),
+        );
 
         let v5 = migrate_v4_to_v5(v4);
 
         assert_eq!(v5.root.items.len(), 2);
         assert!(v5.root.items.contains_key("key1"));
         assert!(v5.root.items.contains_key("key2"));
-        assert_eq!(v5.root.encryption_domain, 0);
+        // All migrated secrets should use master domain (0)
+        assert_eq!(v5.root.items["key1"].encryption_domain(), Some(0));
+        assert_eq!(v5.root.items["key2"].encryption_domain(), Some(0));
     }
 
     #[test]
     fn test_put_and_get() {
         let mut storage = StorageV5::new();
-        let test_value = EncryptedValue::from_ciphertext(b"test_value".to_vec());
-        storage.put_at_path("/", "test_key".to_string(), test_value, 0);
+        let dm = test_domain_manager();
+        storage
+            .put_at_path("/", "test_key".to_string(), "test_value", 0, 0, &dm)
+            .unwrap();
 
-        let results: Vec<_> = storage.get("test_key").unwrap().collect();
+        let results: Vec<_> = storage
+            .get_at_path("/", "test_key", false, &dm)
+            .unwrap()
+            .collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0, "/"); // full_path
         assert_eq!(results[0].1, "test_key"); // key name
@@ -1261,26 +1632,21 @@ mod tests {
     #[test]
     fn test_get_with_pattern() {
         let mut storage = StorageV5::new();
-        storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::from_ciphertext(b"value1".to_vec()),
-            0,
-        );
-        storage.put_at_path(
-            "/",
-            "key2".to_string(),
-            EncryptedValue::from_ciphertext(b"value2".to_vec()),
-            0,
-        );
-        storage.put_at_path(
-            "/",
-            "other".to_string(),
-            EncryptedValue::from_ciphertext(b"value3".to_vec()),
-            0,
-        );
+        let dm = test_domain_manager();
+        storage
+            .put_at_path("/", "key1".to_string(), "value1", 0, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "key2".to_string(), "value2", 0, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "other".to_string(), "value3", 0, 0, &dm)
+            .unwrap();
 
-        let results: Vec<_> = storage.get("key.*").unwrap().collect();
+        let results: Vec<_> = storage
+            .get_at_path("/", "key.*", false, &dm)
+            .unwrap()
+            .collect();
         assert_eq!(results.len(), 2);
         assert!(
             results
@@ -1297,26 +1663,21 @@ mod tests {
     #[test]
     fn test_search() {
         let mut storage = StorageV5::new();
-        storage.put_at_path(
-            "/",
-            "alpha".to_string(),
-            EncryptedValue::from_ciphertext(b"value1".to_vec()),
-            0,
-        );
-        storage.put_at_path(
-            "/",
-            "beta".to_string(),
-            EncryptedValue::from_ciphertext(b"value2".to_vec()),
-            0,
-        );
-        storage.put_at_path(
-            "/",
-            "gamma".to_string(),
-            EncryptedValue::from_ciphertext(b"value3".to_vec()),
-            0,
-        );
+        let dm = test_domain_manager();
+        storage
+            .put_at_path("/", "alpha".to_string(), "value1", 0, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "beta".to_string(), "value2", 0, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "gamma".to_string(), "value3", 0, 0, &dm)
+            .unwrap();
 
-        let results: Vec<_> = storage.search(".*a.*").unwrap().collect();
+        let results: Vec<_> = storage
+            .search_at_path("/", ".*a.*", true, &dm)
+            .unwrap()
+            .collect();
         assert_eq!(results.len(), 2); // alpha, gamma
         assert!(results.iter().any(|(path, k)| path == "/" && *k == "alpha"));
         assert!(results.iter().any(|(path, k)| path == "/" && *k == "gamma"));
@@ -1325,26 +1686,18 @@ mod tests {
     #[test]
     fn test_history() {
         let mut storage = StorageV5::new();
-        storage.put_at_path(
-            "/",
-            "key".to_string(),
-            EncryptedValue::from_ciphertext(b"value1".to_vec()),
-            100,
-        );
-        storage.put_at_path(
-            "/",
-            "key".to_string(),
-            EncryptedValue::from_ciphertext(b"value2".to_vec()),
-            200,
-        );
-        storage.put_at_path(
-            "/",
-            "key".to_string(),
-            EncryptedValue::from_ciphertext(b"value3".to_vec()),
-            300,
-        );
+        let dm = test_domain_manager();
+        storage
+            .put_at_path("/", "key".to_string(), "value1", 100, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "key".to_string(), "value2", 200, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "key".to_string(), "value3", 300, 0, &dm)
+            .unwrap();
 
-        let history: Vec<_> = storage.history("key").unwrap().collect();
+        let history: Vec<_> = storage.history_at_path("/", "key", &dm).unwrap().collect();
         assert_eq!(history.len(), 3);
         assert_eq!(history[0].timestamp, 100);
         assert_eq!(history[1].timestamp, 200);
@@ -1354,24 +1707,19 @@ mod tests {
     #[test]
     fn test_delete() {
         let mut storage = StorageV5::new();
-        storage.put_at_path(
-            "/",
-            "key1".to_string(),
-            EncryptedValue::from_ciphertext(b"value1".to_vec()),
-            0,
-        );
-        storage.put_at_path(
-            "/",
-            "key2".to_string(),
-            EncryptedValue::from_ciphertext(b"value2".to_vec()),
-            0,
-        );
+        let dm = test_domain_manager();
+        storage
+            .put_at_path("/", "key1".to_string(), "value1", 0, 0, &dm)
+            .unwrap();
+        storage
+            .put_at_path("/", "key2".to_string(), "value2", 0, 0, &dm)
+            .unwrap();
 
-        assert!(storage.delete("key1"));
-        assert!(!storage.delete("key1")); // Already deleted
-        assert!(storage.delete("key2"));
+        assert!(storage.delete_at_path("/", "key1", &dm));
+        assert!(!storage.delete_at_path("/", "key1", &dm)); // Already deleted
+        assert!(storage.delete_at_path("/", "key2", &dm));
 
-        let results: Vec<_> = storage.get(".*").unwrap().collect();
+        let results: Vec<_> = storage.get_at_path("/", ".*", true, &dm).unwrap().collect();
         assert_eq!(results.len(), 0);
     }
 }

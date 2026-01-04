@@ -4,7 +4,9 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use tempfile::NamedTempFile;
+use zeroize::Zeroize;
 
+use crate::EncryptionDomainManager;
 use crate::crypto::Cypher;
 use crate::version::StoreVersion;
 
@@ -169,12 +171,23 @@ pub fn load_storage_v5(cypher: &Cypher, path: &Path) -> Result<StorageV5> {
 }
 
 /// Save V5 storage to file
-pub fn save_storage_v5(cypher: &Cypher, storage: &StorageV5, path: &Path) -> Result<()> {
+pub fn save_storage_v5(
+    domain_manager: &EncryptionDomainManager,
+    storage: &mut StorageV5,
+    path: &Path,
+) -> Result<()> {
+    // Re-encrypt all unlocked encrypted folders before saving
+    storage.prepare_for_save(domain_manager)?;
+
     let dir = path.parent().expect("Can't get parent dir of a file");
     let mut temp = NamedTempFile::new_in(dir)?;
 
-    let serialized = v5::serialize_storage_v5_to_vec(storage)?;
-    let encrypted = cypher.encrypt(&serialized)?;
+    let mut serialized = v5::serialize_storage_v5_to_vec(storage)?;
+
+    // Encrypt the file with the master cypher
+    let encrypted = domain_manager.get_master_cypher().encrypt(&serialized)?;
+
+    serialized.zeroize();
 
     temp.write_all(&encrypted)?;
     temp.persist(path)?;

@@ -1,5 +1,6 @@
 use crate::Cypher;
-use crate::EncryptedValue;
+use crate::EncryptionDomainManager;
+use crate::FolderItem;
 use crate::StorageV5;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::STANDBY_TIMEOUT;
@@ -24,20 +25,30 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    cypher: Cypher,
     filename: PathBuf,
     current_path: Arc<Mutex<String>>,
+    domain_manager: EncryptionDomainManager,
 }
 
 impl InteractiveCli {
-    pub fn new(prompt: String, insecure_stdout: bool, cypher: Cypher, filename: PathBuf) -> Self {
+    pub fn new(
+        prompt: String,
+        insecure_stdout: bool,
+        domain_manager: EncryptionDomainManager,
+        filename: PathBuf,
+    ) -> Self {
         Self {
             prompt,
             insecure_stdout,
-            cypher,
             filename,
             current_path: Arc::new(Mutex::new(String::from("/"))),
+            domain_manager,
         }
+    }
+
+    /// Get the master cypher for direct encryption/decryption operations
+    fn get_master_cypher(&self) -> &Cypher {
+        self.domain_manager.get_master_cypher()
     }
 
     fn get_current_path(&self) -> String {
@@ -55,7 +66,10 @@ impl InteractiveCli {
     }
 
     pub fn run(&mut self) -> Result<()> {
-        let storage = Arc::new(Mutex::new(load_storage_v5(&self.cypher, &self.filename)?));
+        let storage = Arc::new(Mutex::new(load_storage_v5(
+            self.get_master_cypher(),
+            &self.filename,
+        )?));
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -83,7 +97,7 @@ impl InteractiveCli {
             // Check timeout
             if last_use_time
                 .elapsed()
-                .expect("time moves forward")
+                .expect("time goes forward")
                 .as_secs()
                 > STANDBY_TIMEOUT
             {
@@ -193,34 +207,45 @@ impl InteractiveCli {
     }
 
     fn cmd_put(&self, key: &str, value: &str, storage: &mut StorageV5) -> Result<()> {
-        let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
         let (folder_path, key_name) = parse_key_path(&self.get_current_path(), key);
         let timestamp = SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .expect("time should go forward")
+            .expect("time goes forward")
             .as_secs();
+
+        // Determine encryption domain:
+        // 1. If item already exists, preserve its encryption domain
+        // 2. Otherwise, inherit from parent folder hierarchy
+        let encryption_domain_id = storage
+            .get_folder(&folder_path)
+            .and_then(|folder| folder.get_item(key_name))
+            .and_then(FolderItem::encryption_domain)
+            .unwrap_or_else(|| storage.get_encryption_domain_for_path(&folder_path));
+
         storage.put_at_path(
             &folder_path,
             key_name.to_string(),
-            encrypted_value,
+            value,
             timestamp,
-        );
+            encryption_domain_id,
+            &self.domain_manager,
+        )?;
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
-        save_storage_v5(&self.cypher, storage, &self.filename)?;
+        save_storage_v5(&self.domain_manager, storage, &self.filename)?;
         Ok(())
     }
 
-    fn cmd_get(&self, pattern: &str, storage: &StorageV5) -> Result<()> {
+    fn cmd_get(&self, pattern: &str, storage: &mut StorageV5) -> Result<()> {
         let (folder_path, key_pattern) = parse_key_path(&self.get_current_path(), pattern);
-        match storage.get_at_path(&folder_path, key_pattern, true) {
+        match storage.get_at_path(&folder_path, key_pattern, true, &self.domain_manager) {
             // Recursive search
             Ok(results) => {
                 let mut found = false;
                 for (folder_path, key, val) in results {
                     found = true;
-                    let mut secret = val.decrypt(&self.cypher)?;
+                    let mut secret = val.decrypt(self.get_master_cypher())?;
                     let output = format!(
                         "{}: {}",
                         format_full_path(&folder_path, key, false),
@@ -238,9 +263,9 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_copy(&self, key: &str, storage: &StorageV5) -> Result<()> {
+    fn cmd_copy(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
         let current_path = self.get_current_path();
-        match storage.get_at_path(&current_path, key, true) {
+        match storage.get_at_path(&current_path, key, true, &self.domain_manager) {
             Ok(mut results) => {
                 let first = results.next();
                 let second = results.next();
@@ -267,12 +292,11 @@ impl InteractiveCli {
                     }
                     (Some((_, _, val)), None) => {
                         // Exactly one result - copy to clipboard
-                        let mut secret = val.decrypt(&self.cypher)?;
+                        let secret = val.decrypt(self.get_master_cypher())?;
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
                         )?;
-                        secret.zeroize();
                     }
                 }
             }
@@ -281,11 +305,12 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_history(&self, key: &str, storage: &StorageV5) -> Result<()> {
+    fn cmd_history(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
         let (folder_path, key_name) = parse_key_path(&self.get_current_path(), key);
-        if let Some(entries) = storage.history_at_path(&folder_path, key_name) {
+        if let Some(entries) = storage.history_at_path(&folder_path, key_name, &self.domain_manager)
+        {
             for entry in entries {
-                let mut secret = entry.encrypted_value().decrypt(&self.cypher)?;
+                let mut secret = entry.encrypted_value().decrypt(self.get_master_cypher())?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 secure_print(output, self.insecure_stdout)?;
@@ -296,9 +321,9 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_search(&self, pattern: &str, storage: &StorageV5) -> Result<()> {
+    fn cmd_search(&self, pattern: &str, storage: &mut StorageV5) -> Result<()> {
         let (folder_path, key_pattern) = parse_key_path(&self.get_current_path(), pattern);
-        match storage.search_at_path(&folder_path, key_pattern, true) {
+        match storage.search_at_path(&folder_path, key_pattern, true, &self.domain_manager) {
             // Recursive search
             Ok(keys) => {
                 for (folder_path, key) in keys {
@@ -315,9 +340,9 @@ impl InteractiveCli {
 
     fn cmd_delete(&self, key: &str, storage: &mut StorageV5) -> Result<()> {
         let (folder_path, key_name) = parse_key_path(&self.get_current_path(), key);
-        if storage.delete_at_path(&folder_path, key_name) {
+        if storage.delete_at_path(&folder_path, key_name, &self.domain_manager) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
-            save_storage_v5(&self.cypher, storage, &self.filename)?;
+            save_storage_v5(&self.domain_manager, storage, &self.filename)?;
         } else {
             bail!("No such key '{key}' found");
         }
@@ -326,12 +351,12 @@ impl InteractiveCli {
 
     fn cmd_mkdir(&self, folder_name: &str, storage: &mut StorageV5) -> Result<()> {
         let (parent_path, new_folder_name) = parse_key_path(&self.get_current_path(), folder_name);
-        storage.mkdir(&parent_path, new_folder_name)?;
+        storage.mkdir(&parent_path, new_folder_name, &self.domain_manager)?;
         secure_print(
             format!("Folder '{folder_name}' created"),
             self.insecure_stdout,
         )?;
-        save_storage_v5(&self.cypher, storage, &self.filename)?;
+        save_storage_v5(&self.domain_manager, storage, &self.filename)?;
         Ok(())
     }
 
@@ -388,7 +413,14 @@ impl InteractiveCli {
                 (folder, Some(name))
             };
 
-            storage.move_item(parent_path, item_name, &dest_parent, dest_name)?;
+            storage.move_item(
+                parent_path,
+                item_name,
+                &dest_parent,
+                dest_name,
+                None,
+                &self.domain_manager,
+            )?;
 
             let final_name = dest_name.unwrap_or(item_name.as_str());
             let dest_display = format_full_path(&dest_parent, final_name, *is_folder);
@@ -423,7 +455,14 @@ impl InteractiveCli {
 
             // Move all items
             for (parent_path, item_name, _) in &matches {
-                storage.move_item(parent_path, item_name, &dest_folder, None)?;
+                storage.move_item(
+                    parent_path,
+                    item_name,
+                    &dest_folder,
+                    None,
+                    None,
+                    &self.domain_manager,
+                )?;
             }
 
             let message = match (key_count, folder_count) {
@@ -444,7 +483,7 @@ impl InteractiveCli {
             secure_print(message, self.insecure_stdout)?;
         }
 
-        save_storage_v5(&self.cypher, storage, &self.filename)?;
+        save_storage_v5(&self.domain_manager, storage, &self.filename)?;
         Ok(())
     }
 

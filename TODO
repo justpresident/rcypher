@@ -18,25 +18,32 @@
 - Default encryption domain (0) uses the master key (same as storage v4)
 
 ⏳ **TODO: Simplified encryption approach**
-- Non-default domains encrypt secrets/folders with a custom key requiring password
-- Can be attached to individual secrets or entire folders
-- Encrypted folders are VISIBLE as encrypted folders (no hiding with placeholder values)
-- When locked: `get` returns "**LOCKED**" indicator
-- When unlocked: folder becomes navigable, contents accessible
-- "unlock {folder}" command asks for password, decrypts and populates in-memory
-- "lock {folder}" command clears decrypted data from memory
+- ✅ Non-default domains encrypt secrets/folders with a custom key requiring password
+- ✅ Can be attached to individual secrets or entire folders
+- ✅ Encrypted folders are VISIBLE as encrypted folders (no hiding with placeholder values)
+- ✅ Domain keys are session-only (not persisted to disk)
+- ✅ Critical: `decrypted_folder` field never serialized (verified by test)
+- When domain locked: items show "**LOCKED**" indicator
+- When domain unlocked: items decrypt lazily on access (folders navigable, secrets readable)
 - Delete operation works uniformly for secrets, folders, and encrypted folders
 
-**Simplified Use Case**
-Encryption:
-- User calls "lock {folder/key}" which asks for encryption domain and password
-- Content is immediately encrypted and stored encrypted
-- Locked items show "**LOCKED**" when accessed
+**Command Semantics**
+Domain Management:
+- `unlock <domain>` - Unlocks encryption domain by asking for password, loads cypher into memory
+- Domain remains unlocked for the session (until process exits)
+- Domain keys never persisted to disk (re-enter password each session)
+- No `unlock <item>` command - items decrypt automatically when accessed if domain unlocked
 
-Decryption:
-- "unlock {item}" asks for password
-- Decrypts into memory, making content accessible
-- Subsequent commands work normally on decrypted content
+Changing Encryption Domains:
+- `lock <item> <domain>` - Changes item's encryption domain and re-encrypts
+- Re-encryption uses the cypher from the target domain (must be unlocked first)
+- Works for both individual secrets and entire folders
+
+Accessing Encrypted Content:
+- Decryption happens lazily on first access (not during domain unlock)
+- If domain locked: items show "**LOCKED**" when accessed
+- If domain unlocked: items decrypt automatically on access
+- Encrypted folders become navigable once their domain is unlocked
 
 ## move command
 ✅ **COMPLETED: move command**

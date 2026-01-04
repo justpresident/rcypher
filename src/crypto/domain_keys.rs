@@ -45,6 +45,11 @@ impl EncryptionDomainManager {
         Self { domains }
     }
 
+    pub fn get_master_cypher(&self) -> &Cypher {
+        self.get_cypher(MASTER_DOMAIN_ID)
+            .expect("Always have master cypher")
+    }
+
     /// Unlocks an encryption domain by deriving a key from the provided password
     ///
     /// # Arguments

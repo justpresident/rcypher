@@ -1,5 +1,4 @@
-use rcypher::save_storage_v5;
-use rcypher::{Cypher, CypherVersion, EncryptedValue, EncryptionKey, StorageV5};
+use rcypher::{Cypher, CypherVersion, EncryptionKey, StorageV4, save_storage_v4};
 use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
@@ -369,21 +368,11 @@ fn test_upgrade_storage() {
         EncryptionKey::from_password(CypherVersion::LegacyWithoutKdf, "test_password").unwrap();
     let legacy_cypher = Cypher::new(legacy_key);
 
-    let mut storage = StorageV5::new();
-    storage.put_at_path(
-        "/",
-        "key1".to_string(),
-        EncryptedValue::encrypt(&legacy_cypher, "value1").unwrap(),
-        0,
-    );
-    storage.put_at_path(
-        "/",
-        "key2".to_string(),
-        EncryptedValue::encrypt(&legacy_cypher, "value2").unwrap(),
-        0,
-    );
+    let mut storage = StorageV4::new();
+    storage.put("key1".to_string(), "value1".into());
+    storage.put("key2".to_string(), "value2".into());
 
-    save_storage_v5(&legacy_cypher, &storage, &storage_path).unwrap();
+    save_storage_v4(&legacy_cypher, &storage, &storage_path).unwrap();
 
     // Run upgrade command
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
@@ -397,6 +386,7 @@ fn test_upgrade_storage() {
         .output()
         .unwrap();
 
+    println!("{:?}", String::from_utf8(output.stderr));
     assert!(output.status.success());
 
     // Verify the file was upgraded by trying to read it with new format

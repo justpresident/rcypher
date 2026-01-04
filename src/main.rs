@@ -23,8 +23,8 @@ use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::cli::utils::get_password;
 use rcypher::{
-    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, StorageV5,
-    ThreadStopGuard, load_storage_v5, save_storage_v5,
+    Argon2Params, Cypher, CypherVersion, EncryptionDomainManager, EncryptionKey, MASTER_DOMAIN_ID,
+    Spinner, StorageV5, ThreadStopGuard, load_storage_v5, save_storage_v5,
 }; // Import from lib
 use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -157,18 +157,25 @@ fn run_upgrade_storage(
 
     let mut new_storage = StorageV5::new();
     let new_cypher = Cypher::new(new_key);
+    let new_domain_manager = EncryptionDomainManager::new(new_cypher);
+
     for (key, item) in old_storage.root.secrets() {
         if let Some(entries) = item.get_entries() {
             for entry in entries {
-                let mut secret = entry.encrypted_value().decrypt(&old_cypher)?;
-                let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
-                new_storage.put_at_path("/", key.clone(), new_value, entry.timestamp);
-                secret.zeroize();
+                let secret = entry.encrypted_value().decrypt(&old_cypher)?;
+                new_storage.put_at_path(
+                    "/",
+                    key.clone(),
+                    &secret,
+                    entry.timestamp,
+                    MASTER_DOMAIN_ID,
+                    &new_domain_manager,
+                )?;
             }
         }
     }
 
-    save_storage_v5(&new_cypher, &new_storage, &params.filename)?;
+    save_storage_v5(&new_domain_manager, &mut new_storage, &params.filename)?;
 
     spinner.finish_and_clear();
     Ok(())
@@ -176,11 +183,12 @@ fn run_upgrade_storage(
 
 fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
     let cypher = Cypher::new(key);
+    let domain_manager = EncryptionDomainManager::new(cypher);
 
     let mut interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
-        cypher,
+        domain_manager,
         params.filename.clone(),
     );
     interactive_cli.run()?;
