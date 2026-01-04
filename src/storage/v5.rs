@@ -956,8 +956,6 @@ impl FolderItem {
         target_domain_id: u32,
         domain_manager: &EncryptionDomainManager,
     ) -> Result<()> {
-        
-
         match self {
             Self::Folder { folder, name } => {
                 // Convert regular folder to encrypted folder
@@ -1434,7 +1432,7 @@ fn sort_folder_entries(folder: &mut Folder) {
 // Migration from V4 to V5
 // ============================================================================
 
-use super::store::StorageV4;
+use super::v4::StorageV4;
 use super::value::ValueEntry;
 
 /// Migrate V4 storage to V5 format

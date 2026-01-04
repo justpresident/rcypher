@@ -10,7 +10,7 @@ use crate::EncryptionDomainManager;
 use crate::crypto::Cypher;
 use crate::version::StoreVersion;
 
-use super::store::StorageV4;
+use super::v4::StorageV4;
 use super::v5::{self, StorageV5};
 use super::value::{EncryptedValue, ValueEntry};
 
