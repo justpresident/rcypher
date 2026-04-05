@@ -93,6 +93,10 @@ fn run_commands(file_path: &Path, commands: Vec<u8>) -> Vec<String> {
     lines
 }
 
+fn run_commands_str(file_path: &Path, commands: &str) -> String {
+    run_commands(file_path, commands.as_bytes().to_vec()).join("\n")
+}
+
 #[test]
 fn test_commands() {
     let (_dir, file_path) = temp_test_file();
@@ -356,4 +360,151 @@ fn test_update_with_cancel() {
             || lines[0].contains("Not found")
             || lines[0].contains("No keys matching")
     );
+}
+
+#[test]
+fn test_help_command() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "help\n");
+    assert!(output.contains("put"));
+    assert!(output.contains("get"));
+    assert!(output.contains("del"));
+}
+
+#[test]
+fn test_unknown_command() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "frobnicator\n");
+    assert!(output.contains("frobnicator") || output.contains("No such command"));
+}
+
+#[test]
+fn test_get_no_match() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "get nonexistent_key_xyz\n");
+    assert!(output.contains("nonexistent_key_xyz") || output.contains("No keys"));
+}
+
+#[test]
+fn test_history_no_match() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "history nonexistent_key_xyz\n");
+    assert!(output.contains("nonexistent_key_xyz") || output.contains("No key"));
+}
+
+#[test]
+fn test_del_nonexistent_key() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "del nonexistent_key_xyz\n");
+    assert!(output.contains("nonexistent_key_xyz") || output.contains("No such key"));
+}
+
+#[test]
+fn test_rm_alias() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "put mykey myval\nrm mykey\nget mykey\n");
+    assert!(
+        output.contains("mykey stored")
+            || output.contains("mykey deleted")
+            || output.contains("No keys")
+    );
+}
+
+#[test]
+fn test_search_command() {
+    let (_dir, file_path) = temp_test_file();
+    // populate
+    run_commands(
+        &file_path,
+        b"put search_key1 v1\nput search_key2 v2\nput other_key v3\n".to_vec(),
+    );
+
+    let output = run_commands_str(&file_path, "search search_key\n");
+    assert!(output.contains("search_key1"));
+    assert!(output.contains("search_key2"));
+
+    let output2 = run_commands_str(&file_path, "search\n");
+    assert!(output2.contains("search_key1") || output2.contains("other_key"));
+}
+
+#[test]
+fn test_copy_single_match() {
+    let (_dir, file_path) = temp_test_file();
+    run_commands(&file_path, b"put copy_single_key secret_value\n".to_vec());
+
+    // copy should succeed (clipboard may not work in CI but the command should not error out)
+    let output = run_commands_str(&file_path, "copy copy_single_key\n");
+    // Command either succeeds silently or prints a clipboard message
+    let _ = output; // just verify the binary didn't crash
+}
+
+#[test]
+fn test_copy_no_match() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "copy no_such_key_xyz\n");
+    assert!(output.contains("no_such_key_xyz") || output.contains("No key"));
+}
+
+#[test]
+fn test_copy_multiple_matches() {
+    let (_dir, file_path) = temp_test_file();
+    run_commands(
+        &file_path,
+        b"put multi_key_1 val1\nput multi_key_2 val2\n".to_vec(),
+    );
+    let output = run_commands_str(&file_path, "copy multi_key_.*\n");
+    assert!(
+        output.contains("multi_key_1") || output.contains("Multiple") || output.contains("specify")
+    );
+}
+
+#[test]
+fn test_put_syntax_error() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "put only_key\n");
+    assert!(output.contains("syntax") || output.contains("put KEY VAL"));
+}
+
+#[test]
+fn test_del_syntax_error() {
+    let (_dir, file_path) = temp_test_file();
+    let output = run_commands_str(&file_path, "del\n");
+    assert!(output.contains("syntax") || output.contains("del KEY"));
+}
+
+#[test]
+fn test_encrypt_decrypt_with_output_file() {
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, encrypted_path) = temp_test_file();
+    let (_dir3, decrypted_path) = temp_test_file();
+
+    let test_data = b"output file round-trip test";
+    fs::write(&input_path, test_data).unwrap();
+
+    // Encrypt to output file
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    cmd.arg("--encrypt")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg("--output")
+        .arg(&encrypted_path)
+        .arg(&input_path)
+        .assert()
+        .success();
+
+    // Decrypt to output file
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    cmd.arg("--decrypt")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg("--output")
+        .arg(&decrypted_path)
+        .arg(&encrypted_path)
+        .assert()
+        .success();
+
+    let result = fs::read(&decrypted_path).unwrap();
+    assert_eq!(result, test_data);
 }

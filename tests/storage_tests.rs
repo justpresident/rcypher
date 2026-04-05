@@ -3,6 +3,24 @@ use std::ops::Add;
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+/// Build a minimal valid V4 serialized byte sequence with one entry.
+fn build_v4_entry(key: &[u8], value: &[u8]) -> Vec<u8> {
+    let mut data = Vec::new();
+    // version = 4
+    data.extend_from_slice(&4u16.to_be_bytes());
+    // count = 1
+    data.extend_from_slice(&1u32.to_be_bytes());
+    // key_len
+    data.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    data.extend_from_slice(key);
+    // val_len
+    data.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    data.extend_from_slice(value);
+    // timestamp
+    data.extend_from_slice(&0u32.to_be_bytes());
+    data
+}
+
 // Helper to create a temporary test file
 fn temp_test_file() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
@@ -383,4 +401,97 @@ fn test_very_long_key_value() {
         deserialized.data[&long_key][0].value.as_bytes(),
         long_value.as_bytes()
     );
+}
+
+// --- deserialize_storage_v4 error path tests ---
+
+#[test]
+fn test_deserialize_too_short_for_version() {
+    // Fewer than 2 bytes — StoreVersion::probe_data fails
+    let result = deserialize_storage(&[0x00]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deserialize_truncated_no_key_len() {
+    // version=4, count=1, but nothing after the 6-byte header
+    let mut data = vec![0x00u8, 0x04]; // version 4
+    data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
+    // no key_len bytes follow
+    let result = deserialize_storage(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deserialize_truncated_key_overflow() {
+    // version=4, count=1, key_len=50 but only 3 key bytes present
+    let mut data = vec![0x00u8, 0x04]; // version 4
+    data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
+    data.extend_from_slice(&50u16.to_be_bytes()); // key_len = 50
+    data.extend_from_slice(b"abc"); // only 3 bytes of key
+    let result = deserialize_storage(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deserialize_truncated_value_len_missing() {
+    // version=4, count=1, full key, but only 2 bytes available for the 4-byte val_len
+    let mut data = vec![0x00u8, 0x04]; // version 4
+    data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
+    data.extend_from_slice(&3u16.to_be_bytes()); // key_len = 3
+    data.extend_from_slice(b"key"); // key
+    data.extend_from_slice(&[0x00, 0x00]); // only 2 of 4 val_len bytes
+    let result = deserialize_storage(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deserialize_truncated_value_overflow() {
+    // version=4, count=1, key="k", val_len=100 but no value bytes
+    let mut data = vec![0x00u8, 0x04]; // version 4
+    data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
+    data.extend_from_slice(&1u16.to_be_bytes()); // key_len = 1
+    data.push(b'k'); // key
+    data.extend_from_slice(&100u32.to_be_bytes()); // val_len = 100
+    // no value bytes
+    let result = deserialize_storage(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deserialize_truncated_timestamp_missing() {
+    // version=4, count=1, key="k", val="v", only 2 of 4 timestamp bytes
+    let mut data = vec![0x00u8, 0x04]; // version 4
+    data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
+    data.extend_from_slice(&1u16.to_be_bytes()); // key_len = 1
+    data.push(b'k'); // key
+    data.extend_from_slice(&1u32.to_be_bytes()); // val_len = 1
+    data.push(b'v'); // value
+    data.extend_from_slice(&[0x00, 0x00]); // only 2 of 4 timestamp bytes
+    let result = deserialize_storage(&data);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_deserialize_round_trip_via_builder() {
+    // Verify the build_v4_entry helper produces parseable data
+    let data = build_v4_entry(b"hello", b"world");
+    let storage = deserialize_storage(&data).unwrap();
+    assert_eq!(storage.data.len(), 1);
+    assert_eq!(storage.data["hello"][0].value.as_bytes(), b"world");
+}
+
+#[test]
+fn test_encrypted_value_display() {
+    // Uses the debug_assertions From<&str> impl
+    let val: EncryptedValue = "hello".into();
+    let s = format!("{val}");
+    assert!(s.contains("encrypted"));
+    assert!(s.contains("5")); // 5 bytes
+}
+
+#[test]
+fn test_storage_history_nonexistent() {
+    let storage = Storage::new();
+    assert!(storage.history("does_not_exist").is_none());
 }

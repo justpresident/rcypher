@@ -296,3 +296,54 @@ fn test_format_timestamp() {
     let formatted_zero = format_timestamp(0);
     assert_eq!(formatted_zero, "N/A");
 }
+
+#[test]
+fn test_cypher_version_probe_data_too_short() {
+    let result = CypherVersion::probe_data(&[]);
+    assert!(result.is_err());
+
+    let result = CypherVersion::probe_data(&[0x00]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cypher_version_probe_data_invalid_version() {
+    // Version 99 doesn't exist
+    let result = CypherVersion::probe_data(&[0x00, 0x63]);
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_cypher_version_probe_data_valid() {
+    // V7 = 7 = 0x0007
+    let result = CypherVersion::probe_data(&[0x00, 0x07]);
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap(), CypherVersion::V7WithKdf);
+}
+
+#[test]
+fn test_for_file_nonexistent_creates_new_key() {
+    let (_dir, path) = temp_test_file();
+    // File does not exist — should create a fresh key
+    let key = EncryptionKey::for_file_with_params("password", &path, &Argon2Params::insecure());
+    assert!(key.is_ok());
+}
+
+#[test]
+fn test_decrypt_file_too_small() {
+    let (_dir, path) = temp_test_file();
+    // Write a file that is too small to be valid
+    std::fs::write(&path, b"tiny").unwrap();
+
+    let cypher = Cypher::new(
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "test",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
+    );
+    let mut out = Vec::new();
+    let result = cypher.decrypt_file(&path, &mut out);
+    assert!(result.is_err());
+}
