@@ -291,17 +291,13 @@ fn main() -> Result<()> {
         let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
         password.zeroize();
         run_decrypt(&params, key)
-    } else if params.update_with.is_some() {
+    } else if let Some(update_file) = &params.update_with {
         let spinner = Spinner::new("Deriving encryption keys", params.quiet);
 
         let main_key =
             EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
 
         spinner.set_message("Deriving encryption key for update file");
-        let update_file = params
-            .update_with
-            .as_ref()
-            .expect("update_with must be set");
         let update_key =
             EncryptionKey::for_file_with_params(&password, update_file, &argon2_params)?;
         password.zeroize();
