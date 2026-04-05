@@ -20,15 +20,19 @@
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
+use nix::sys::signal::{SigEvent, SigSet, SigevNotify, SigmaskHow, Signal, pthread_sigmask};
+use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
+use nix::time::ClockId;
 use rcypher::cli::utils::get_password;
-use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Spinner, ThreadStopGuard}; // Import from lib
+use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Spinner};
 use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
 #[derive(Parser)]
@@ -130,7 +134,12 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
     Ok(())
 }
 
-fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
+fn run_interactive(
+    params: &CliParams,
+    key: EncryptionKey,
+    last_activity: Arc<AtomicU64>,
+    last_security_check: Arc<AtomicU64>,
+) -> Result<()> {
     let cypher = Cypher::new(key);
 
     let interactive_cli = cli::InteractiveCli::new(
@@ -138,6 +147,8 @@ fn run_interactive(params: &CliParams, key: EncryptionKey) -> Result<()> {
         params.insecure_stdout,
         cypher,
         params.filename.clone(),
+        last_activity,
+        last_security_check,
     );
     interactive_cli.run()?;
     Ok(())
@@ -154,29 +165,90 @@ fn get_argon2_params(params: &CliParams) -> Argon2Params {
     }
 }
 
-// Start background debugger monitoring thread
-// Returns a stop guard that needs to be held until the exit of the main thread
-fn start_background_debugger_checks() -> ThreadStopGuard {
-    let stop_flag = Arc::new(AtomicBool::new(false));
-    let stop_flag_clone = stop_flag.clone();
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
-    let handle = std::thread::spawn(move || {
+/// RAII guard that deletes the POSIX timer on drop.
+struct SecurityTimerGuard {
+    _timer: Timer,
+}
+
+/// Start a POSIX interval timer that fires SIGALRM every second.
+///
+/// A dedicated `sigwait` thread receives each tick and performs two checks:
+///   1. Debugger detection — exits immediately if one is found.
+///   2. Idle timeout — exits if no successful command has been recorded in
+///      `last_activity` within `rcypher::cli::STANDBY_TIMEOUT` seconds.
+///      The idle check is skipped while `last_activity` is 0 (non-interactive
+///      modes where the value is never set).
+///
+/// SIGALRM is blocked in the calling thread before the timer is armed, so
+/// every subsequent thread inherits the blocked mask and the signal is
+/// consumed only by the dedicated handler thread via `sigwait`.
+fn start_security_timer(
+    last_activity: Arc<AtomicU64>,
+    last_security_check: Arc<AtomicU64>,
+) -> Result<SecurityTimerGuard> {
+    // Block SIGALRM in this thread; all threads spawned afterwards inherit
+    // the mask, ensuring only our sigwait thread receives the signal.
+    let mut alrm_mask = SigSet::empty();
+    alrm_mask.add(Signal::SIGALRM);
+    pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&alrm_mask), None)?;
+
+    let sigevent = SigEvent::new(SigevNotify::SigevSignal {
+        signal: Signal::SIGALRM,
+        si_value: 0,
+    });
+    let mut timer = Timer::new(ClockId::CLOCK_MONOTONIC, sigevent)?;
+    timer.set(
+        Expiration::Interval(Duration::from_secs(1).into()),
+        TimerSetTimeFlags::empty(),
+    )?;
+
+    std::thread::spawn(move || {
+        let mut wait_mask = SigSet::empty();
+        wait_mask.add(Signal::SIGALRM);
+
+        let mut prev_time = SystemTime::now();
+
         loop {
-            // Check if we should stop
-            if stop_flag_clone.load(Ordering::Relaxed) {
-                break;
+            // Block until the OS delivers the next SIGALRM tick.
+            if wait_mask.wait() != Ok(Signal::SIGALRM) {
+                continue;
             }
 
-            std::thread::sleep(std::time::Duration::from_millis(100));
+            let now = SystemTime::now();
+
+            // Verify real time moved forward since the last tick.
+            // duration_since returns Err if now < prev (clock went backward),
+            // or Ok(Duration::ZERO) if frozen. Both map to zero via
+            // unwrap_or_default, and is_zero() catches both cases.
+            if now.duration_since(prev_time).unwrap_or_default().is_zero() {
+                std::process::exit(1);
+            }
+            prev_time = now;
+
+            // Record heartbeat timestamp so the interactive loop can detect
+            // if this thread stops running (e.g. paused by a debugger).
+            let now_secs = now.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            last_security_check.store(now_secs, Ordering::Relaxed);
 
             if is_debugger_attached() {
-                eprintln!("\nDebugger attached. Exiting for security.");
                 std::process::exit(1);
+            }
+
+            let last_secs = last_activity.load(Ordering::Relaxed);
+            if last_secs > 0 && now_secs.saturating_sub(last_secs) > rcypher::cli::STANDBY_TIMEOUT {
+                std::process::exit(0);
             }
         }
     });
 
-    ThreadStopGuard::new(stop_flag, handle)
+    Ok(SecurityTimerGuard { _timer: timer })
 }
 
 fn main() -> Result<()> {
@@ -187,18 +259,19 @@ fn main() -> Result<()> {
 
     // Enable ptrace self-protection to prevent debuggers from attaching
     if !params.insecure_allow_debugging
-        && let Err(e) = enable_ptrace_protection()
+        && let Err(_) = enable_ptrace_protection()
     {
-        eprintln!("Security error: {e}");
         std::process::exit(1);
     }
 
     if is_debugger_attached() {
-        eprintln!("Debugger detected. Exiting for security.");
         std::process::exit(1);
     }
 
-    let _dbg_stop_guard = start_background_debugger_checks();
+    let last_activity = Arc::new(AtomicU64::new(0));
+    // Initialise to now so the watchdog doesn't fire before the first tick.
+    let last_security_check = Arc::new(AtomicU64::new(current_unix_secs()));
+    let _security_guard = start_security_timer(last_activity.clone(), last_security_check.clone())?;
 
     let argon2_params = get_argon2_params(&params);
     let mut password = params.insecure_password.take().unwrap_or_else(|| {
@@ -250,6 +323,6 @@ fn main() -> Result<()> {
         spinner.finish_and_clear();
 
         password.zeroize();
-        run_interactive(&params, key)
+        run_interactive(&params, key, last_activity, last_security_check)
     }
 }

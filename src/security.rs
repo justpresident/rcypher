@@ -50,8 +50,16 @@ pub fn enable_ptrace_protection() -> Result<()> {
                         // Child was killed by signal, exit with signal number
                         unsafe { _exit(128 + signal as i32) };
                     }
+                    Ok(WaitStatus::Stopped(pid, _)) => {
+                        // Child should never receive SIGSTOP in normal operation.
+                        // Treat any external stop as an attack — kill the child
+                        // and exit. As the tracer we intercept the stop before
+                        // threads actually freeze, so this terminates cleanly.
+                        let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
+                        unsafe { _exit(1) };
+                    }
                     Ok(_) => {
-                        // Other wait status (stopped, continued, etc) - keep waiting
+                        // Other wait status (PtraceEvent, Continued, etc) - keep waiting
                     }
                     Err(e) => {
                         eprintln!("waitpid failed: {e}");

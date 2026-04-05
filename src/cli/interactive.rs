@@ -2,7 +2,6 @@ use crate::Cypher;
 use crate::EncryptedValue;
 use crate::Storage;
 use crate::cli::CLIPBOARD_TTL_MS;
-use crate::cli::STANDBY_TIMEOUT;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
 use crate::is_debugger_attached;
@@ -14,8 +13,9 @@ use rustyline::Config;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::SystemTime;
+use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
 pub struct InteractiveCli {
@@ -23,6 +23,8 @@ pub struct InteractiveCli {
     insecure_stdout: bool,
     cypher: Cypher,
     filename: PathBuf,
+    last_activity: Arc<AtomicU64>,
+    last_security_check: Arc<AtomicU64>,
 }
 
 impl InteractiveCli {
@@ -31,12 +33,16 @@ impl InteractiveCli {
         insecure_stdout: bool,
         cypher: Cypher,
         filename: PathBuf,
+        last_activity: Arc<AtomicU64>,
+        last_security_check: Arc<AtomicU64>,
     ) -> Self {
         Self {
             prompt,
             insecure_stdout,
             cypher,
             filename,
+            last_activity,
+            last_security_check,
         }
     }
 
@@ -55,7 +61,9 @@ impl InteractiveCli {
         let mut rl = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
 
-        let mut last_use_time = SystemTime::now();
+        // Signal to the security timer that idle timeout tracking has started
+        self.last_activity
+            .store(current_unix_secs(), Ordering::Relaxed);
 
         rl.clear_screen()?;
         loop {
@@ -65,14 +73,14 @@ impl InteractiveCli {
 
             let readline = rl.readline(&self.prompt);
 
-            // Check timeout
-            if last_use_time
-                .elapsed()
-                .expect("time moves forward")
-                .as_secs()
-                > STANDBY_TIMEOUT
-            {
-                break;
+            // Watchdog: if the security timer thread was paused (e.g. by a
+            // debugger), its heartbeat will be stale. Exit rather than
+            // allowing the session to continue without security enforcement.
+            let secs_since_check = current_unix_secs()
+                .saturating_sub(self.last_security_check.load(Ordering::Relaxed));
+            if secs_since_check > crate::cli::SECURITY_WATCHDOG_TIMEOUT_SECS {
+                clear_screen();
+                bail!("Security heartbeat missed — exiting");
             }
 
             match readline {
@@ -88,7 +96,8 @@ impl InteractiveCli {
                     if let Err(err) = self.process_cmd(line, &mut storage_guard) {
                         println!("{err}");
                     } else {
-                        last_use_time = SystemTime::now();
+                        self.last_activity
+                            .store(current_unix_secs(), Ordering::Relaxed);
                     }
 
                     input_line.zeroize();
@@ -255,6 +264,13 @@ impl InteractiveCli {
         }
         Ok(())
     }
+}
+
+fn current_unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn clear_screen() {
