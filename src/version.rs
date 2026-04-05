@@ -28,8 +28,6 @@ impl StoreVersion {
 #[derive(Clone, Debug, TryFromPrimitive, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum CypherVersion {
-    /// Legacy version with simple password padding (no KDF)
-    LegacyWithoutKdf = 2u16,
     /// Modern version with Argon2id KDF and HMAC
     #[default]
     V7WithKdf = 7u16,

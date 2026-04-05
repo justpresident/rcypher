@@ -21,10 +21,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use rcypher::cli::utils::get_password;
-use rcypher::{
-    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Spinner, Storage,
-    ThreadStopGuard, load_storage, serialize_storage,
-}; // Import from lib
+use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Spinner, ThreadStopGuard}; // Import from lib
 use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
 use std::io;
@@ -32,7 +29,6 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tempfile::NamedTempFile;
 use zeroize::Zeroize;
 
 #[derive(Parser)]
@@ -83,11 +79,6 @@ struct CliParams {
     #[arg(long, default_value = "cypher > ")]
     prompt: String,
 
-    /// Upgrade file with stored secrets to the latest supported encryption format. The file will
-    /// be updated in place
-    #[arg(short, long, action)]
-    upgrade_storage: bool,
-
     /// Update storage with entries from another encrypted storage file (e.g., Dropbox conflict copy).
     /// Entries with newer timestamps will be merged into the main file
     #[arg(long)]
@@ -119,10 +110,6 @@ fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
 }
 
 fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
-    if key.version < CypherVersion::default() && !params.quiet {
-        println!("File is encrypted with deprecated algorithm. Please reencrypt now.");
-    }
-
     let cypher = Cypher::new(key);
 
     if params.output == "-" {
@@ -140,42 +127,6 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
         cypher.decrypt_file(&params.filename, &mut *lock)?;
         lock.flush()?;
     }
-    Ok(())
-}
-
-fn run_upgrade_storage(
-    params: &CliParams,
-    old_key: EncryptionKey,
-    new_key: EncryptionKey,
-) -> Result<()> {
-    let spinner = Spinner::new("Converting", params.quiet);
-
-    let old_cypher = Cypher::new(old_key);
-    let old_storage = load_storage(&old_cypher, &params.filename)?;
-
-    let mut new_storage = Storage::new();
-    let new_cypher = Cypher::new(new_key);
-    for (key, entries) in old_storage.data {
-        for entry in entries {
-            let mut secret = entry.value.decrypt(&old_cypher)?;
-            let new_value = EncryptedValue::encrypt(&new_cypher, &secret)?;
-            new_storage.put_ts(key.clone(), new_value, entry.timestamp);
-            secret.zeroize();
-        }
-    }
-    let dir = &params
-        .filename
-        .parent()
-        .expect("Can't get parent dir of a file");
-    let mut temp = NamedTempFile::new_in(dir)?;
-
-    let serialized = serialize_storage(&new_storage);
-    let encrypted = new_cypher.encrypt(&serialized)?;
-
-    temp.write_all(&encrypted)?;
-    temp.persist(&params.filename)?;
-
-    spinner.finish_and_clear();
     Ok(())
 }
 
@@ -291,23 +242,6 @@ fn main() -> Result<()> {
             update_key,
             params.insecure_stdout,
         )
-    } else if params.upgrade_storage {
-        let spinner = Spinner::new("Deriving old encryption keys", params.quiet);
-
-        let old_key =
-            EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
-
-        spinner.set_message("Deriving new encryption keys");
-        let new_key = EncryptionKey::from_password_with_params(
-            CypherVersion::default(),
-            &password,
-            &argon2_params,
-        )?;
-        password.zeroize();
-
-        spinner.finish_and_clear();
-
-        run_upgrade_storage(&params, old_key, new_key)
     } else {
         let spinner = Spinner::new("Deriving encryption key", params.quiet);
 
@@ -315,37 +249,7 @@ fn main() -> Result<()> {
 
         spinner.finish_and_clear();
 
-        // Check if storage needs upgrade in interactive mode
-        if key.version < CypherVersion::default() && !params.quiet {
-            println!("File is encrypted with deprecated algorithm.");
-            print!("Would you like to upgrade it now? (y/n): ");
-            io::stdout().flush()?;
-
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-
-            if input.trim().eq_ignore_ascii_case("y") || input.trim().eq_ignore_ascii_case("yes") {
-                let spinner = Spinner::new("Deriving new encryption keys", params.quiet);
-
-                let new_key = EncryptionKey::from_password_with_params(
-                    CypherVersion::default(),
-                    &password,
-                    &argon2_params,
-                )?;
-                password.zeroize();
-
-                spinner.finish_and_clear();
-
-                run_upgrade_storage(&params, key, new_key.clone())?;
-
-                run_interactive(&params, new_key)
-            } else {
-                password.zeroize();
-                run_interactive(&params, key)
-            }
-        } else {
-            password.zeroize();
-            run_interactive(&params, key)
-        }
+        password.zeroize();
+        run_interactive(&params, key)
     }
 }

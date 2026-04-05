@@ -5,7 +5,7 @@ use std::mem::size_of;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use cbc::cipher::{BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cbc::cipher::KeyIvInit;
 use hmac::Mac;
 use rand::TryRngCore;
 use zeroize::Zeroizing;
@@ -78,35 +78,8 @@ impl Cypher {
         }
 
         match self.key.version() {
-            CypherVersion::LegacyWithoutKdf => self.encrypt_legacy(data),
             CypherVersion::V7WithKdf => self.encrypt_v7(data),
         }
-    }
-
-    fn encrypt_legacy(&self, data: &[u8]) -> Result<Vec<u8>> {
-        let mut result = Vec::new();
-
-        // Pad data to block size
-        let pad_len = calculate_padding(data.len());
-
-        // Write header: version (2 bytes) + pad_len (1 byte)
-        result.extend_from_slice(&(CypherVersion::LegacyWithoutKdf as u16).to_be_bytes());
-        result.push(pad_len);
-
-        // Prepare data with padding (zeros for legacy)
-        let mut padded_data = data.to_vec();
-        padded_data.extend(std::iter::repeat_n(0, pad_len as usize));
-        let len = padded_data.len();
-
-        // Encrypt with zero IV (legacy behavior)
-        let iv = BlockBytes::default();
-        let cipher = Aes256CbcEnc::new(self.key.as_bytes().into(), &iv.into());
-        let encrypted = cipher
-            .encrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut padded_data, len)
-            .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
-
-        result.extend_from_slice(encrypted);
-        Ok(result)
     }
 
     /// Generic helper for V7 encryption that works with any Reader and Writer
@@ -165,9 +138,6 @@ impl Cypher {
         }
 
         match self.version() {
-            CypherVersion::LegacyWithoutKdf => {
-                bail!("Encryption with legacy version is not supported")
-            }
             CypherVersion::V7WithKdf => self.encrypt_file_v7(path, out),
         }
     }
@@ -189,30 +159,8 @@ impl Cypher {
         }
 
         match self.key.version() {
-            CypherVersion::LegacyWithoutKdf => self.decrypt_legacy(data),
             CypherVersion::V7WithKdf => self.decrypt_v7(data),
         }
-    }
-
-    fn decrypt_legacy(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        let pad_len = data[2] as usize;
-        if pad_len > BLOCK_SIZE {
-            bail!("Invalid padding length: {pad_len}");
-        }
-        let mut encrypted = data[3..].to_vec();
-
-        let iv = BlockBytes::default();
-        let cipher = Aes256CbcDec::new(self.key.as_bytes().into(), &iv.into());
-        let decrypted = cipher
-            .decrypt_padded_mut::<cipher::block_padding::NoPadding>(&mut encrypted)
-            .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
-
-        let mut result = decrypted.to_vec();
-        if pad_len > 0 && pad_len <= result.len() {
-            result.truncate(result.len() - pad_len);
-        }
-
-        Ok(Zeroizing::from(result))
     }
 
     /// Generic helper for V7 decryption that works with any Reader and Writer
@@ -283,12 +231,8 @@ impl Cypher {
         }
 
         match self.version() {
-            CypherVersion::LegacyWithoutKdf => {
-                bail!("Legacy encryption is not supported for files")
-            }
-            CypherVersion::V7WithKdf => self.decrypt_file_v7(input_path, out)?,
+            CypherVersion::V7WithKdf => self.decrypt_file_v7(input_path, out),
         }
-        Ok(())
     }
 
     fn decrypt_file_v7<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {

@@ -32,9 +32,6 @@ impl EncryptedValue {
     /// Creates an encrypted value from plaintext
     pub fn encrypt(cypher: &Cypher, plaintext: &str) -> Result<Self> {
         match cypher.version() {
-            CypherVersion::LegacyWithoutKdf => Ok(Self {
-                ciphertext: plaintext.to_string().into(),
-            }),
             CypherVersion::V7WithKdf => {
                 let ciphertext = cypher.encrypt(plaintext.as_bytes())?;
                 Ok(Self { ciphertext })
@@ -45,12 +42,8 @@ impl EncryptedValue {
     /// Decrypts the value temporarily (result is zeroized after use)
     pub fn decrypt(&self, cypher: &Cypher) -> Result<Zeroizing<String>> {
         match cypher.version() {
-            CypherVersion::LegacyWithoutKdf => {
-                Ok(Zeroizing::new(String::from_utf8(self.ciphertext.clone())?))
-            }
             CypherVersion::V7WithKdf => {
                 let mut decrypted_bytes = cypher.decrypt(&self.ciphertext)?;
-
                 let bytes = std::mem::take(&mut *decrypted_bytes);
                 Ok(Zeroizing::new(String::from_utf8(bytes)?))
             }

@@ -74,19 +74,6 @@ impl EncryptionKey {
         argon2_params: &Argon2Params,
     ) -> Result<Self> {
         match version {
-            CypherVersion::LegacyWithoutKdf => {
-                let mut key = [b'~'; KEY_LEN];
-                let bytes = password.as_bytes();
-                let len = bytes.len().min(KEY_LEN);
-
-                key[..len].copy_from_slice(&bytes[..len]);
-
-                Ok(Self {
-                    version,
-                    key: Zeroizing::new(key),
-                    ..Default::default()
-                })
-            }
             CypherVersion::V7WithKdf => {
                 let mut salt = SaltBytes::default();
                 rand::rngs::OsRng.try_fill_bytes(&mut salt)?;
@@ -148,10 +135,7 @@ impl EncryptionKey {
     ) -> Result<Self> {
         let version = CypherVersion::probe_file(path)?;
 
-        let key = match version {
-            CypherVersion::LegacyWithoutKdf => {
-                Self::from_password_with_params(version, password, argon2_params)?
-            }
+        match version {
             CypherVersion::V7WithKdf => {
                 if !fs::exists(path)? {
                     return Self::from_password_with_params(version, password, argon2_params);
@@ -163,11 +147,9 @@ impl EncryptionKey {
                 let header: Version7Header =
                     bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
                 header.validate()?;
-                Self::from_password_with_salt(version, password, &header.salt, argon2_params)?
+                Self::from_password_with_salt(version, password, &header.salt, argon2_params)
             }
-        };
-
-        Ok(key)
+        }
     }
 
     pub fn as_bytes(&self) -> &KeyBytes {
