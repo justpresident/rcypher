@@ -12,6 +12,7 @@
 mod factor;
 mod format;
 mod keyslot;
+mod parser;
 mod policy;
 
 pub use format::{
