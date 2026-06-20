@@ -1,0 +1,119 @@
+# taska configuration
+#
+# Created by `ta init`. Edit freely - `ta init` will not overwrite this file
+# once it exists. Missing keys fall back to the defaults shown below.
+
+[compaction]
+# `ta compact` folds old events into the baseline snapshot to keep the log
+# small. These settings control how much recent history stays in the log.
+#
+# Recent events must be retained: the git merge driver reconciles divergent
+# branches from the events still in the log, so anything already folded into the
+# baseline can no longer be reconciled. Keep enough history to cover your
+# longest-lived branch.
+#
+# Keep at least this many of the most recent events (minimum 300); also
+# the minimum log size before compaction does anything.
+keep_events = 5000
+# Also keep every event from at least this many days back (0 disables the time
+# window). An event is retained if it is recent by either rule.
+keep_days = 30
+
+[workflow]
+# The DISPLAY name of the status field, and the value that marks a task
+# complete. `ta list --ready` treats a dependency as satisfied once it reaches
+# `done_status`. On disk the status always lives under the canonical key
+# `status`, so renaming this is free at any time (no data migration) - just
+# update [display] columns to the new name too.
+status_field = "status"
+done_status = "closed"
+# Status stamped onto a new task when `ta create` doesn't set one. Set to "" to
+# create statusless tasks (the status field stays absent until you set it).
+default_status = "todo"
+# DISPLAY name of the task-type discriminator used by [task_types] schemas
+# (`ta create x type=bug`). Stored canonically as `task_type`, so renaming this
+# is free, like status_field.
+type_field = "type"
+# Read commands print ONE warning when the store holds tasks that don't conform
+# to their [task_types] schema (old data is read-tolerated by design; writes to
+# such a task must bring it into conformance). Set false to silence.
+warn_nonconforming = true
+# Tasks WITHOUT a type while [task_types] schemas are declared: "allow"
+# (sanctioned - untouched by schemas, never reported), "warn" (tolerated, but
+# counted in the non-conformance warning), or "deny" (a type is mandatory: any
+# write to an untyped task is rejected until one is set). A long migration
+# typically walks allow -> warn -> deny.
+untyped_tasks = "deny"
+
+[merge]
+# What to do when concurrent branches change the SAME field (or dependency) to
+# incompatible values. Non-overlapping changes always merge cleanly; this only
+# governs genuine contradictions, and it resolves them per-field:
+#   "surface" - stop the merge and let a human resolve it (run `ta resolve`)
+#   "latest"  - keep the most recently written value (by timestamp)
+#   "ours"    - keep the value on the branch being merged INTO
+#   "theirs"  - keep the value from the branch being merged IN
+on_conflict = "surface"
+
+[display]
+# Columns shown by list/ready in human format - and the field set and
+# order used by `--format json`. "id" and "deps" are built-ins; any other name
+# is a task field (blank when a task lacks it). Override per command with
+# `--columns a,b,c` or `--full`.
+columns = ["id", "title", "status", "deps"]
+# Truncate long human cell values to this many characters (0 = no limit). This
+# is the global fallback for any column not overridden below.
+max_width = 40
+# Default column to sort list/ready by (ascending; --sort overrides,
+# --reverse flips). Any field, "id", or "deps"; empty/unknown falls back to id.
+sort = "create_time"
+# Default human layout per command: "table" (aligned columns, one task per row)
+# or "list" (a vertical `field: value` record per task). `--layout` overrides.
+list_layout = "table"
+show_layout = "list"
+
+# Per-column truncation overrides. A column listed here is truncated to its own
+# width instead of max_width (0 = no limit). `--full` ignores these entirely.
+column_max_width = { "title" = 80 }
+
+[timestamps]
+# Computed timestamp fields materialized onto every task from the event log
+# (never user-set). These name the columns they surface under; set a name to ""
+# to disable that timestamp. create_time = the Create event's time; update_time
+# = the latest touching event's time; close_time = the most recent time status
+# reached done_status (cleared while the task is currently not done). They are
+# available to --columns/--full/show and as a --sort key.
+create_time = "create_time"
+update_time = "update_time"
+close_time = "close_time"
+
+# Relationship types. `ta dep <a> <type>=<b>` adds an edge; an undeclared type is
+# rejected. Each type's `kind` says how it behaves: "blocker" makes the target a
+# prerequisite (feeds `ta list --ready` and cycle detection); "hierarchy" is a
+# parent/child (subtask) edge that gates like a blocker but renders distinctly;
+# "info" is informational. inverse names the reverse direction and is OPTIONAL -
+# omit it for a one-way type; the type's own name makes it symmetric
+# (`a relates_to b` reads both ways); else it labels the inverse.
+[relationships]
+depends_on  = { kind = "blocker", inverse = "blocks" }
+duplicates  = { kind = "info" }
+has_subtask = { kind = "hierarchy", inverse = "subtask_of" }
+relates_to  = { kind = "info", inverse = "relates_to" }
+
+# Per-type task schemas - OFF while no [task_types.<name>] is declared (the
+# store stays fully schema-agnostic). Once declared, the `type` field (see
+# workflow.type_field) selects a task's schema, enforced on every create/update
+# (whole-task: every violation reported in one error). Field kinds: string,
+# bool, int, uint, float, datetime, enum, any, array<T>, set<T>. Long-form
+# constraints: required, default (stamped at create, healed onto writes,
+# substituted at read), min/max, pattern, min_len/max_len, min_items/max_items.
+# This file is TOML 1.1: `fields` reads best as one multi-line inline table
+# (trailing comma allowed), one line per field. Example:
+# [task_types.bug]
+# closed = true                       # no fields beyond the declared ones
+# fields = {
+#   points   = "uint",                # shorthand: just the kind
+#   tags     = "array<string>",
+#   severity = { type = "enum", values = ["low", "medium", "high"], required = true, default = "low" },
+#   estimate = { type = "uint", min = 1, max = 13 },
+# }
