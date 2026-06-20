@@ -9,6 +9,7 @@
 //! This module owns the data model and on-disk format; the sharing algorithms and
 //! factor key derivation land in sibling tasks.
 
+mod factor;
 mod format;
 mod keyslot;
 mod policy;
