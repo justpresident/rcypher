@@ -1,8 +1,9 @@
 use anyhow::Result;
-use std::sync::OnceLock;
 
-/// Stores the expected parent PID after `PTRACE_TRACEME` is called
-static EXPECTED_TRACER_PID: OnceLock<u32> = OnceLock::new();
+/// Stores the expected parent PID after `PTRACE_TRACEME` is called (Linux only;
+/// the macOS detection path queries the kernel directly and needs no stored PID).
+#[cfg(target_os = "linux")]
+static EXPECTED_TRACER_PID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
 
 /// Disable core dumps for this process to prevent memory dumps on crash
 #[cfg(target_family = "unix")]
@@ -31,7 +32,7 @@ pub fn disable_core_dumps() -> Result<()> {
 /// 5. Parent keeps the child traced for the entire application lifetime
 ///
 /// Returns Err if a debugger is already attached or fork fails.
-#[cfg(target_family = "unix")]
+#[cfg(target_os = "linux")]
 #[allow(clippy::expect_used)] // getppid() always returns a positive PID in the forked child
 pub fn enable_ptrace_protection() -> Result<()> {
     use nix::libc::{_exit, PTRACE_TRACEME, getppid, ptrace};
@@ -107,7 +108,30 @@ pub fn enable_ptrace_protection() -> Result<()> {
     }
 }
 
-#[cfg(not(target_family = "unix"))]
+/// macOS — best-effort `PT_DENY_ATTACH`.
+///
+/// Unlike the Linux fork-tracer lock, this is a single startup request and is
+/// bypassable, so it is **not** the primary defense — continuous detection in
+/// [`is_debugger_attached`] (sysctl `P_TRACED`, re-checked every watchdog tick)
+/// carries that role. We set it anyway as a defense-in-depth layer and treat a
+/// failure as non-fatal.
+#[cfg(target_os = "macos")]
+pub fn enable_ptrace_protection() -> Result<()> {
+    // PT_DENY_ATTACH is not re-exported by the `libc` crate; its value is stable.
+    const PT_DENY_ATTACH: nix::libc::c_int = 31;
+    // SAFETY: PT_DENY_ATTACH ignores the pid/addr/data arguments.
+    unsafe {
+        nix::libc::ptrace(
+            PT_DENY_ATTACH,
+            0,
+            std::ptr::null_mut::<nix::libc::c_char>(),
+            0,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn enable_ptrace_protection() -> Result<()> {
     Ok(())
 }
@@ -158,15 +182,61 @@ fn check_proc_status() -> bool {
     true
 }
 
-#[cfg(not(target_os = "linux"))]
+/// macOS — query the kernel for this process's `P_TRACED` flag via sysctl.
+///
+/// Mirrors the Linux `TracerPid` read: it can be (and is) re-run every watchdog
+/// tick, so detection is continuous rather than a one-shot startup gate.
+/// Returns true if a debugger is attached, or if the query fails (fail-safe).
+#[cfg(target_os = "macos")]
+fn check_proc_status() -> bool {
+    use nix::libc::{CTL_KERN, KERN_PROC, KERN_PROC_PID, c_int, c_uint, getpid, sysctl};
+
+    // `struct kinfo_proc` is a frozen Darwin kernel ABI that `libc` doesn't model.
+    // We only need `p_flag`, which sits at offset 32 inside the leading
+    // `extern_proc` (p_un[16] + p_vmspace[8] + p_sigacts[8]) on LP64. The output
+    // buffer is over-sized so a size mismatch can never trigger ENOMEM — sysctl
+    // copies the real kinfo_proc (well under 1 KiB) and reports its true length.
+    // `P_TRACED` is the p_flag bit set while the process is traced.
+    const P_TRACED: c_int = 0x0000_0800;
+    const P_FLAG_OFFSET: usize = 32;
+
+    let mut mib: [c_int; 4] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, unsafe { getpid() }];
+    let mut buf = [0u8; 1024];
+    let mut size = buf.len();
+
+    // SAFETY: KERN_PROC_PID writes one kinfo_proc (< 1 KiB) into `buf`.
+    let rc = unsafe {
+        sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as c_uint,
+            buf.as_mut_ptr().cast(),
+            &raw mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+
+    // Fail-safe: a failed query or an implausibly short result -> assume traced.
+    if rc != 0 || size < P_FLAG_OFFSET + 4 {
+        return true;
+    }
+
+    let p_flag = c_int::from_ne_bytes([
+        buf[P_FLAG_OFFSET],
+        buf[P_FLAG_OFFSET + 1],
+        buf[P_FLAG_OFFSET + 2],
+        buf[P_FLAG_OFFSET + 3],
+    ]);
+    (p_flag & P_TRACED) != 0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn check_proc_status() -> bool {
     false
 }
 
 #[cfg(test)]
 mod tests {
-    use nix::libc::getppid;
-
     use super::*;
 
     #[test]
@@ -201,11 +271,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     // The test verifies that protection mechanics works:
     // - `TracerPid` matches the parent process
     // But it relies on the OS guarantee that only one process can connect as a debugger, it is not
     // verified by the test explicitly
     fn test_ptrace_protection() {
+        use nix::libc::getppid;
         enable_ptrace_protection().unwrap();
         let parent_pid = unsafe { getppid() } as u32;
 

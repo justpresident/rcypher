@@ -23,9 +23,7 @@ use crate::cli::utils::{Spinner, get_password};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
-use nix::sys::signal::{SigEvent, SigSet, SigevNotify, SigmaskHow, Signal, pthread_sigmask};
-use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
-use nix::time::ClockId;
+use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey};
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -34,7 +32,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
 #[derive(Parser)]
@@ -174,9 +172,83 @@ fn current_unix_secs() -> u64 {
         .as_secs()
 }
 
-/// RAII guard that deletes the POSIX timer on drop.
+/// RAII guard that disarms the interval timer on drop.
 struct SecurityTimerGuard {
-    _timer: Timer,
+    _timer: AlarmTimer,
+}
+
+/// Linux — a POSIX per-process interval timer (`timer_create`) on the monotonic
+/// clock; dropping the `Timer` deletes the kernel timer.
+#[cfg(target_os = "linux")]
+struct AlarmTimer {
+    _timer: nix::sys::timer::Timer,
+}
+
+#[cfg(target_os = "linux")]
+fn arm_alarm_timer() -> Result<AlarmTimer> {
+    use nix::sys::signal::{SigEvent, SigevNotify};
+    use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
+    use nix::time::ClockId;
+
+    let sigevent = SigEvent::new(SigevNotify::SigevSignal {
+        signal: Signal::SIGALRM,
+        si_value: 0,
+    });
+    let mut timer = Timer::new(ClockId::CLOCK_MONOTONIC, sigevent)?;
+    timer.set(
+        Expiration::Interval(std::time::Duration::from_secs(1).into()),
+        TimerSetTimeFlags::empty(),
+    )?;
+    Ok(AlarmTimer { _timer: timer })
+}
+
+/// Non-Linux Unix (macOS, BSD) — `setitimer(ITIMER_REAL)` delivers SIGALRM on a
+/// kernel-driven real-time interval, since macOS has no `timer_create`. This is
+/// the same signal-driven design as Linux, NOT a `sleep` loop: the kernel timer
+/// fires independently of the handler thread, so a freeze/pause is caught by the
+/// monotonic-progress check below. The `Drop` impl disarms it.
+#[cfg(all(unix, not(target_os = "linux")))]
+struct AlarmTimer;
+
+#[cfg(all(unix, not(target_os = "linux")))]
+impl Drop for AlarmTimer {
+    fn drop(&mut self) {
+        let off = nix::libc::itimerval {
+            it_interval: nix::libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: nix::libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+        };
+        // SAFETY: disarming ITIMER_REAL with a zeroed itimerval.
+        unsafe {
+            nix::libc::setitimer(nix::libc::ITIMER_REAL, &off, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn arm_alarm_timer() -> Result<AlarmTimer> {
+    let interval = nix::libc::itimerval {
+        it_interval: nix::libc::timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        },
+        it_value: nix::libc::timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        },
+    };
+    // SAFETY: arming ITIMER_REAL with a valid 1-second itimerval.
+    let rc =
+        unsafe { nix::libc::setitimer(nix::libc::ITIMER_REAL, &interval, std::ptr::null_mut()) };
+    if rc != 0 {
+        bail!("Failed to arm interval timer");
+    }
+    Ok(AlarmTimer)
 }
 
 /// Start a POSIX interval timer that fires SIGALRM every second.
@@ -201,15 +273,7 @@ fn start_security_timer(
     alrm_mask.add(Signal::SIGALRM);
     pthread_sigmask(SigmaskHow::SIG_BLOCK, Some(&alrm_mask), None)?;
 
-    let sigevent = SigEvent::new(SigevNotify::SigevSignal {
-        signal: Signal::SIGALRM,
-        si_value: 0,
-    });
-    let mut timer = Timer::new(ClockId::CLOCK_MONOTONIC, sigevent)?;
-    timer.set(
-        Expiration::Interval(Duration::from_secs(1).into()),
-        TimerSetTimeFlags::empty(),
-    )?;
+    let timer = arm_alarm_timer()?;
 
     std::thread::spawn(move || {
         let mut wait_mask = SigSet::empty();
