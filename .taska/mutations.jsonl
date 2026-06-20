@@ -44,3 +44,5 @@
 {"seq":44,"timestamp":"2026-06-20T18:43:08.191185079Z","op":"AddEdge","task_id":"yubikey-auth","rel":"has_subtask","target":"yk-weak-policy-warn"}
 {"seq":45,"timestamp":"2026-06-20T18:43:08.197287141Z","op":"AddEdge","task_id":"yubikey-auth","rel":"has_subtask","target":"yk-docs"}
 {"seq":46,"timestamp":"2026-06-20T18:43:08.203499861Z","op":"AddEdge","task_id":"yubikey-auth","rel":"has_subtask","target":"yk-release-030"}
+{"seq":47,"timestamp":"2026-06-20T18:44:19.435725117Z","op":"Update","task_id":"yk-format","status":"doing"}
+{"seq":48,"timestamp":"2026-06-20T18:49:07.254053760Z","op":"Update","task_id":"yk-format","status":"closed"}

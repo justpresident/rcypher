@@ -1,0 +1,144 @@
+use anyhow::{Result, bail};
+use bincode::{Decode, Encode};
+
+use super::policy::PolicyNode;
+
+/// Outer version tag for a policy-protected (multi-factor) vault.
+///
+/// It lives in the same leading 2-byte version space as a plain `V7` password
+/// envelope (whose tag is 7), so a reader tells the two apart by probing the
+/// first two bytes.
+pub const POLICY_VAULT_VERSION: u16 = 8;
+
+/// Key-derivation parameters for one enrolled factor.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub enum FactorKind {
+    /// A passphrase factor: Argon2id over the password and a per-factor salt.
+    Password {
+        salt: [u8; 32],
+        memory_cost: u32,
+        time_cost: u32,
+        parallelism: u32,
+    },
+    /// A FIDO2 security-key factor via the `hmac-secret` extension. `require_pin`
+    /// asks the authenticator for user verification (a PIN) in addition to the
+    /// touch that is always required.
+    Yubikey {
+        credential_id: Vec<u8>,
+        rp_id: String,
+        salt: [u8; 32],
+        require_pin: bool,
+    },
+}
+
+/// A named, enrolled factor and its derivation parameters.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct Factor {
+    pub id: String,
+    pub kind: FactorKind,
+}
+
+/// Keyslot metadata stored ahead of the DEK-encrypted payload: the enrolled
+/// factors and the access [`PolicyNode`] (whose leaves carry the wrapped shares).
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
+pub struct PolicyMetadata {
+    pub factors: Vec<Factor>,
+    pub policy: PolicyNode,
+}
+
+/// Serializes a policy-vault header: the version tag followed by the bincoded
+/// metadata. The caller appends the DEK-encrypted payload to the returned bytes.
+pub fn serialize_policy_header(meta: &PolicyMetadata) -> Result<Vec<u8>> {
+    let mut out = POLICY_VAULT_VERSION.to_be_bytes().to_vec();
+    let encoded = bincode::encode_to_vec(meta, bincode::config::standard())?;
+    out.extend_from_slice(&encoded);
+    Ok(out)
+}
+
+/// Splits a policy-vault blob into its metadata and the trailing DEK-encrypted
+/// payload. Returns an error if `data` is not a policy vault.
+pub fn parse_policy_vault(data: &[u8]) -> Result<(PolicyMetadata, &[u8])> {
+    if data.len() < 2 {
+        bail!("data too short for a policy vault");
+    }
+    let version = u16::from_be_bytes([data[0], data[1]]);
+    if version != POLICY_VAULT_VERSION {
+        bail!("not a policy vault (version {version})");
+    }
+    let (meta, consumed): (PolicyMetadata, usize) =
+        bincode::decode_from_slice(&data[2..], bincode::config::standard())?;
+    Ok((meta, &data[2 + consumed..]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::policy::{Leaf, PolicyNode};
+
+    fn sample() -> PolicyMetadata {
+        PolicyMetadata {
+            factors: vec![
+                Factor {
+                    id: "pass1".into(),
+                    kind: FactorKind::Password {
+                        salt: [1u8; 32],
+                        memory_cost: 65536,
+                        time_cost: 3,
+                        parallelism: 1,
+                    },
+                },
+                Factor {
+                    id: "yk-main".into(),
+                    kind: FactorKind::Yubikey {
+                        credential_id: vec![9, 8, 7],
+                        rp_id: "rcypher".into(),
+                        salt: [2u8; 32],
+                        require_pin: true,
+                    },
+                },
+            ],
+            // pass1 OR (pass1 AND yk-main)
+            policy: PolicyNode::Or(vec![
+                PolicyNode::Leaf(Leaf {
+                    factor: "pass1".into(),
+                    wrapped_share: vec![1, 2, 3],
+                }),
+                PolicyNode::And(vec![
+                    PolicyNode::Leaf(Leaf {
+                        factor: "pass1".into(),
+                        wrapped_share: vec![4, 5],
+                    }),
+                    PolicyNode::Leaf(Leaf {
+                        factor: "yk-main".into(),
+                        wrapped_share: vec![6, 7, 8],
+                    }),
+                ]),
+            ]),
+        }
+    }
+
+    #[test]
+    fn policy_vault_roundtrips_with_payload() {
+        let meta = sample();
+        let payload = b"DEK-encrypted-bytes";
+
+        let mut blob = serialize_policy_header(&meta).unwrap();
+        blob.extend_from_slice(payload);
+
+        let (parsed, rest) = parse_policy_vault(&blob).unwrap();
+        assert_eq!(parsed, meta);
+        assert_eq!(rest, payload);
+    }
+
+    #[test]
+    fn rejects_plain_v7_envelope() {
+        // A plain password envelope starts with version 7, not 8.
+        let blob = [0u8, 7, 0, 0, 0, 0];
+        assert!(parse_policy_vault(&blob).is_err());
+    }
+
+    #[test]
+    fn rejects_too_short() {
+        assert!(parse_policy_vault(&[8]).is_err());
+    }
+}
