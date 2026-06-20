@@ -1,8 +1,9 @@
+use crate::cli::Backend;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
 use anyhow::{Result, bail};
-use rcypher::{Cypher, EncryptedValue, Storage, is_debugger_attached, load_storage, save_storage};
+use rcypher::{EncryptedValue, Storage, is_debugger_attached};
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
@@ -16,7 +17,7 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    cypher: Cypher,
+    backend: Backend,
     filename: PathBuf,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
@@ -26,7 +27,7 @@ impl InteractiveCli {
     pub const fn new(
         prompt: String,
         insecure_stdout: bool,
-        cypher: Cypher,
+        backend: Backend,
         filename: PathBuf,
         last_activity: Arc<AtomicU64>,
         last_security_check: Arc<AtomicU64>,
@@ -34,7 +35,7 @@ impl InteractiveCli {
         Self {
             prompt,
             insecure_stdout,
-            cypher,
+            backend,
             filename,
             last_activity,
             last_security_check,
@@ -42,7 +43,7 @@ impl InteractiveCli {
     }
 
     pub fn run(&self) -> Result<()> {
-        let storage = Arc::new(Mutex::new(load_storage(&self.cypher, &self.filename)?));
+        let storage = Arc::new(Mutex::new(self.backend.load_store(&self.filename)?));
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -162,12 +163,12 @@ impl InteractiveCli {
     }
 
     fn cmd_put(&self, key: &str, value: &str, storage: &mut Storage) -> Result<()> {
-        let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
+        let encrypted_value = EncryptedValue::encrypt(self.backend.cypher(), value)?;
         storage.put(key.to_string(), encrypted_value);
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
-        save_storage(&self.cypher, storage, &self.filename)?;
+        self.backend.save_store(storage, &self.filename)?;
         Ok(())
     }
 
@@ -177,7 +178,7 @@ impl InteractiveCli {
                 let mut found = false;
                 for (key, val) in results {
                     found = true;
-                    let mut secret = val.decrypt(&self.cypher)?;
+                    let mut secret = val.decrypt(self.backend.cypher())?;
                     let output = format!("{}: {}", key, &*secret);
                     secret.zeroize();
                     secure_print(output, self.insecure_stdout)?;
@@ -210,7 +211,7 @@ impl InteractiveCli {
                     }
                     (Some((_, val)), None) => {
                         // Exactly one result - copy to clipboard
-                        let mut secret = val.decrypt(&self.cypher)?;
+                        let mut secret = val.decrypt(self.backend.cypher())?;
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
@@ -227,7 +228,7 @@ impl InteractiveCli {
     fn cmd_history(&self, key: &str, storage: &Storage) -> Result<()> {
         if let Some(entries) = storage.history(key) {
             for entry in entries {
-                let mut secret = entry.value.decrypt(&self.cypher)?;
+                let mut secret = entry.value.decrypt(self.backend.cypher())?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 secure_print(output, self.insecure_stdout)?;
@@ -253,7 +254,7 @@ impl InteractiveCli {
     fn cmd_delete(&self, key: &str, storage: &mut Storage) -> Result<()> {
         if storage.delete(key) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
-            save_storage(&self.cypher, storage, &self.filename)?;
+            self.backend.save_store(storage, &self.filename)?;
         } else {
             bail!("No such key '{key}' found");
         }

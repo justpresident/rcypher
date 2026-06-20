@@ -53,6 +53,16 @@ pub struct PolicyMetadata {
     pub policy: PolicyNode,
 }
 
+impl PolicyMetadata {
+    /// The access policy as a canonical, human-readable expression — e.g.
+    /// `pass1 or (pass2 and yk)`. Lets a reader display the policy before unlock,
+    /// without recovering the DEK.
+    #[must_use]
+    pub fn policy_expr(&self) -> String {
+        super::parser::render_policy(&self.policy)
+    }
+}
+
 /// Serializes a policy-vault header: the version tag followed by the bincoded
 /// metadata. The caller appends the DEK-encrypted payload to the returned bytes.
 pub fn serialize_policy_header(meta: &PolicyMetadata) -> Result<Vec<u8>> {

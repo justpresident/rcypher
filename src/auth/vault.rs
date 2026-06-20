@@ -202,6 +202,15 @@ impl PolicyVault {
         Ok((vault, plaintext))
     }
 
+    /// Reads `path` and decrypts its payload with this (already unlocked) vault's
+    /// DEK — no secrets needed. The on-disk keyslot metadata is ignored; the held
+    /// DEK is the source of truth (the DEK never changes across saves).
+    pub fn load_payload(&self, path: &Path) -> Result<Zeroizing<Vec<u8>>> {
+        let data = fs::read(path)?;
+        let (_meta, payload) = parse_policy_vault(&data)?;
+        self.decrypt_payload(payload)
+    }
+
     /// Writes the vault — keyslot metadata followed by `payload` encrypted under
     /// the DEK — to `path`, atomically (temp file then rename).
     pub fn save(&self, payload: &[u8], path: &Path) -> Result<()> {

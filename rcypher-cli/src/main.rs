@@ -19,17 +19,21 @@
 
 mod cli;
 
-use crate::cli::utils::{Spinner, get_password};
+use crate::cli::utils::{Spinner, get_password, prompt_factor_password};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey};
+use rcypher::{
+    FactorKind, FactorSecret, POLICY_VAULT_VERSION, PolicyMetadata, PolicyVault, parse_policy_vault,
+};
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -141,12 +145,106 @@ fn run_interactive(
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
 ) -> Result<()> {
-    let cypher = Cypher::new(key);
+    let backend = cli::Backend::Legacy {
+        cypher: Cypher::new(key),
+    };
 
     let interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
-        cypher,
+        backend,
+        params.filename.clone(),
+        last_activity,
+        last_security_check,
+    );
+    interactive_cli.run()?;
+    Ok(())
+}
+
+/// Whether `path` is an existing multi-factor policy vault (version 8), told
+/// apart from a plain password envelope by its leading 2-byte version tag.
+fn is_policy_vault(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let mut head = [0u8; 2];
+    if file.read_exact(&mut head).is_err() {
+        return false;
+    }
+    u16::from_be_bytes(head) == POLICY_VAULT_VERSION
+}
+
+/// Prompts for a satisfying set of factor secrets for a policy vault.
+///
+/// Password factors are requested in enrollment order, skipping any the user
+/// leaves empty, and stopping as soon as the collected set satisfies the policy.
+/// `YubiKey` factors are not yet interactive and are skipped. When
+/// `--insecure-password` is set (testing only), it is offered for every password
+/// factor instead of prompting.
+fn collect_policy_secrets(
+    meta: &PolicyMetadata,
+    insecure_password: Option<&str>,
+) -> Result<HashMap<String, FactorSecret>> {
+    let mut secrets = HashMap::new();
+    let mut have: HashSet<String> = HashSet::new();
+
+    for factor in &meta.factors {
+        if meta.policy.is_satisfied_by(&have) {
+            break;
+        }
+        match factor.kind {
+            FactorKind::Password { .. } => {
+                let password = match insecure_password {
+                    Some(pw) => Some(pw.to_string()),
+                    None => prompt_factor_password(&factor.id)?,
+                };
+                if let Some(password) = password {
+                    secrets.insert(factor.id.clone(), FactorSecret::Password(password));
+                    have.insert(factor.id.clone());
+                }
+            }
+            FactorKind::Yubikey { .. } => {
+                eprintln!(
+                    "Skipping YubiKey factor '{}' (YubiKey unlock is not yet supported).",
+                    factor.id
+                );
+            }
+        }
+    }
+
+    if !meta.policy.is_satisfied_by(&have) {
+        bail!(
+            "the provided factors cannot satisfy the unlock policy: {}",
+            meta.policy_expr()
+        );
+    }
+    Ok(secrets)
+}
+
+/// Unlocks a multi-factor policy vault and runs the interactive session over it.
+fn run_interactive_policy(
+    params: &CliParams,
+    last_activity: Arc<AtomicU64>,
+    last_security_check: Arc<AtomicU64>,
+) -> Result<()> {
+    let data = std::fs::read(&params.filename)?;
+    let (meta, _payload) = parse_policy_vault(&data)?;
+
+    eprintln!("Unlock policy: {}", meta.policy_expr());
+
+    let secrets = collect_policy_secrets(&meta, params.insecure_password.as_deref())?;
+
+    let spinner = Spinner::new("Unlocking vault", params.quiet);
+    let (vault, _payload) = PolicyVault::open(&params.filename, &secrets)?;
+    spinner.finish_and_clear();
+
+    let cypher = vault.cypher();
+    let backend = cli::Backend::Policy { vault, cypher };
+
+    let interactive_cli = cli::InteractiveCli::new(
+        params.prompt.clone(),
+        params.insecure_stdout,
+        backend,
         params.filename.clone(),
         last_activity,
         last_security_check,
@@ -339,6 +437,13 @@ fn main() -> Result<()> {
     // Initialise to now so the watchdog doesn't fire before the first tick.
     let last_security_check = Arc::new(AtomicU64::new(current_unix_secs()));
     let _security_guard = start_security_timer(last_activity.clone(), last_security_check.clone())?;
+
+    // A multi-factor policy vault (version 8) drives its own unlock UX; detect it
+    // before the single-password prompt the legacy and full-file paths share.
+    let full_file_op = params.encrypt || params.decrypt || params.update_with.is_some();
+    if !full_file_op && is_policy_vault(&params.filename) {
+        return run_interactive_policy(&params, last_activity, last_security_check);
+    }
 
     let argon2_params = get_argon2_params(&params);
     let mut password = params.insecure_password.take().unwrap_or_else(|| {

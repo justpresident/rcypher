@@ -117,6 +117,20 @@ pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<Strin
     Ok(password)
 }
 
+/// Prompts for one factor's password while unlocking a multi-factor vault.
+///
+/// An empty entry means "skip this factor" — the caller may be able to satisfy
+/// the policy another way — and returns `None`.
+pub fn prompt_factor_password(id: &str) -> Result<Option<String>> {
+    let password =
+        rpassword::prompt_password(format!("Password for factor '{id}' (empty to skip): "))?;
+    if password.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(password))
+    }
+}
+
 fn show_password_warning() {
     eprintln!("\n╔════════════════════════════════════════════════════════════════════╗");
     eprintln!("║                         ⚠️  IMPORTANT! ⚠️                          ║");

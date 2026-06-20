@@ -508,3 +508,59 @@ fn test_encrypt_decrypt_with_output_file() {
     let result = fs::read(&decrypted_path).unwrap();
     assert_eq!(result, test_data);
 }
+
+// --- Multi-factor policy vault (version 8) -------------------------------
+
+/// Creates a version-8 single-password policy vault at `path`, holding an empty
+/// store, derived with insecure Argon2 params so the binary's `--insecure-password`
+/// path unlocks it quickly.
+fn create_policy_vault(path: &Path, factor_id: &str, password: &str) {
+    use rcypher::{Argon2Params, PolicyVault, Storage, serialize_storage};
+
+    let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
+    let payload = serialize_storage(&Storage::new()).unwrap();
+    vault.save(&payload, path).unwrap();
+}
+
+#[test]
+fn test_policy_vault_put_get_roundtrip() {
+    let (_dir, file_path) = temp_test_file();
+    create_policy_vault(&file_path, "main", "test_password");
+
+    // First run: unlock via the password factor, store two keys, save back.
+    run_commands(&file_path, b"put key1 val1\nput key2 val2\n".to_vec());
+
+    // The store must still be a version-8 policy vault after a save.
+    let head = fs::read(&file_path).unwrap();
+    assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+
+    // Second run: re-open the rewritten vault and read the values back.
+    let lines = run_commands(&file_path, b"get key1\nget key2\n".to_vec());
+    assert_eq!(lines[0], "key1: val1");
+    assert_eq!(lines[1], "key2: val2");
+}
+
+#[test]
+fn test_policy_vault_wrong_password_fails() {
+    let (_dir, file_path) = temp_test_file();
+    create_policy_vault(&file_path, "main", "correct_password");
+
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("wrong_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&file_path)
+        .write_stdin(b"get key1\n".to_vec())
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("do not satisfy") || stderr.contains("policy"),
+        "unexpected stderr: {stderr}"
+    );
+}

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
 use rand::TryRngCore;
@@ -28,6 +30,22 @@ pub struct Leaf {
     pub factor: String,
     /// This leaf's secret-share, encrypted under the factor's key.
     pub wrapped_share: Vec<u8>,
+}
+
+impl PolicyNode {
+    /// Whether the set of `available` factor ids satisfies this policy.
+    ///
+    /// A pure boolean evaluation — `And` needs every child, `Or` needs any — used
+    /// to drive the unlock UX (which factors to prompt for, and when enough have
+    /// been collected) before doing any expensive key derivation.
+    #[must_use]
+    pub fn is_satisfied_by(&self, available: &HashSet<String>) -> bool {
+        match self {
+            Self::Leaf(leaf) => available.contains(&leaf.factor),
+            Self::And(children) => children.iter().all(|c| c.is_satisfied_by(available)),
+            Self::Or(children) => children.iter().any(|c| c.is_satisfied_by(available)),
+        }
+    }
 }
 
 /// XORs `other` into `acc` byte-wise (over the common length).
@@ -254,5 +272,19 @@ mod tests {
     fn empty_node_rejected() {
         assert!(distribute(&[0u8; 64], &PolicyNode::And(vec![])).is_err());
         assert!(distribute(&[0u8; 64], &PolicyNode::Or(vec![])).is_err());
+    }
+
+    #[test]
+    fn is_satisfied_by_matches_boolean_logic() {
+        // a OR (b AND c)
+        let policy = PolicyNode::Or(vec![leaf("a"), PolicyNode::And(vec![leaf("b"), leaf("c")])]);
+        let have = |ids: &[&str]| ids.iter().map(|s| (*s).to_string()).collect::<HashSet<_>>();
+
+        assert!(policy.is_satisfied_by(&have(&["a"])));
+        assert!(policy.is_satisfied_by(&have(&["b", "c"])));
+        assert!(policy.is_satisfied_by(&have(&["a", "b"])));
+        assert!(!policy.is_satisfied_by(&have(&["b"])));
+        assert!(!policy.is_satisfied_by(&have(&["c"])));
+        assert!(!policy.is_satisfied_by(&have(&[])));
     }
 }
