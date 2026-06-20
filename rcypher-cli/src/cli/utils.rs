@@ -60,12 +60,6 @@ impl Spinner {
         Self { inner }
     }
 
-    pub fn set_message(&self, message: &str) {
-        if let Some(s) = &self.inner {
-            s.set_message(message.to_string());
-        }
-    }
-
     pub fn finish_and_clear(&self) {
         if let Some(s) = &self.inner {
             s.finish_and_clear();

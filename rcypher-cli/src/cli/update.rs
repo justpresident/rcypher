@@ -1,6 +1,7 @@
+use crate::cli::Backend;
 use crate::cli::utils::{format_timestamp, secure_print};
 use anyhow::Result;
-use rcypher::{Cypher, EncryptedValue, EncryptionKey, Storage, load_storage, save_storage};
+use rcypher::{Cypher, EncryptedValue, Storage};
 use std::io;
 use std::io::Write;
 use std::path::Path;
@@ -151,18 +152,18 @@ fn display_update_summary(
 fn apply_all_updates(
     updates: Vec<UpdateEntry>,
     main_storage: &mut Storage,
-    main_cypher: &Cypher,
+    main_backend: &Backend,
     update_cypher: &Cypher,
     filename: &Path,
 ) -> Result<()> {
     for update in updates {
         let mut decrypted = update.new_value.decrypt(update_cypher)?;
-        let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
+        let re_encrypted = EncryptedValue::encrypt(main_backend.cypher(), &decrypted)?;
         decrypted.zeroize();
         main_storage.put_ts(update.key, re_encrypted, update.new_timestamp);
     }
 
-    save_storage(main_cypher, main_storage, filename)?;
+    main_backend.save_store(main_storage, filename)?;
     println!("✓ All updates applied successfully.");
     Ok(())
 }
@@ -171,7 +172,7 @@ fn apply_all_updates(
 fn apply_updates_interactive(
     updates: Vec<UpdateEntry>,
     main_storage: &mut Storage,
-    main_cypher: &Cypher,
+    main_backend: &Backend,
     update_cypher: &Cypher,
     filename: &Path,
     insecure_stdout: bool,
@@ -180,7 +181,12 @@ fn apply_updates_interactive(
     let mut skipped = 0;
 
     for update in updates {
-        display_update_entry(&update, main_cypher, update_cypher, insecure_stdout)?;
+        display_update_entry(
+            &update,
+            main_backend.cypher(),
+            update_cypher,
+            insecure_stdout,
+        )?;
 
         print!("Apply this update? (y/n/q): ");
         io::stdout().flush()?;
@@ -191,7 +197,7 @@ fn apply_updates_interactive(
         match response.trim().to_lowercase().as_str() {
             "y" | "yes" => {
                 let mut decrypted = update.new_value.decrypt(update_cypher)?;
-                let re_encrypted = EncryptedValue::encrypt(main_cypher, &decrypted)?;
+                let re_encrypted = EncryptedValue::encrypt(main_backend.cypher(), &decrypted)?;
                 decrypted.zeroize();
                 main_storage.put_ts(update.key, re_encrypted, update.new_timestamp);
                 applied += 1;
@@ -209,7 +215,7 @@ fn apply_updates_interactive(
     }
 
     if applied > 0 {
-        save_storage(main_cypher, main_storage, filename)?;
+        main_backend.save_store(main_storage, filename)?;
         println!(
             "\n✓ Applied {} update{}, skipped {}.",
             applied,
@@ -233,22 +239,30 @@ fn prompt_merge_mode() -> Result<String> {
     Ok(input.trim().to_lowercase())
 }
 
-/// Main entry point for updating storage with another file
+/// Main entry point for updating storage with another file.
+///
+/// Both stores are accessed through their already-unlocked [`Backend`], so the
+/// merge works the same whether each side is a legacy password store or a
+/// multi-factor policy vault (each holds its own key).
 pub fn run_update_with(
+    main_backend: &Backend,
     filename: &Path,
+    update_backend: &Backend,
     update_file: &Path,
-    main_key: EncryptionKey,
-    update_key: EncryptionKey,
     insecure_stdout: bool,
 ) -> Result<()> {
-    let main_cypher = Cypher::new(main_key);
-    let mut main_storage = load_storage(&main_cypher, filename)?;
+    let mut main_storage = main_backend.load_store(filename)?;
+    let update_storage = update_backend.load_store(update_file)?;
 
-    let update_cypher = Cypher::new(update_key);
-    let update_storage = load_storage(&update_cypher, update_file)?;
+    let update_cypher = update_backend.cypher();
 
     // Find what needs updating
-    let updates = find_updates(&main_storage, &update_storage, &main_cypher, &update_cypher);
+    let updates = find_updates(
+        &main_storage,
+        &update_storage,
+        main_backend.cypher(),
+        update_cypher,
+    );
 
     if updates.is_empty() {
         println!("No updates found. Storage files are in sync.");
@@ -256,7 +270,12 @@ pub fn run_update_with(
     }
 
     // Display summary
-    display_update_summary(&updates, &main_cypher, &update_cypher, insecure_stdout)?;
+    display_update_summary(
+        &updates,
+        main_backend.cypher(),
+        update_cypher,
+        insecure_stdout,
+    )?;
 
     // Prompt for action
     let choice = prompt_merge_mode()?;
@@ -267,8 +286,8 @@ pub fn run_update_with(
             apply_all_updates(
                 updates,
                 &mut main_storage,
-                &main_cypher,
-                &update_cypher,
+                main_backend,
+                update_cypher,
                 filename,
             )?;
         }
@@ -276,8 +295,8 @@ pub fn run_update_with(
             apply_updates_interactive(
                 updates,
                 &mut main_storage,
-                &main_cypher,
-                &update_cypher,
+                main_backend,
+                update_cypher,
                 filename,
                 insecure_stdout,
             )?;
@@ -293,7 +312,7 @@ pub fn run_update_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcypher::{CypherVersion, Storage};
+    use rcypher::{CypherVersion, EncryptionKey, Storage};
 
     fn create_test_cypher() -> Cypher {
         let key = EncryptionKey::from_password(CypherVersion::default(), "test_password")

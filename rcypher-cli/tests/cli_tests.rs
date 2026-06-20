@@ -621,12 +621,45 @@ fn test_policy_vault_set_policy_and_remove_factor() {
     );
 }
 
+/// Writes a legacy version-7 password store (the pre-policy format) at `path`,
+/// encrypted with "test_password" under insecure Argon2 params.
+fn create_legacy_store(path: &Path) {
+    use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, save_storage};
+
+    let key = EncryptionKey::from_password_with_params(
+        CypherVersion::default(),
+        "test_password",
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    save_storage(&Cypher::new(key), &Storage::new(), path).unwrap();
+}
+
 #[test]
-fn test_legacy_store_rejects_auth_commands() {
+fn test_new_store_is_policy_vault() {
     let (_dir, file_path) = temp_test_file();
-    // A store created through the normal flow is a legacy version-7 store.
+    // A store created through the normal flow is now a version-8 policy vault with
+    // a single "password" factor.
     run_commands(&file_path, b"put k v\n".to_vec());
 
+    let head = fs::read(&file_path).unwrap();
+    assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+
+    let factors = run_commands_str(&file_path, "factors\n");
+    assert!(factors.contains("password (password)"), "{factors}");
+}
+
+#[test]
+fn test_legacy_store_opens_and_rejects_auth_commands() {
+    let (_dir, file_path) = temp_test_file();
+    create_legacy_store(&file_path);
+
+    // A legacy store still opens and stores/reads values.
+    run_commands(&file_path, b"put k v\n".to_vec());
+    let got = run_commands_str(&file_path, "get k\n");
+    assert!(got.contains("k: v"), "{got}");
+
+    // But it has no policy to manage.
     let out = run_commands_str(&file_path, "policy show\n");
     assert!(out.contains("no multi-factor policy"), "{out}");
 }

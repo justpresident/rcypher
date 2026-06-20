@@ -24,7 +24,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey};
+use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, serialize_storage};
 use rcypher::{
     FactorKind, FactorSecret, POLICY_VAULT_VERSION, PolicyMetadata, PolicyVault, parse_policy_vault,
 };
@@ -141,14 +141,10 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
 
 fn run_interactive(
     params: &CliParams,
-    key: EncryptionKey,
+    backend: cli::Backend,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
 ) -> Result<()> {
-    let backend = cli::Backend::Legacy {
-        cypher: Cypher::new(key),
-    };
-
     let mut interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
@@ -222,37 +218,76 @@ fn collect_policy_secrets(
     Ok(secrets)
 }
 
-/// Unlocks a multi-factor policy vault and runs the interactive session over it.
-fn run_interactive_policy(
-    params: &CliParams,
-    last_activity: Arc<AtomicU64>,
-    last_security_check: Arc<AtomicU64>,
-) -> Result<()> {
-    let data = std::fs::read(&params.filename)?;
-    let (meta, _payload) = parse_policy_vault(&data)?;
+/// The factor id given to the password enrolled when a new store is created.
+const DEFAULT_FACTOR_ID: &str = "password";
 
-    eprintln!("Unlock policy: {}", meta.policy_expr());
+/// Returns the store password — the one supplied via `--insecure-password`
+/// (testing) or prompted from the user. `confirm` asks for a second entry.
+fn obtain_store_password(params: &CliParams, path: &Path, confirm: bool) -> Result<String> {
+    params
+        .insecure_password
+        .as_ref()
+        .map_or_else(|| get_password(path, confirm), |pw| Ok(pw.clone()))
+}
 
-    let secrets = collect_policy_secrets(&meta, params.insecure_password.as_deref())?;
+/// Opens an existing store at `path`, unlocking it as a multi-factor policy vault
+/// (version 8) or as a legacy password store (version 7).
+fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Result<cli::Backend> {
+    if is_policy_vault(path) {
+        let data = std::fs::read(path)?;
+        let (meta, _payload) = parse_policy_vault(&data)?;
+        eprintln!(
+            "Unlock policy for {}: {}",
+            path.display(),
+            meta.policy_expr()
+        );
 
-    let spinner = Spinner::new("Unlocking vault", params.quiet);
-    let (vault, _payload) = PolicyVault::open(&params.filename, &secrets)?;
+        let secrets = collect_policy_secrets(&meta, params.insecure_password.as_deref())?;
+
+        let spinner = Spinner::new("Unlocking vault", params.quiet);
+        let (vault, _payload) = PolicyVault::open(path, &secrets)?;
+        spinner.finish_and_clear();
+
+        let cypher = vault.cypher();
+        Ok(cli::Backend::Policy { vault, cypher })
+    } else {
+        let mut password = obtain_store_password(params, path, false)?;
+        let spinner = Spinner::new("Deriving encryption key", params.quiet);
+        let key = EncryptionKey::for_file_with_params(&password, path, argon2);
+        spinner.finish_and_clear();
+        password.zeroize();
+        Ok(cli::Backend::Legacy {
+            cypher: Cypher::new(key?),
+        })
+    }
+}
+
+/// Creates a new store as a multi-factor policy vault with a single password
+/// factor, persisting an empty store so the file exists for later unlocks.
+fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
+    let mut password = obtain_store_password(params, &params.filename, true)?;
+    let spinner = Spinner::new("Deriving encryption key", params.quiet);
+    let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, argon2);
     spinner.finish_and_clear();
+    password.zeroize();
+    let vault = vault?;
+
+    // YubiKey enrollment can be offered here once the FIDO2 factor lands; for now
+    // the user can add factors later with the in-store `enroll`/`policy` commands.
 
     let cypher = vault.cypher();
-    let backend = cli::Backend::Policy { vault, cypher };
+    vault.save(&serialize_storage(&Storage::new())?, &params.filename)?;
+    Ok(cli::Backend::Policy { vault, cypher })
+}
 
-    let mut interactive_cli = cli::InteractiveCli::new(
-        params.prompt.clone(),
-        params.insecure_stdout,
-        backend,
-        get_argon2_params(params),
-        params.filename.clone(),
-        last_activity,
-        last_security_check,
-    );
-    interactive_cli.run()?;
-    Ok(())
+/// Acquires the backend for the interactive session: opens an existing store, or
+/// creates a new policy vault when the file does not yet exist.
+fn acquire_store_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
+    if params.filename.exists() {
+        open_backend(params, &params.filename, argon2)
+    } else {
+        create_backend(params, argon2)
+    }
 }
 
 /// Returns appropriate Argon2 parameters based on CLI flags.
@@ -422,7 +457,7 @@ fn main() -> Result<()> {
     // Disable core dumps to prevent memory dumps on crash
     let _ = disable_core_dumps();
 
-    let mut params = CliParams::parse();
+    let params = CliParams::parse();
 
     // Enable ptrace self-protection to prevent debuggers from attaching
     if !params.insecure_allow_debugging
@@ -440,20 +475,10 @@ fn main() -> Result<()> {
     let last_security_check = Arc::new(AtomicU64::new(current_unix_secs()));
     let _security_guard = start_security_timer(last_activity.clone(), last_security_check.clone())?;
 
-    // A multi-factor policy vault (version 8) drives its own unlock UX; detect it
-    // before the single-password prompt the legacy and full-file paths share.
-    let full_file_op = params.encrypt || params.decrypt || params.update_with.is_some();
-    if !full_file_op && is_policy_vault(&params.filename) {
-        return run_interactive_policy(&params, last_activity, last_security_check);
-    }
-
     let argon2_params = get_argon2_params(&params);
-    let mut password = params.insecure_password.take().unwrap_or_else(|| {
-        let need_confirmation = params.encrypt || !params.filename.exists();
-        get_password(&params.filename, need_confirmation).expect("password")
-    });
 
     if params.encrypt {
+        let mut password = obtain_store_password(&params, &params.filename, true)?;
         let key = EncryptionKey::from_password_with_params(
             CypherVersion::default(),
             &password,
@@ -462,37 +487,24 @@ fn main() -> Result<()> {
         password.zeroize();
         run_encrypt(&params, key)
     } else if params.decrypt {
+        let mut password = obtain_store_password(&params, &params.filename, false)?;
         let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
         password.zeroize();
         run_decrypt(&params, key)
     } else if let Some(update_file) = &params.update_with {
-        let spinner = Spinner::new("Deriving encryption keys", params.quiet);
-
-        let main_key =
-            EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
-
-        spinner.set_message("Deriving encryption key for update file");
-        let update_key =
-            EncryptionKey::for_file_with_params(&password, update_file, &argon2_params)?;
-        password.zeroize();
-
-        spinner.finish_and_clear();
-
+        // Each store is unlocked through its own backend (legacy or policy vault),
+        // so a conflict copy can be merged regardless of either side's format.
+        let main_backend = open_backend(&params, &params.filename, &argon2_params)?;
+        let update_backend = open_backend(&params, update_file, &argon2_params)?;
         cli::update::run_update_with(
+            &main_backend,
             &params.filename,
+            &update_backend,
             update_file,
-            main_key,
-            update_key,
             params.insecure_stdout,
         )
     } else {
-        let spinner = Spinner::new("Deriving encryption key", params.quiet);
-
-        let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
-
-        spinner.finish_and_clear();
-
-        password.zeroize();
-        run_interactive(&params, key, last_activity, last_security_check)
+        let backend = acquire_store_backend(&params, &argon2_params)?;
+        run_interactive(&params, backend, last_activity, last_security_check)
     }
 }
