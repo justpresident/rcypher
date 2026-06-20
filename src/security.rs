@@ -108,13 +108,18 @@ pub fn enable_ptrace_protection() -> Result<()> {
     }
 }
 
-/// macOS — best-effort `PT_DENY_ATTACH`.
+/// macOS — request `PT_DENY_ATTACH`, then verify we are not already traced.
 ///
-/// Unlike the Linux fork-tracer lock, this is a single startup request and is
-/// bypassable, so it is **not** the primary defense — continuous detection in
-/// [`is_debugger_attached`] (sysctl `P_TRACED`, re-checked every watchdog tick)
-/// carries that role. We set it anyway as a defense-in-depth layer and treat a
-/// failure as non-fatal.
+/// `PT_DENY_ATTACH` asks the kernel to refuse *future* debugger attaches. It is a
+/// best-effort prevention layer, not the primary defense (it is bypassable), and
+/// its own return is deliberately ignored because a failure is ambiguous — it can
+/// be benign (the App Sandbox or a restricted entitlement context can refuse the
+/// request) or hostile (it fails when a debugger is *already* attached). We can't
+/// tell which from the `ptrace` return, so we defer to the authoritative signal:
+/// the sysctl `P_TRACED` check in [`is_debugger_attached`]. If that says we are
+/// already traced, refuse to continue — mirroring the Linux path, which errors
+/// when a debugger is already attached. (Detection then continues every watchdog
+/// tick.)
 #[cfg(target_os = "macos")]
 pub fn enable_ptrace_protection() -> Result<()> {
     // PT_DENY_ATTACH is not re-exported by the `libc` crate; its value is stable.
@@ -127,6 +132,9 @@ pub fn enable_ptrace_protection() -> Result<()> {
             std::ptr::null_mut::<nix::libc::c_char>(),
             0,
         );
+    }
+    if is_debugger_attached() {
+        anyhow::bail!("Debugger already attached");
     }
     Ok(())
 }
