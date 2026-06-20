@@ -10,6 +10,7 @@
 //! factor key derivation land in sibling tasks.
 
 mod format;
+mod keyslot;
 mod policy;
 
 pub use format::{

@@ -48,3 +48,5 @@
 {"seq":48,"timestamp":"2026-06-20T18:49:07.254053760Z","op":"Update","task_id":"yk-format","status":"closed"}
 {"seq":49,"timestamp":"2026-06-20T18:50:59.181566415Z","op":"Update","task_id":"yk-policy-engine","status":"doing"}
 {"seq":50,"timestamp":"2026-06-20T18:53:18.758677012Z","op":"Update","task_id":"yk-policy-engine","status":"closed"}
+{"seq":51,"timestamp":"2026-06-20T19:04:05.081077004Z","op":"Update","task_id":"yk-dek-envelope","status":"doing"}
+{"seq":52,"timestamp":"2026-06-20T19:05:53.429192155Z","op":"Update","task_id":"yk-dek-envelope","status":"closed"}

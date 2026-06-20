@@ -193,6 +193,21 @@ impl EncryptionKey {
         }
     }
 
+    /// Builds a key directly from raw key material — a 32-byte cipher key and a
+    /// 32-byte HMAC key — bypassing password derivation.
+    ///
+    /// Used for randomly generated data-encryption keys and for wrapping keys
+    /// that come from a single high-entropy factor. The salt only feeds password
+    /// derivation, so it is left zeroed here.
+    pub fn from_key_material(key: KeyBytes, hmac_key: KeyBytes) -> Self {
+        Self {
+            version: CypherVersion::default(),
+            key: Zeroizing::new(key),
+            hmac_key: Zeroizing::new(hmac_key),
+            salt: SaltBytes::default(),
+        }
+    }
+
     pub fn as_bytes(&self) -> &KeyBytes {
         &self.key
     }
