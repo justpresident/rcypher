@@ -7,16 +7,22 @@
 //! unlocked DEK can re-distribute the policy without re-presenting every factor.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::io::Write;
+use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
+use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
 use super::factor::{new_password_kind, password_kek};
-use super::format::{Factor, FactorKind, PolicyMetadata};
+use super::format::{
+    Factor, FactorKind, PolicyMetadata, parse_policy_vault, serialize_policy_header,
+};
 use super::keyslot::{self, KeyMaterial};
 use super::parser::{parse_policy, render_policy, validate_factors};
 use super::policy::{Leaf, PolicyNode, distribute, reconstruct};
-use crate::crypto::Argon2Params;
+use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
 
 /// A user-supplied secret for one factor, presented at unlock or enroll time.
 pub enum FactorSecret {
@@ -168,6 +174,47 @@ impl PolicyVault {
     /// Decrypts the vault payload under the DEK.
     pub fn decrypt_payload(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         keyslot::decrypt_payload(&self.dek, ciphertext)
+    }
+
+    /// A `Cypher` keyed by the DEK, for encrypting/decrypting individual stored
+    /// values — the role the password-derived key played in a plain vault.
+    #[must_use]
+    pub fn cypher(&self) -> Cypher {
+        let mut key = [0u8; 32];
+        let mut hmac_key = [0u8; 32];
+        key.copy_from_slice(&self.dek[..32]);
+        hmac_key.copy_from_slice(&self.dek[32..]);
+        Cypher::new(EncryptionKey::from_key_material(key, hmac_key))
+    }
+
+    /// Reads a policy-vault file, satisfies its policy with `secrets`, and returns
+    /// the unlocked vault together with the decrypted payload.
+    pub fn open(
+        path: &Path,
+        secrets: &HashMap<String, FactorSecret>,
+    ) -> Result<(Self, Zeroizing<Vec<u8>>)> {
+        let data = fs::read(path)?;
+        let (meta, payload) = parse_policy_vault(&data)?;
+        let payload = payload.to_vec();
+        let vault = Self::unlock(meta, secrets)?;
+        let plaintext = vault.decrypt_payload(&payload)?;
+        Ok((vault, plaintext))
+    }
+
+    /// Writes the vault — keyslot metadata followed by `payload` encrypted under
+    /// the DEK — to `path`, atomically (temp file then rename).
+    pub fn save(&self, payload: &[u8], path: &Path) -> Result<()> {
+        let mut bytes = serialize_policy_header(&self.metadata())?;
+        bytes.extend_from_slice(&self.encrypt_payload(payload)?);
+
+        let dir = match path.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let mut temp = NamedTempFile::new_in(dir)?;
+        temp.write_all(&bytes)?;
+        temp.persist(path)?;
+        Ok(())
     }
 
     /// Recovers every factor's auth-key from the DEK (for re-distribution).
@@ -385,5 +432,43 @@ mod tests {
         let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
         assert!(vault.enroll_password("p1", "x", &params()).is_err());
         assert!(vault.set_policy("p1 or missing").is_err()); // unknown factor
+    }
+
+    #[test]
+    fn file_roundtrip_single_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+
+        let vault = PolicyVault::create("p1", "pw", &params()).unwrap();
+        vault.save(b"payload-bytes", &path).unwrap();
+
+        let (reopened, payload) = PolicyVault::open(&path, &secrets(&[("p1", "pw")])).unwrap();
+        assert_eq!(payload.as_slice(), b"payload-bytes");
+        assert_eq!(reopened.policy_expr(), "p1");
+
+        assert!(PolicyVault::open(&path, &secrets(&[("p1", "wrong")])).is_err());
+    }
+
+    #[test]
+    fn file_multifactor_and_value_cypher_survives_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("vault");
+
+        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        vault.enroll_password("p2", "two", &params()).unwrap();
+        vault.enroll_password("p3", "three", &params()).unwrap();
+        vault.set_policy("p1 or (p2 and p3)").unwrap();
+
+        // A stored value is encrypted under the DEK-cypher and saved as the payload.
+        let value_ct = vault.cypher().encrypt(b"a stored secret").unwrap();
+        vault.save(&value_ct, &path).unwrap();
+
+        // Reopen via the AND branch; the reopened DEK-cypher decrypts the value.
+        let (reopened, payload) =
+            PolicyVault::open(&path, &secrets(&[("p2", "two"), ("p3", "three")])).unwrap();
+        let plain = reopened.cypher().decrypt(&payload).unwrap();
+        assert_eq!(plain.as_slice(), b"a stored secret");
+
+        assert!(PolicyVault::open(&path, &secrets(&[("p2", "two")])).is_err()); // p2 alone
     }
 }

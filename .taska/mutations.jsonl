@@ -61,3 +61,4 @@
 {"seq":61,"timestamp":"2026-06-20T19:29:37.638500616Z","op":"AddEdge","task_id":"yk-release-030","rel":"depends_on","target":"yk-zeroize-shares"}
 {"seq":62,"timestamp":"2026-06-20T19:29:37.645503170Z","op":"AddEdge","task_id":"yubikey-auth","rel":"has_subtask","target":"yk-zeroize-shares"}
 {"seq":63,"timestamp":"2026-06-20T21:20:23.941156414Z","op":"Append","task_id":"yk-docs","notes":"\n\nDone so far: docs/auth-protocol.md — the normative multi-factor protocol spec (DEK/auth-KEK/share, wrap/unwrap with the AES-KW-vs-AEAD caveat, every operation step by step, worked example, security properties, and literature citations incl. Benaloh-Leichter monotone secret sharing). Remaining: README 'Use as a library'/security sections, CHANGELOG, the in-store command reference, recovery/backup guidance."}
+{"seq":64,"timestamp":"2026-06-20T21:39:49.806322852Z","op":"Update","task_id":"yk-unlock-ux","status":"doing"}
