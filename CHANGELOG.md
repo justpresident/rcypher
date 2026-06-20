@@ -5,6 +5,32 @@ All notable changes to this project are documented here. The format is based on
 pre-1.0 [Semantic Versioning](https://semver.org/) (breaking changes bump the
 minor; features and fixes bump the patch).
 
+## [Unreleased]
+
+### Added
+- **Multi-factor unlock (policy vaults).** A store can now require more than one
+  secret, combined by a boolean access policy.
+  - New stores are created as version-8 policy vaults with a single `password`
+    factor; existing version-7 password stores keep opening through the legacy
+    path unchanged.
+  - In-store commands while unlocked: `factors`, `enroll password NAME`,
+    `policy show`, `policy set EXPR` (e.g. `p1 or (p2 and yk)`), and
+    `remove factor NAME`.
+  - On open, rcypher prints the policy and prompts only for as many factors as
+    are needed to satisfy it.
+  - The payload is encrypted under a random data-encryption key (DEK) that is
+    monotone-secret-shared across the policy tree; changing the policy or adding
+    a factor never re-encrypts stored secrets (the DEK is stable; only the IV
+    changes per save). See `docs/auth-protocol.md`.
+- **Weak-policy warning.** rcypher warns — at `policy set` time and on open —
+  when a single password factor alone can unlock a multi-factor store, since an
+  `or` branch is only as strong as its weakest satisfying set.
+
+### Security
+- Transient secret-shares and recovered per-factor auth-keys are now held in
+  zeroizing buffers throughout the unlock/secret-sharing path, so no share or
+  auth-key lingers in memory un-wiped.
+
 ## [0.2.0] - 2026-06-20
 
 ### Added

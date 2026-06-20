@@ -32,6 +32,13 @@ USER COMMANDS:
   search REGEXP   - Search for keys matching regexp
   del|rm KEY      - Delete a key
   help            - Show this help
+
+AUTH COMMANDS (multi-factor stores):
+  factors             - List enrolled factors
+  enroll password NAME - Enroll a new password factor
+  policy show         - Show the current unlock policy
+  policy set EXPR     - Set the unlock policy, e.g. p1 or (p2 and yk)
+  remove factor NAME  - Remove a factor (not used by the policy)
 ```
 ![demo](demo.gif)
 Secrets are:
@@ -41,6 +48,76 @@ Secrets are:
 * never printed to stdout
 
 * written directly to the terminal (TTY)
+
+New stores are created as multi-factor **policy vaults** (see below); existing
+single-password stores keep opening exactly as before.
+
+## Multi-factor unlock (policy vaults)
+
+A store can require more than one secret to unlock. Each secret is a named
+**factor** (today: a password; FIDO2 security keys are on the way), and an
+**access policy** — a boolean expression over factor names — decides which
+combinations open the store.
+
+```sh
+cypher > enroll password backup     # add a second password factor
+New password for factor 'backup': ********
+Confirm password: ********
+Factor 'backup' enrolled. It is not yet used by the policy — run
+'policy set EXPR' to require or accept it.
+
+cypher > policy set work and backup # require BOTH to unlock
+Policy: work and backup
+
+cypher > factors
+work (password)
+backup (password)
+
+cypher > policy show
+work and backup
+```
+
+Policies combine factors with `and` / `or` and parentheses (`and` binds tighter
+than `or`):
+
+| Policy                     | Unlocks when…                                  |
+|----------------------------|------------------------------------------------|
+| `work`                     | the `work` password is given                   |
+| `work or backup`           | **either** password is given                   |
+| `work and yubikey`         | **both** the password and the security key     |
+| `work or (backup and yubikey)` | `work` alone, **or** `backup` + the key    |
+
+On open, rcypher prints the policy and prompts only for as many factors as are
+needed to satisfy it (leave a prompt empty to skip a factor you don't have).
+
+### How it works
+
+The store payload is encrypted under a random **data-encryption key (DEK)**. The
+DEK is split across the policy tree using monotone secret sharing — an `or`
+replicates the secret to each branch, an `and` XOR-splits it — and each leaf's
+share is wrapped under that factor's key. Recovering the DEK therefore requires
+satisfying the policy. Changing the policy or adding a factor never re-encrypts
+your secrets: the DEK is stable for the life of the store, and only fresh random
+IVs change on each save. The full construction is specified in
+[`docs/auth-protocol.md`](docs/auth-protocol.md).
+
+### Recovery and backup
+
+* Keep at least one **strong recovery branch** — e.g. a long, unique recovery
+  password stored in another password manager — so losing a security key (once
+  supported) doesn't lock you out permanently.
+* Enroll a **backup factor** before tightening the policy, and confirm it
+  unlocks the store on its own branch.
+* A lost factor's secret cannot be recovered; only another satisfying branch of
+  the policy can open the store.
+
+### A note on `or` branches
+
+An `or` is only as strong as its **weakest** satisfying set. A policy like
+`work or (backup and yubikey)` can be opened by `work` alone, so the extra
+security key adds nothing against an attacker who has that one password. rcypher
+warns when a single password factor on its own can unlock a multi-factor store —
+both when you set the policy and when you open the store.
 
 ## Encrypting/Decrypting a file
 
@@ -381,6 +458,13 @@ Header includes:
 
 This allows forward-compatible format upgrades.
 
+A **policy vault** (version 8, the default for new stores) prepends a keyslot
+header — the enrolled factors and the access policy, whose leaves carry the
+secret-shares of the data-encryption key — to the encrypted payload above. The
+leading version tag lets rcypher tell a policy vault from a plain version-7
+password store and pick the right unlock path. See
+[`docs/auth-protocol.md`](docs/auth-protocol.md) for the normative spec.
+
 ## Clipboard Behavior (Important)
 
 rcypher can copy secrets to the system clipboard for convenience.
@@ -436,7 +520,9 @@ If clipboard retention is unacceptable, use terminal output instead.
 - [ ] Extend the header with Argon2id parameters, autodetect too fast key derivation and auto-bump complexity
 - [ ] Warn about weak master password
 - [ ] Add a command to change master password
-- [ ] Add authentication with a YubiKey and Google Authenticator
+- [x] Multi-factor unlock with boolean access policies (password factors) — see
+  "Multi-factor unlock" above
+- [ ] Add a YubiKey factor (FIDO2 `hmac-secret`) to the multi-factor policy model
 - [ ] Add a user notification at start to perform regular backups in multiple places
 - [ ] Add memory locking to prevent from swapping
 - [ ] Enable MIRI in CI
