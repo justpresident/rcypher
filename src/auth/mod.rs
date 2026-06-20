@@ -16,4 +16,4 @@ pub use format::{
     Factor, FactorKind, POLICY_VAULT_VERSION, PolicyMetadata, parse_policy_vault,
     serialize_policy_header,
 };
-pub use policy::{Leaf, PolicyNode};
+pub use policy::{Leaf, PolicyNode, distribute, reconstruct};
