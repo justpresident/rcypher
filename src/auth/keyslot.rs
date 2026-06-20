@@ -50,12 +50,10 @@ pub fn wrap_share(kek: &KeyMaterialBytes, share: &[u8]) -> Result<Vec<u8>> {
 /// Unwraps a leaf's secret-share with a factor's key material.
 ///
 /// Returns `None` when the material does not match (the wrap's HMAC fails) — i.e.
-/// the factor was not satisfied.
-pub fn unwrap_share(kek: &KeyMaterialBytes, wrapped: &[u8]) -> Option<Vec<u8>> {
-    cypher_from_material(kek)
-        .decrypt(wrapped)
-        .ok()
-        .map(|plaintext| plaintext.to_vec())
+/// the factor was not satisfied. The recovered share stays in a [`Zeroizing`]
+/// buffer so it is wiped on drop.
+pub fn unwrap_share(kek: &KeyMaterialBytes, wrapped: &[u8]) -> Option<Zeroizing<Vec<u8>>> {
+    cypher_from_material(kek).decrypt(wrapped).ok()
 }
 
 #[cfg(test)]
@@ -76,7 +74,8 @@ mod tests {
         let kek = [3u8; KEY_MATERIAL_LEN];
         let share = [42u8; KEY_MATERIAL_LEN];
         let wrapped = wrap_share(&kek, &share).unwrap();
-        assert_eq!(unwrap_share(&kek, &wrapped), Some(share.to_vec()));
+        let unwrapped = unwrap_share(&kek, &wrapped).unwrap();
+        assert_eq!(unwrapped.as_slice(), &share[..]);
     }
 
     #[test]

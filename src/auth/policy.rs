@@ -3,6 +3,10 @@ use std::collections::{BTreeSet, HashSet};
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
 use rand::TryRngCore;
+use zeroize::Zeroizing;
+
+/// A secret-share or reconstructed secret, kept in a buffer wiped on drop.
+pub type Share = Zeroizing<Vec<u8>>;
 
 /// A monotone boolean access policy over named factors.
 ///
@@ -83,9 +87,9 @@ fn xor_into(acc: &mut [u8], other: &[u8]) {
 /// [`PolicyNode::And`] XOR-splits it into one independent share per child. Each
 /// leaf receives the secret that reached it. The caller wraps each returned share
 /// under its leaf's factor key.
-pub fn distribute(secret: &[u8], node: &PolicyNode) -> Result<Vec<Vec<u8>>> {
+pub fn distribute(secret: &[u8], node: &PolicyNode) -> Result<Vec<Share>> {
     match node {
-        PolicyNode::Leaf(_) => Ok(vec![secret.to_vec()]),
+        PolicyNode::Leaf(_) => Ok(vec![Zeroizing::new(secret.to_vec())]),
         PolicyNode::Or(children) => {
             if children.is_empty() {
                 bail!("policy has an empty OR node");
@@ -102,10 +106,10 @@ pub fn distribute(secret: &[u8], node: &PolicyNode) -> Result<Vec<Vec<u8>>> {
             }
             // n-of-n XOR sharing: random shares for all but the last child, the
             // last carrying the residual so the XOR of all equals `secret`.
-            let mut residual = secret.to_vec();
-            let mut child_secrets: Vec<Vec<u8>> = Vec::with_capacity(children.len());
+            let mut residual: Share = Zeroizing::new(secret.to_vec());
+            let mut child_secrets: Vec<Share> = Vec::with_capacity(children.len());
             for _ in 0..children.len() - 1 {
-                let mut r = vec![0u8; secret.len()];
+                let mut r: Share = Zeroizing::new(vec![0u8; secret.len()]);
                 rand::rngs::OsRng.try_fill_bytes(&mut r)?;
                 xor_into(&mut residual, &r);
                 child_secrets.push(r);
@@ -127,16 +131,12 @@ pub fn distribute(secret: &[u8], node: &PolicyNode) -> Result<Vec<Vec<u8>>> {
 /// that leaf's factor was satisfied (its share unwrapped), `None` otherwise.
 /// Returns `Some(secret)` iff the policy is satisfied, `None` otherwise.
 #[must_use]
-pub fn reconstruct(node: &PolicyNode, provided: &[Option<Vec<u8>>]) -> Option<Vec<u8>> {
+pub fn reconstruct(node: &PolicyNode, provided: &[Option<Share>]) -> Option<Share> {
     let mut idx = 0;
     reconstruct_at(node, provided, &mut idx)
 }
 
-fn reconstruct_at(
-    node: &PolicyNode,
-    provided: &[Option<Vec<u8>>],
-    idx: &mut usize,
-) -> Option<Vec<u8>> {
+fn reconstruct_at(node: &PolicyNode, provided: &[Option<Share>], idx: &mut usize) -> Option<Share> {
     match node {
         PolicyNode::Leaf(_) => {
             let share = provided.get(*idx).and_then(Clone::clone);
@@ -158,7 +158,7 @@ fn reconstruct_at(
         PolicyNode::And(children) => {
             // XOR all children's secrets; the node fails if any child is missing
             // (but we still walk every child to keep `idx` aligned).
-            let mut acc: Option<Vec<u8>> = None;
+            let mut acc: Option<Share> = None;
             let mut all_present = true;
             for child in children {
                 match reconstruct_at(child, provided, idx) {
@@ -230,7 +230,7 @@ mod tests {
 
         for bits in 0u32..(1u32 << n) {
             let mask: Vec<bool> = (0..n).map(|i| (bits >> i) & 1 == 1).collect();
-            let provided: Vec<Option<Vec<u8>>> = mask
+            let provided: Vec<Option<Share>> = mask
                 .iter()
                 .zip(&shares)
                 .map(|(&m, s)| if m { Some(s.clone()) } else { None })
@@ -242,7 +242,11 @@ mod tests {
 
             assert_eq!(got.is_some(), expected, "policy={policy:?} mask={mask:?}");
             if expected {
-                assert_eq!(got.as_deref(), Some(secret.as_slice()), "mask={mask:?}");
+                assert_eq!(
+                    got.as_ref().map(|s| s.as_slice()),
+                    Some(secret.as_slice()),
+                    "mask={mask:?}"
+                );
             }
         }
     }

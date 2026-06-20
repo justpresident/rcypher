@@ -21,7 +21,7 @@ use super::format::{
 };
 use super::keyslot::{self, KeyMaterial};
 use super::parser::{parse_policy, render_policy, validate_factors};
-use super::policy::{Leaf, PolicyNode, distribute, reconstruct};
+use super::policy::{Leaf, PolicyNode, Share, distribute, reconstruct};
 use crate::constants::{KEY_LEN, KEY_MATERIAL_LEN, KeyBytes, KeyMaterialBytes};
 use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
 
@@ -262,7 +262,7 @@ fn distribute_and_wrap(
 
 fn wrap_leaves(
     node: &PolicyNode,
-    shares: &[Vec<u8>],
+    shares: &[Share],
     idx: &mut usize,
     authkeks: &HashMap<String, KeyMaterial>,
 ) -> Result<PolicyNode> {
@@ -291,7 +291,7 @@ fn wrap_leaves(
 
 fn wrap_children(
     children: &[PolicyNode],
-    shares: &[Vec<u8>],
+    shares: &[Share],
     idx: &mut usize,
     authkeks: &HashMap<String, KeyMaterial>,
 ) -> Result<Vec<PolicyNode>> {
@@ -306,7 +306,7 @@ fn wrap_children(
 fn unwrap_leaves(
     node: &PolicyNode,
     authkeks: &HashMap<String, KeyMaterial>,
-    out: &mut Vec<Option<Vec<u8>>>,
+    out: &mut Vec<Option<Share>>,
 ) {
     match node {
         PolicyNode::Leaf(leaf) => {

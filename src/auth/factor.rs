@@ -93,7 +93,7 @@ mod tests {
 
         let kek = password_kek("correct", &kind).unwrap();
         let wrapped = wrap_share(&kek, &share).unwrap();
-        assert_eq!(unwrap_share(&kek, &wrapped), Some(share.to_vec()));
+        assert_eq!(unwrap_share(&kek, &wrapped).unwrap().as_slice(), &share[..]);
 
         let wrong = password_kek("wrong", &kind).unwrap();
         assert_eq!(unwrap_share(&wrong, &wrapped), None);
