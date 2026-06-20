@@ -131,6 +131,20 @@ pub fn prompt_factor_password(id: &str) -> Result<Option<String>> {
     }
 }
 
+/// Prompts for a new password, twice, and fails unless the two entries match.
+/// Used when enrolling a new factor into an unlocked store.
+pub fn prompt_new_password(label: &str) -> Result<String> {
+    let mut password = rpassword::prompt_password(format!("New password for {label}: "))?;
+    let mut confirmation = rpassword::prompt_password("Confirm password: ")?;
+    if password != confirmation {
+        password.zeroize();
+        confirmation.zeroize();
+        bail!("Passwords do not match");
+    }
+    confirmation.zeroize();
+    Ok(password)
+}
+
 fn show_password_warning() {
     eprintln!("\n╔════════════════════════════════════════════════════════════════════╗");
     eprintln!("║                         ⚠️  IMPORTANT! ⚠️                          ║");

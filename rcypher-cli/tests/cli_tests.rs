@@ -564,3 +564,69 @@ fn test_policy_vault_wrong_password_fails() {
         "unexpected stderr: {stderr}"
     );
 }
+
+/// Creates a version-8 vault with two password factors ("main"/"backup") and an
+/// `main or backup` policy, so the `--insecure-password test_password` path
+/// unlocks it via the "main" factor.
+fn create_multifactor_vault(path: &Path) {
+    use rcypher::{Argon2Params, PolicyVault, Storage, serialize_storage};
+
+    let mut vault =
+        PolicyVault::create("main", "test_password", &Argon2Params::insecure()).unwrap();
+    vault
+        .enroll_password("backup", "backup_pw", &Argon2Params::insecure())
+        .unwrap();
+    vault.set_policy("main or backup").unwrap();
+    let payload = serialize_storage(&Storage::new()).unwrap();
+    vault.save(&payload, path).unwrap();
+}
+
+#[test]
+fn test_policy_vault_factors_and_policy_show() {
+    let (_dir, file_path) = temp_test_file();
+    create_multifactor_vault(&file_path);
+
+    let lines = run_commands(&file_path, b"factors\npolicy show\n".to_vec());
+    assert!(lines.iter().any(|l| l == "main (password)"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "backup (password)"), "{lines:?}");
+    assert!(lines.iter().any(|l| l == "main or backup"), "{lines:?}");
+}
+
+#[test]
+fn test_policy_vault_set_policy_and_remove_factor() {
+    let (_dir, file_path) = temp_test_file();
+    create_multifactor_vault(&file_path);
+
+    // A factor still referenced by the policy cannot be removed.
+    let out = run_commands_str(&file_path, "remove factor backup\n");
+    assert!(
+        out.contains("still used by the policy") || out.contains("change the policy"),
+        "{out}"
+    );
+
+    // Narrow the policy to just 'main'; the change is persisted.
+    run_commands(&file_path, b"policy set main\n".to_vec());
+    let shown = run_commands_str(&file_path, "policy show\n");
+    assert!(
+        shown.contains("main") && !shown.contains("backup"),
+        "{shown}"
+    );
+
+    // Now the unused factor can be removed.
+    run_commands(&file_path, b"remove factor backup\n".to_vec());
+    let factors = run_commands_str(&file_path, "factors\n");
+    assert!(
+        factors.contains("main") && !factors.contains("backup"),
+        "{factors}"
+    );
+}
+
+#[test]
+fn test_legacy_store_rejects_auth_commands() {
+    let (_dir, file_path) = temp_test_file();
+    // A store created through the normal flow is a legacy version-7 store.
+    run_commands(&file_path, b"put k v\n".to_vec());
+
+    let out = run_commands_str(&file_path, "policy show\n");
+    assert!(out.contains("no multi-factor policy"), "{out}");
+}

@@ -1,9 +1,9 @@
 use crate::cli::Backend;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
-use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
-use anyhow::{Result, bail};
-use rcypher::{EncryptedValue, Storage, is_debugger_attached};
+use crate::cli::utils::{copy_to_clipboard, format_timestamp, prompt_new_password, secure_print};
+use anyhow::{Result, anyhow, bail};
+use rcypher::{Argon2Params, EncryptedValue, FactorKind, Storage, is_debugger_attached};
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
@@ -18,6 +18,7 @@ pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
     backend: Backend,
+    argon2_params: Argon2Params,
     filename: PathBuf,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
@@ -28,6 +29,7 @@ impl InteractiveCli {
         prompt: String,
         insecure_stdout: bool,
         backend: Backend,
+        argon2_params: Argon2Params,
         filename: PathBuf,
         last_activity: Arc<AtomicU64>,
         last_security_check: Arc<AtomicU64>,
@@ -36,13 +38,14 @@ impl InteractiveCli {
             prompt,
             insecure_stdout,
             backend,
+            argon2_params,
             filename,
             last_activity,
             last_security_check,
         }
     }
 
-    pub fn run(&self) -> Result<()> {
+    pub fn run(&mut self) -> Result<()> {
         let storage = Arc::new(Mutex::new(self.backend.load_store(&self.filename)?));
 
         let config = Config::builder()
@@ -114,7 +117,7 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn process_cmd(&self, line: &str, storage: &mut Storage) -> Result<()> {
+    fn process_cmd(&mut self, line: &str, storage: &mut Storage) -> Result<()> {
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         let cmd = parts[0];
         match cmd {
@@ -152,6 +155,10 @@ impl InteractiveCli {
                 }
                 self.cmd_delete(parts[1], storage)
             }
+            "enroll" => self.cmd_enroll(&parts, storage),
+            "factors" => self.cmd_factors(),
+            "policy" => self.cmd_policy(&parts, storage),
+            "remove" => self.cmd_remove(&parts, storage),
             "help" => {
                 print_help();
                 Ok(())
@@ -260,6 +267,117 @@ impl InteractiveCli {
         }
         Ok(())
     }
+
+    /// `enroll password NAME` — add a new password factor (prompted, with
+    /// confirmation). The new factor is not used by the policy until a
+    /// `policy set` references it.
+    fn cmd_enroll(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
+        match parts.get(1).copied() {
+            Some("password") => {
+                let id = parts
+                    .get(2)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("syntax: enroll password NAME"))?;
+                self.enroll_password(id, storage)
+            }
+            Some("yubikey") => bail!("YubiKey enrollment is not yet supported"),
+            _ => bail!("syntax: enroll password NAME"),
+        }
+    }
+
+    fn enroll_password(&mut self, id: &str, storage: &Storage) -> Result<()> {
+        let mut password = prompt_new_password(&format!("factor '{id}'"))?;
+        let params = self.argon2_params;
+        let result = self
+            .backend
+            .policy_vault_mut()
+            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))
+            .and_then(|vault| vault.enroll_password(id, &password, &params));
+        password.zeroize();
+        result?;
+
+        self.backend.save_store(storage, &self.filename)?;
+        secure_print(
+            format!(
+                "Factor '{id}' enrolled. It is not yet used by the policy — run \
+                 'policy set EXPR' to require or accept it."
+            ),
+            self.insecure_stdout,
+        )?;
+        Ok(())
+    }
+
+    /// `factors` — list the enrolled factors and their kinds.
+    fn cmd_factors(&self) -> Result<()> {
+        let vault = self
+            .backend
+            .policy_vault()
+            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
+        for factor in vault.metadata().factors {
+            let kind = match factor.kind {
+                FactorKind::Password { .. } => "password",
+                FactorKind::Yubikey { .. } => "yubikey",
+            };
+            secure_print(format!("{} ({kind})", factor.id), self.insecure_stdout)?;
+        }
+        Ok(())
+    }
+
+    /// `policy` / `policy show` — print the policy; `policy set EXPR` — replace it.
+    fn cmd_policy(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
+        match parts.get(1).copied() {
+            None | Some("show") => {
+                let vault = self
+                    .backend
+                    .policy_vault()
+                    .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
+                secure_print(vault.policy_expr(), self.insecure_stdout)
+            }
+            Some("set") => {
+                let expr = parts
+                    .get(2)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("syntax: policy set EXPR"))?;
+                self.set_policy(expr, storage)
+            }
+            Some(other) => bail!("unknown policy subcommand '{other}' (try: policy show|set EXPR)"),
+        }
+    }
+
+    fn set_policy(&mut self, expr: &str, storage: &Storage) -> Result<()> {
+        let new_expr = {
+            let vault = self
+                .backend
+                .policy_vault_mut()
+                .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
+            vault.set_policy(expr)?;
+            vault.policy_expr()
+        };
+        self.backend.save_store(storage, &self.filename)?;
+        secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
+        Ok(())
+    }
+
+    /// `remove factor NAME` — drop a factor (must not be referenced by the policy).
+    fn cmd_remove(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
+        match parts.get(1).copied() {
+            Some("factor") => {
+                let id = parts
+                    .get(2)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow!("syntax: remove factor NAME"))?;
+                {
+                    let vault = self.backend.policy_vault_mut().ok_or_else(|| {
+                        anyhow!("this store has no multi-factor policy to manage")
+                    })?;
+                    vault.remove_factor(id)?;
+                }
+                self.backend.save_store(storage, &self.filename)?;
+                secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
+            }
+            _ => bail!("syntax: remove factor NAME"),
+        }
+    }
 }
 
 fn current_unix_secs() -> u64 {
@@ -282,4 +400,11 @@ fn print_help() {
     println!("  search REGEXP   - Search for keys matching regexp");
     println!("  del|rm KEY      - Delete a key");
     println!("  help            - Show this help");
+    println!();
+    println!("AUTH COMMANDS (multi-factor stores):");
+    println!("  factors             - List enrolled factors");
+    println!("  enroll password NAME - Enroll a new password factor");
+    println!("  policy show         - Show the current unlock policy");
+    println!("  policy set EXPR     - Set the unlock policy, e.g. p1 or (p2 and yk)");
+    println!("  remove factor NAME  - Remove a factor (not used by the policy)");
 }

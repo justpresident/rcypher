@@ -149,10 +149,11 @@ fn run_interactive(
         cypher: Cypher::new(key),
     };
 
-    let interactive_cli = cli::InteractiveCli::new(
+    let mut interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
         backend,
+        get_argon2_params(params),
         params.filename.clone(),
         last_activity,
         last_security_check,
@@ -241,10 +242,11 @@ fn run_interactive_policy(
     let cypher = vault.cypher();
     let backend = cli::Backend::Policy { vault, cypher };
 
-    let interactive_cli = cli::InteractiveCli::new(
+    let mut interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
         backend,
+        get_argon2_params(params),
         params.filename.clone(),
         last_activity,
         last_security_check,

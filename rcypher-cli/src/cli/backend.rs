@@ -27,6 +27,25 @@ impl Backend {
         }
     }
 
+    /// The underlying policy vault, if this is a multi-factor store. `None` for a
+    /// legacy single-password store.
+    pub const fn policy_vault(&self) -> Option<&PolicyVault> {
+        match self {
+            Self::Policy { vault, .. } => Some(vault),
+            Self::Legacy { .. } => None,
+        }
+    }
+
+    /// Mutable access to the policy vault, for factor/policy management. `None` for
+    /// a legacy single-password store. Mutating factors or the policy leaves the
+    /// DEK — and therefore the session [`Cypher`] — unchanged.
+    pub const fn policy_vault_mut(&mut self) -> Option<&mut PolicyVault> {
+        match self {
+            Self::Policy { vault, .. } => Some(vault),
+            Self::Legacy { .. } => None,
+        }
+    }
+
     /// Loads the store from `filename`.
     pub fn load_store(&self, filename: &Path) -> Result<Storage> {
         match self {
