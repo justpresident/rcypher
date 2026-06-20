@@ -54,3 +54,9 @@
 {"seq":54,"timestamp":"2026-06-20T19:07:29.113038283Z","op":"Update","task_id":"yk-password-factor","status":"closed"}
 {"seq":55,"timestamp":"2026-06-20T19:08:20.488186627Z","op":"Update","task_id":"yk-policy-parser","status":"doing"}
 {"seq":56,"timestamp":"2026-06-20T19:09:32.349151947Z","op":"Update","task_id":"yk-policy-parser","status":"closed"}
+{"seq":57,"timestamp":"2026-06-20T19:25:40.155709938Z","op":"Update","task_id":"yk-factor-mgmt","status":"doing"}
+{"seq":58,"timestamp":"2026-06-20T19:29:37.616966108Z","op":"Update","task_id":"yk-factor-mgmt","status":"closed"}
+{"seq":59,"timestamp":"2026-06-20T19:29:37.624404251Z","op":"Create","task_id":"yk-zeroize-shares","notes":"The secret-sharing path passes shares and recovered authkeys through plain Vec<u8>: keyslot::unwrap_share copies out of a Zeroizing buffer via to_vec; policy::reconstruct accumulates Vec<u8> shares; vault unlock builds a Vec<Option<Vec<u8>>>. The final DEK and the authkek map entries ARE Zeroizing, but these transient 64-byte secret buffers are not wiped. Thread Zeroizing through unwrap_share, reconstruct's provided/accumulator, and to_key_material's source so no share/authkek lingers un-zeroized. Matches rcypher zeroize-everything ethos. Deferred from yk-factor-mgmt to keep that task focused on the architecture.","status":"todo","task_type":"task","title":"Tighten zeroization of policy shares/authkeks"}
+{"seq":60,"timestamp":"2026-06-20T19:29:37.631430497Z","op":"AddEdge","task_id":"yk-zeroize-shares","rel":"depends_on","target":"yk-factor-mgmt"}
+{"seq":61,"timestamp":"2026-06-20T19:29:37.638500616Z","op":"AddEdge","task_id":"yk-release-030","rel":"depends_on","target":"yk-zeroize-shares"}
+{"seq":62,"timestamp":"2026-06-20T19:29:37.645503170Z","op":"AddEdge","task_id":"yubikey-auth","rel":"has_subtask","target":"yk-zeroize-shares"}

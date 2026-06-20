@@ -36,6 +36,12 @@ pub enum FactorKind {
 pub struct Factor {
     pub id: String,
     pub kind: FactorKind,
+    /// This factor's auth-key (the 64-byte material it derives from its password
+    /// or security key) encrypted under the DEK. It lets a holder of the unlocked
+    /// DEK re-derive every factor's wrapping key — so the policy can be changed
+    /// without presenting every factor again — while revealing nothing to an
+    /// attacker who lacks the DEK.
+    pub authkek_under_dek: Vec<u8>,
 }
 
 /// Keyslot metadata stored ahead of the DEK-encrypted payload: the enrolled
@@ -86,6 +92,7 @@ mod tests {
                         time_cost: 3,
                         parallelism: 1,
                     },
+                    authkek_under_dek: vec![10, 11, 12],
                 },
                 Factor {
                     id: "yk-main".into(),
@@ -95,6 +102,7 @@ mod tests {
                         salt: [2u8; 32],
                         require_pin: true,
                     },
+                    authkek_under_dek: vec![13, 14],
                 },
             ],
             // pass1 OR (pass1 AND yk-main)

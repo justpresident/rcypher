@@ -9,9 +9,6 @@
 //! ```
 //! Factor names are alphanumeric with `-`/`_`; `and`/`or` are reserved keywords.
 
-// Used by tests now; wired into the policy commands by later tasks.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 
 use anyhow::{Result, bail};
@@ -143,10 +140,14 @@ fn join(children: &[PolicyNode], sep: &str, parent: &PolicyNode) -> String {
     children
         .iter()
         .map(|child| {
-            // An OR inside an AND must be parenthesized to preserve grouping;
-            // everything else is unambiguous since AND binds tighter than OR.
+            // Parenthesize a compound child of the opposite operator: required for
+            // an OR inside an AND, and kept for readability for an AND inside an OR
+            // (so `pass1 or (pass2 and yk)` renders as typed).
             let s = render_policy(child);
-            if matches!(parent, PolicyNode::And(_)) && matches!(child, PolicyNode::Or(_)) {
+            if matches!(
+                (parent, child),
+                (PolicyNode::And(_), PolicyNode::Or(_)) | (PolicyNode::Or(_), PolicyNode::And(_))
+            ) {
                 format!("({s})")
             } else {
                 s

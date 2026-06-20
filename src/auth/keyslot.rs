@@ -5,10 +5,6 @@
 //! by reusing the [`Cypher`] envelope, whose authentication tag doubles as the
 //! "was this factor satisfied?" check on unwrap.
 
-// These helpers are exercised by tests now and wired into the enroll/unlock call
-// graph by the factor-management task; allow dead_code until then.
-#![allow(dead_code)]
-
 use anyhow::Result;
 use rand::TryRngCore;
 use zeroize::Zeroizing;

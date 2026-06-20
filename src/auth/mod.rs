@@ -14,9 +14,11 @@ mod format;
 mod keyslot;
 mod parser;
 mod policy;
+mod vault;
 
 pub use format::{
     Factor, FactorKind, POLICY_VAULT_VERSION, PolicyMetadata, parse_policy_vault,
     serialize_policy_header,
 };
 pub use policy::{Leaf, PolicyNode, distribute, reconstruct};
+pub use vault::{FactorSecret, PolicyVault};

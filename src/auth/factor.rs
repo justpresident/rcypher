@@ -5,9 +5,6 @@
 //! the input is a human password). The FIDO2 yubikey factor lands in a later
 //! task; its key material comes from the authenticator's `hmac-secret` output.
 
-// Used by tests now; wired into enroll/unlock by the factor-management task.
-#![allow(dead_code)]
-
 use anyhow::{Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::TryRngCore;
