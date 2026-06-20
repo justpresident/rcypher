@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
 
@@ -60,6 +62,31 @@ impl PolicyMetadata {
     #[must_use]
     pub fn policy_expr(&self) -> String {
         super::parser::render_policy(&self.policy)
+    }
+
+    /// Password factors that, on their own, satisfy a multi-factor policy — i.e.
+    /// a single low-entropy secret that bypasses every stronger requirement.
+    ///
+    /// Because an `Or` is only as strong as its weakest branch, such a factor
+    /// silently reduces the store's protection to one password. Returns the empty
+    /// vector for a single-factor policy (where one password is the expected
+    /// baseline) or when no single password unlocks the store.
+    #[must_use]
+    pub fn single_password_unlockers(&self) -> Vec<String> {
+        // A policy over fewer than two distinct factors cannot have a weak OR
+        // branch — a lone password is then the intended protection, not a bypass.
+        if self.policy.referenced_factors().len() < 2 {
+            return Vec::new();
+        }
+        self.factors
+            .iter()
+            .filter(|f| matches!(f.kind, FactorKind::Password { .. }))
+            .filter(|f| {
+                let alone: HashSet<String> = std::iter::once(f.id.clone()).collect();
+                self.policy.is_satisfied_by(&alone)
+            })
+            .map(|f| f.id.clone())
+            .collect()
     }
 }
 
@@ -159,5 +186,82 @@ mod tests {
     #[test]
     fn rejects_too_short() {
         assert!(parse_policy_vault(&[8]).is_err());
+    }
+
+    fn password_factor(id: &str) -> Factor {
+        Factor {
+            id: id.into(),
+            kind: FactorKind::Password {
+                salt: [0u8; 32],
+                memory_cost: 1,
+                time_cost: 1,
+                parallelism: 1,
+            },
+            authkek_under_dek: Vec::new(),
+        }
+    }
+
+    fn yubikey_factor(id: &str) -> Factor {
+        Factor {
+            id: id.into(),
+            kind: FactorKind::Yubikey {
+                credential_id: Vec::new(),
+                rp_id: "rcypher".into(),
+                salt: [0u8; 32],
+                require_pin: false,
+            },
+            authkek_under_dek: Vec::new(),
+        }
+    }
+
+    fn meta(factors: Vec<Factor>, expr: &str) -> PolicyMetadata {
+        PolicyMetadata {
+            factors,
+            policy: crate::auth::parser::parse_policy(expr).unwrap(),
+        }
+    }
+
+    #[test]
+    fn single_password_unlockers_flags_weak_or_branches() {
+        // A single-factor policy is the baseline, not a weak bypass.
+        assert!(
+            meta(vec![password_factor("p1")], "p1")
+                .single_password_unlockers()
+                .is_empty()
+        );
+
+        // p1 alone bypasses the (p2 and yk) branch.
+        assert_eq!(
+            meta(
+                vec![
+                    password_factor("p1"),
+                    password_factor("p2"),
+                    yubikey_factor("yk"),
+                ],
+                "p1 or (p2 and yk)",
+            )
+            .single_password_unlockers(),
+            vec!["p1".to_string()]
+        );
+
+        // A genuine AND of two passwords is not flagged.
+        assert!(
+            meta(
+                vec![password_factor("p1"), password_factor("p2")],
+                "p1 and p2",
+            )
+            .single_password_unlockers()
+            .is_empty()
+        );
+
+        // A password that bypasses a YubiKey is flagged; the YubiKey is not.
+        assert_eq!(
+            meta(
+                vec![password_factor("p1"), yubikey_factor("yk")],
+                "p1 or yk"
+            )
+            .single_password_unlockers(),
+            vec!["p1".to_string()]
+        );
     }
 }

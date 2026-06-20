@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
@@ -44,6 +44,27 @@ impl PolicyNode {
             Self::Leaf(leaf) => available.contains(&leaf.factor),
             Self::And(children) => children.iter().all(|c| c.is_satisfied_by(available)),
             Self::Or(children) => children.iter().any(|c| c.is_satisfied_by(available)),
+        }
+    }
+
+    /// The distinct factor ids this policy references.
+    #[must_use]
+    pub fn referenced_factors(&self) -> BTreeSet<String> {
+        let mut ids = BTreeSet::new();
+        self.collect_factors(&mut ids);
+        ids
+    }
+
+    fn collect_factors(&self, ids: &mut BTreeSet<String>) {
+        match self {
+            Self::Leaf(leaf) => {
+                ids.insert(leaf.factor.clone());
+            }
+            Self::And(children) | Self::Or(children) => {
+                for child in children {
+                    child.collect_factors(ids);
+                }
+            }
         }
     }
 }

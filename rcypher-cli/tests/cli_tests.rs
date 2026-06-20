@@ -663,3 +663,47 @@ fn test_legacy_store_opens_and_rejects_auth_commands() {
     let out = run_commands_str(&file_path, "policy show\n");
     assert!(out.contains("no multi-factor policy"), "{out}");
 }
+
+#[test]
+fn test_weak_policy_warning_on_open() {
+    let (_dir, file_path) = temp_test_file();
+    // create_multifactor_vault sets policy "main or backup" — either password alone
+    // unlocks, which is a weak OR branch.
+    create_multifactor_vault(&file_path);
+
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&file_path)
+        .write_stdin(b"get nope\n".to_vec())
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Weak policy"), "{stderr}");
+}
+
+#[test]
+fn test_no_weak_warning_for_single_password_store() {
+    let (_dir, file_path) = temp_test_file();
+    create_policy_vault(&file_path, "main", "test_password");
+
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    let output = cmd
+        .arg("--quiet")
+        .arg("--insecure-stdout")
+        .arg("--insecure-password")
+        .arg("test_password")
+        .arg("--insecure-allow-debugging")
+        .arg(&file_path)
+        .write_stdin(b"get nope\n".to_vec())
+        .output()
+        .unwrap();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("Weak policy"), "{stderr}");
+}

@@ -1,7 +1,10 @@
 use crate::cli::Backend;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
-use crate::cli::utils::{copy_to_clipboard, format_timestamp, prompt_new_password, secure_print};
+use crate::cli::utils::{
+    copy_to_clipboard, format_timestamp, prompt_new_password, secure_print,
+    warn_single_password_unlock,
+};
 use anyhow::{Result, anyhow, bail};
 use rcypher::{Argon2Params, EncryptedValue, FactorKind, Storage, is_debugger_attached};
 use rustyline::CompletionType;
@@ -345,16 +348,20 @@ impl InteractiveCli {
     }
 
     fn set_policy(&mut self, expr: &str, storage: &Storage) -> Result<()> {
-        let new_expr = {
+        let (new_expr, weak) = {
             let vault = self
                 .backend
                 .policy_vault_mut()
                 .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
             vault.set_policy(expr)?;
-            vault.policy_expr()
+            (
+                vault.policy_expr(),
+                vault.metadata().single_password_unlockers(),
+            )
         };
         self.backend.save_store(storage, &self.filename)?;
         secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
+        warn_single_password_unlock(&weak);
         Ok(())
     }
 
