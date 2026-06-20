@@ -41,7 +41,7 @@ use zeroize::Zeroize;
         .args(&["encrypt", "decrypt"])
         .multiple(false)
 ))]
-#[command(name = "cypher")]
+#[command(name = "rcypher")]
 #[command(version)]
 #[command(about = "Command line cypher tool for encrypting secrets.
 By default treats provided filename as an encrypted key-value storage and provides put/get functionality for individual secrets.

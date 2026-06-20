@@ -144,13 +144,16 @@ pub fn enable_ptrace_protection() -> Result<()> {
     Ok(())
 }
 
-/// Check if a debugger is attached using all available methods for the current platform
-/// TODO: implement sysctl check for FreeBSD
+/// Check whether a debugger/tracer is attached to this process.
+///
+/// Uses the platform's native mechanism: `/proc/self/status` `TracerPid` on
+/// Linux and a `sysctl` `P_TRACED` query on macOS. Other platforms currently
+/// report `false` (no detection).
 pub fn is_debugger_attached() -> bool {
     check_proc_status()
 }
 
-/// Method 1: Linux - Check /proc/self/status for `TracerPid`
+/// Linux — check /proc/self/status for `TracerPid`.
 ///
 /// After `PTRACE_TRACEME` is called in the forked child, `TracerPid` should equal our parent PID.
 /// Returns true if a debugger is detected (`TracerPid` doesn't match expected parent or is 0)

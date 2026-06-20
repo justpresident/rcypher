@@ -155,19 +155,20 @@ version number — bump them in lockstep.
 
 14. Publishing the release in the previous step **fires the binary workflow** —
     that is the trigger, so the release must be *published*, not left as a draft.
-    `.github/workflows/release.yml` builds three binaries on their native runners
+    `.github/workflows/release.yml` builds four binaries on their native runners
     and attaches them:
 
     | Target | Runner | Asset |
     |---|---|---|
-    | `x86_64-unknown-linux-musl` | `ubuntu-latest` | static Linux binary (any distro, any glibc) |
+    | `x86_64-unknown-linux-musl` | `ubuntu-latest` | static Linux x86_64 (any distro, any glibc) |
+    | `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` | static Linux ARM64 |
     | `x86_64-apple-darwin` | `macos-15-intel` | macOS Intel |
     | `aarch64-apple-darwin` | `macos-15` | macOS Apple Silicon |
 
     Each is a `rcypher-vX.Y.Z-<target>.tar.gz` (holding the stripped `rcypher` +
     `README.md` + `LICENSE`) with a sibling `.sha256`. Watch the run finish
-    (`gh run watch` / Actions tab) and confirm **all six assets** (three archives +
-    three checksums) are attached. The binaries are stripped and fat-LTO'd via
+    (`gh run watch` / Actions tab) and confirm **all eight assets** (four archives +
+    four checksums) are attached. The binaries are stripped and fat-LTO'd via
     `[profile.release]` in `Cargo.toml` — nothing to do per target.
 
     Windows is not covered (the CLI is Unix-only); Windows users use WSL or the

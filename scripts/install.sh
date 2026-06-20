@@ -9,9 +9,9 @@
 # This script must be EXECUTED, not SOURCED (it calls `exit` on errors).
 #   [ok]  curl -fsSL ... | bash        [ok]  bash install.sh        [no]  source install.sh
 #
-# Prebuilt binaries cover x86_64 Linux (static musl) and macOS (Intel + Apple
-# Silicon). Other Linux arches fall back to building from source via `cargo
-# install`; Windows is not supported (use WSL).
+# Prebuilt binaries cover x86_64 and ARM64 Linux (static musl) and macOS (Intel +
+# Apple Silicon); Windows is not supported (use WSL). If a download fails, the
+# script falls back to building from source via `cargo install`.
 #
 # Environment overrides:
 #   RCYPHER_VERSION         release tag to install (default: the latest), e.g. v0.2.0
@@ -77,10 +77,7 @@ detect_target() {
     arm64 | aarch64) arch="aarch64" ;;
     *) die "unsupported architecture '$(uname -m)'" ;;
   esac
-  # Releases ship x86_64 for Linux, and both arches for macOS.
-  if [ "$os" = "unknown-linux-musl" ] && [ "$arch" != "x86_64" ]; then
-    return 1 # non-x86_64 Linux: no prebuilt, build from source via cargo
-  fi
+  # Releases ship both arches (x86_64 + aarch64) for Linux and macOS.
   TARGET="${arch}-${os}"
 }
 

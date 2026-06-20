@@ -4,9 +4,10 @@ name: Release binaries
 # to the GitHub release for the tag. This never publishes to crates.io -
 # `cargo publish` stays a separate manual step in docs/crate_release_process.md.
 #
-# Three binaries: a static x86_64 Linux (musl) build that runs on any distro
-# regardless of glibc version, plus Intel and Apple-Silicon macOS builds (built
-# native - cross-compiling Apple targets from Linux needs Apple's SDK).
+# Four binaries: static x86_64 and ARM64 Linux (musl) builds that run on any
+# distro regardless of glibc version, plus Intel and Apple-Silicon macOS builds.
+# Each is built on a NATIVE runner - cross-compiling Apple targets from Linux
+# needs Apple's SDK, and native ARM avoids a cross-musl toolchain.
 #
 # Fires when a GitHub release is PUBLISHED (the curated-notes step in
 # docs/crate_release_process.md), so the binary attaches to that release with no
@@ -33,10 +34,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Static musl: one Linux binary that runs on any distro regardless of
-          # glibc version.
+          # Static musl: a Linux binary that runs on any distro regardless of
+          # glibc version. Built on each arch's native runner.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
           # macOS Intel, built native on the Intel runner.
           - os: macos-15-intel
             target: x86_64-apple-darwin
@@ -60,9 +63,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Pure-Rust crate, but the musl target links through musl-gcc.
+      # Pure-Rust crate, but the musl targets link through musl-gcc.
       - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: contains(matrix.target, '-linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       - name: Cache cargo

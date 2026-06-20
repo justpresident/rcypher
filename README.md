@@ -177,9 +177,9 @@ Or via cargo (any platform with a Rust toolchain):
 cargo install rcypher-cli   # installs the `rcypher` binary
 ```
 
-Prebuilt binaries cover **x86_64 Linux** (static musl) and **macOS** (Intel +
-Apple Silicon); other Linux architectures build from source via the cargo command
-above. Windows isn't supported — use WSL or the [library](#use-as-a-library).
+Prebuilt binaries cover **Linux** (x86_64 and ARM64, static musl) and **macOS**
+(Intel + Apple Silicon). Windows isn't supported — use WSL or the
+[library](#use-as-a-library).
 
 ---
 
@@ -331,29 +331,32 @@ This prevents unencrypted secrets from being written to disk in the event of a c
 - Does not prevent privileged (root) attackers from forcing core dumps
 - Does not protect against memory inspection by debuggers
 
-### Anti-Debugging Protection (Linux)
+### Anti-Debugging Protection
 
-`rcypher` implements ptrace-based anti-debugging protection using the secure fork model described in `ptrace(2)`:
+`rcypher` continuously detects debugger/tracer attachment and refuses to decrypt
+secrets while one is present. The mechanism is platform-specific:
 
-**How it works:**
+**On Linux** — the secure fork model described in `ptrace(2)`:
 1. At startup, the process forks into parent and child
 2. Child calls `PTRACE_TRACEME` to be traced by the parent
 3. Child stores the parent PID and continues as the main application
 4. Parent monitors the child for its entire lifetime
-5. During runtime, the child continuously verifies that `TracerPid` matches the stored parent PID
+5. During runtime, the child continuously verifies that `TracerPid` (from `/proc/self/status`) matches the stored parent PID; if it becomes 0 or changes, the app refuses to decrypt.
+
+**On macOS** — the same properties without Linux's `timer_create`/`PTRACE_TRACEME`:
+- continuous detection by checking this process's `P_TRACED` flag via `sysctl` on every watchdog tick (the analog of the Linux `TracerPid` read);
+- `PT_DENY_ATTACH` at startup to refuse *future* attaches, followed immediately by a `P_TRACED` re-check so an already-attached debugger aborts;
+- the watchdog is driven by a kernel-signal interval timer (`setitimer(ITIMER_REAL)` → `SIGALRM`), not a sleep loop, so a frozen or single-stepped process is detectable.
 
 **What this prevents:**
-- External debuggers from attaching (e.g., `gdb`, `strace`)
+- External debuggers from attaching (e.g., `gdb`, `lldb`, `strace`)
 - Runtime inspection via ptrace-based tools
 - Dynamic analysis and memory inspection
 
-**Detection behavior:**
-If `TracerPid` becomes 0 (tracing stopped) or changes to a different PID, the application detects tampering and refuses to decrypt secrets.
-
 **Limitations:**
-- Does not protect against kernel-level debugging (e.g., kprobes, eBPF)
+- Does not protect against kernel-level debugging (e.g., kprobes, eBPF, DTrace)
 - Does not protect against privileged (root) attackers who can modify kernel behavior
-- Can be bypassed by modifying `/proc/self/status` in a compromised OS
+- Can be bypassed by tampering with the kernel's view of process state (e.g. `/proc/self/status` on Linux) in a compromised OS
 - Does not prevent static analysis or reverse engineering
 
 These runtime protections are **defense-in-depth measures** and do not replace the core threat model. They provide additional barriers against casual memory inspection and debugging but cannot stop a determined attacker with OS-level privileges.
