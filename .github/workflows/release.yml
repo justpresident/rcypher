@@ -1,0 +1,98 @@
+name: Release binaries
+
+# Build a prebuilt `rcypher` binary and attach it to the GitHub release for the
+# tag. This never publishes to crates.io - `cargo publish` stays a separate manual
+# step in docs/crate_release_process.md.
+#
+# Only a static Linux (musl) binary is built: rcypher-cli's runtime hardening uses
+# Linux-specific facilities (POSIX interval timers via `nix::sys::timer` and Linux
+# ptrace), so the binary is Linux-only. The musl target produces one binary that
+# runs on any distro regardless of glibc version.
+#
+# Fires when a GitHub release is PUBLISHED (the curated-notes step in
+# docs/crate_release_process.md), so the binary attaches to that release with no
+# race against its creation.
+on:
+  release:
+    types: [published]
+  # Manual run, so the workflow can be exercised against an EXISTING tag without
+  # cutting a new release: dispatch with e.g. tag = v0.2.0.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and attach the binary to (e.g. v0.2.0)'
+        required: true
+
+permissions:
+  contents: write  # create/update the release and upload assets
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Static musl: one Linux binary that runs on any distro regardless of
+          # glibc version.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: echo "name=${{ github.event.inputs.tag || github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout the tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.tag.outputs.name }}
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Pure-Rust crate, but the musl target links through musl-gcc.
+      - name: Install musl tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rcypher-cli --bin rcypher
+
+      # Archive: rcypher + README + LICENSE as rcypher-<tag>-<target>.tar.gz, plus
+      # a sibling .sha256. The binary is already stripped via [profile.release].
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="rcypher-${{ steps.tag.outputs.name }}-${{ matrix.target }}"
+          staging="$name"
+          mkdir "$staging"
+          cp "target/${{ matrix.target }}/release/rcypher" "$staging/"
+          cp README.md LICENSE "$staging/"
+          tar czf "$name.tar.gz" "$staging"
+          shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # Upload via the `gh` CLI (preinstalled on the runners). The release always
+      # exists here (this fires on `release: published`, and workflow_dispatch
+      # targets an existing tag's release); `--clobber` makes a re-run idempotent.
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          gh release upload "${{ steps.tag.outputs.name }}" \
+            "${{ steps.package.outputs.archive }}" \
+            "${{ steps.package.outputs.archive }}.sha256" \
+            --clobber

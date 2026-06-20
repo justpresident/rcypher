@@ -44,12 +44,15 @@ version number — bump them in lockstep.
    the lean-core build that proves the library is usable without the bundled
    storage format:
    ```bash
-   cargo clippy --all --all-features --all-targets -- -D warnings
+   cargo clippy --all --all-features -- -D warnings
    cargo clippy -p rcypher --no-default-features -- -D warnings
    cargo fmt --all -- --check
    cargo test --all --all-features
    cargo test -p rcypher --no-default-features          # lean core (crypto only)
    ```
+   (Clippy runs **without** `--all-targets`: the crate-level `unwrap_used` /
+   `expect_used` lints intentionally don't apply to test code, where `unwrap` is
+   the assertion style — `cargo test` above already compiles every test target.)
    Then **validate the library example by hand**. `examples/custom_format.rs` is
    the bring-your-own-format readiness material; run it end to end and read the
    output — the in-memory and on-disk round-trips must both report OK:
@@ -148,10 +151,47 @@ version number — bump them in lockstep.
     paste the changelog section → **Publish release** → then delete the scratch
     file.
 
-## Prebuilt binaries (not yet automated)
+## Attach the prebuilt binary
 
-There is currently **no** prebuilt-binary release workflow — the GitHub release
-ships notes only, and users install via `cargo install rcypher-cli` (or
-`cargo add rcypher` for the library). If a `release.yml` workflow that builds and
-attaches per-target `rcypher` binaries is added later, document its trigger and
-the asset contract here.
+14. Publishing the release in the previous step **fires the binary workflow** —
+    that is the trigger, so the release must be *published*, not left as a draft.
+    `.github/workflows/release.yml` builds a static Linux binary and attaches it:
+
+    | Target | Runner | Asset |
+    |---|---|---|
+    | `x86_64-unknown-linux-musl` | `ubuntu-latest` | static Linux binary (any distro, any glibc) |
+
+    The asset is `rcypher-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` (holding the
+    stripped `rcypher` + `README.md` + `LICENSE`) with a sibling `.sha256`. Watch
+    the run finish (`gh run watch` / Actions tab) and confirm both assets (the
+    archive + its checksum) are attached. The binary is stripped and fat-LTO'd via
+    `[profile.release]` in `Cargo.toml` — nothing to do per target.
+
+    **Linux only.** rcypher-cli's runtime hardening uses Linux-specific facilities
+    (POSIX interval timers via `nix::sys::timer`, Linux ptrace), so it does not
+    build on macOS/Windows; those users build from source or depend on the library
+    crate. If that hardening is ever made portable, add the native macOS runners to
+    the workflow matrix (cross-compiling Apple targets from Linux is not supported).
+
+15. **If CI is unavailable**, build and upload the binary by hand from the tagged
+    tree:
+    ```bash
+    rustup target add x86_64-unknown-linux-musl
+    cargo build --release --locked --target x86_64-unknown-linux-musl -p rcypher-cli --bin rcypher
+    name="rcypher-v0.2.0-x86_64-unknown-linux-musl"
+    mkdir "$name" && cp target/x86_64-unknown-linux-musl/release/rcypher README.md LICENSE "$name/"
+    tar czf "$name.tar.gz" "$name" && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+    gh release upload v0.2.0 "$name.tar.gz" "$name.tar.gz.sha256"
+    ```
+
+### Smoke-testing the workflow without cutting a release
+
+The workflow also has a `workflow_dispatch` trigger taking an existing tag, so you
+can exercise the whole build/package/upload path against a release that already
+exists (it attaches the asset to that release):
+```bash
+gh workflow run "Release binaries" -f tag=v0.2.0
+gh run watch
+```
+Use this to validate a change to `release.yml` before relying on it for a real
+release.
