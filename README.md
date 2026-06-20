@@ -156,36 +156,30 @@ legitimately-traced host process, opt out with `Cypher::with_trace_detection(key
 
 ## Installing the CLI
 
-### From crates.io (any platform with a Rust toolchain)
+The quickest way (Linux x86_64) — download the prebuilt binary, verify its
+checksum, and put it on your `PATH`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/justpresident/rcypher/main/scripts/install.sh | bash
+```
+
+It picks the binary from the
+[latest release](https://github.com/justpresident/rcypher/releases/latest),
+verifies its checksum, installs to `/usr/local/bin` (or `~/.local/bin` if that
+isn't writable), and — if that directory isn't on your `PATH` — adds it to your
+shell's rc file. Override the location with `RCYPHER_INSTALL_DIR=...`, pin a tag
+with `RCYPHER_VERSION=v0.2.0`, or skip the rc edit with `RCYPHER_NO_MODIFY_PATH=1`.
+Prefer to read before you pipe? It's [`scripts/install.sh`](scripts/install.sh).
+
+Or via cargo (any platform with a Rust toolchain):
 
 ```sh
 cargo install rcypher-cli   # installs the `rcypher` binary
 ```
 
-### Prebuilt binary (Linux, no toolchain required)
-
-Each [GitHub release](https://github.com/justpresident/rcypher/releases/latest)
-attaches a static `x86_64-unknown-linux-musl` binary that runs on any Linux distro
-regardless of glibc version. Download it, verify the checksum, and put it on your
-`PATH` (substitute the latest version for `v0.2.0`):
-
-```sh
-VER=v0.2.0
-TARGET=x86_64-unknown-linux-musl
-base="https://github.com/justpresident/rcypher/releases/download/$VER"
-
-curl -fsSLO "$base/rcypher-$VER-$TARGET.tar.gz"
-curl -fsSLO "$base/rcypher-$VER-$TARGET.tar.gz.sha256"
-sha256sum -c "rcypher-$VER-$TARGET.tar.gz.sha256"        # verify integrity
-tar xzf "rcypher-$VER-$TARGET.tar.gz"
-install -m755 "rcypher-$VER-$TARGET/rcypher" ~/.local/bin/   # or /usr/local/bin (with sudo)
-
-rcypher --help
-```
-
-The CLI is **Linux-only** (its runtime hardening uses Linux POSIX timers and
-ptrace). On macOS/Windows, build from source or use the
-[library](#use-as-a-library).
+Prebuilt binaries cover **x86_64 Linux** (static musl) and **macOS** (Intel +
+Apple Silicon); other Linux architectures build from source via the cargo command
+above. Windows isn't supported — use WSL or the [library](#use-as-a-library).
 
 ---
 

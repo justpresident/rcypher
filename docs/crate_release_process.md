@@ -155,28 +155,31 @@ version number — bump them in lockstep.
 
 14. Publishing the release in the previous step **fires the binary workflow** —
     that is the trigger, so the release must be *published*, not left as a draft.
-    `.github/workflows/release.yml` builds a static Linux binary and attaches it:
+    `.github/workflows/release.yml` builds three binaries on their native runners
+    and attaches them:
 
     | Target | Runner | Asset |
     |---|---|---|
     | `x86_64-unknown-linux-musl` | `ubuntu-latest` | static Linux binary (any distro, any glibc) |
+    | `x86_64-apple-darwin` | `macos-15-intel` | macOS Intel |
+    | `aarch64-apple-darwin` | `macos-15` | macOS Apple Silicon |
 
-    The asset is `rcypher-vX.Y.Z-x86_64-unknown-linux-musl.tar.gz` (holding the
-    stripped `rcypher` + `README.md` + `LICENSE`) with a sibling `.sha256`. Watch
-    the run finish (`gh run watch` / Actions tab) and confirm both assets (the
-    archive + its checksum) are attached. The binary is stripped and fat-LTO'd via
+    Each is a `rcypher-vX.Y.Z-<target>.tar.gz` (holding the stripped `rcypher` +
+    `README.md` + `LICENSE`) with a sibling `.sha256`. Watch the run finish
+    (`gh run watch` / Actions tab) and confirm **all six assets** (three archives +
+    three checksums) are attached. The binaries are stripped and fat-LTO'd via
     `[profile.release]` in `Cargo.toml` — nothing to do per target.
 
-    **Linux only.** rcypher-cli's runtime hardening uses Linux-specific facilities
-    (POSIX interval timers via `nix::sys::timer`, Linux ptrace), so it does not
-    build on macOS/Windows; those users build from source or depend on the library
-    crate. If that hardening is ever made portable, add the native macOS runners to
-    the workflow matrix (cross-compiling Apple targets from Linux is not supported).
+    Windows is not covered (the CLI is Unix-only); Windows users use WSL or the
+    library crate. macOS keeps the same security model as Linux via platform
+    equivalents — `setitimer(ITIMER_REAL)` for the watchdog timer and a continuous
+    `sysctl`/`P_TRACED` check for debugger detection (see `src/security.rs`).
 
-15. **If CI is unavailable**, build and upload the binary by hand from the tagged
-    tree:
+15. **If CI is unavailable**, build and upload each binary by hand from the tagged
+    tree (the two `apple-darwin` targets must be built on a Mac — cross-compiling
+    Apple targets from Linux needs Apple's SDK and is not supported). Per target:
     ```bash
-    rustup target add x86_64-unknown-linux-musl
+    rustup target add x86_64-unknown-linux-musl   # or the apple-darwin target on a Mac
     cargo build --release --locked --target x86_64-unknown-linux-musl -p rcypher-cli --bin rcypher
     name="rcypher-v0.2.0-x86_64-unknown-linux-musl"
     mkdir "$name" && cp target/x86_64-unknown-linux-musl/release/rcypher README.md LICENSE "$name/"

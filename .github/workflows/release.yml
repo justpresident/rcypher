@@ -1,13 +1,12 @@
 name: Release binaries
 
-# Build a prebuilt `rcypher` binary and attach it to the GitHub release for the
-# tag. This never publishes to crates.io - `cargo publish` stays a separate manual
-# step in docs/crate_release_process.md.
+# Build prebuilt `rcypher` binaries on each target's NATIVE runner and attach them
+# to the GitHub release for the tag. This never publishes to crates.io -
+# `cargo publish` stays a separate manual step in docs/crate_release_process.md.
 #
-# Only a static Linux (musl) binary is built: rcypher-cli's runtime hardening uses
-# Linux-specific facilities (POSIX interval timers via `nix::sys::timer` and Linux
-# ptrace), so the binary is Linux-only. The musl target produces one binary that
-# runs on any distro regardless of glibc version.
+# Three binaries: a static x86_64 Linux (musl) build that runs on any distro
+# regardless of glibc version, plus Intel and Apple-Silicon macOS builds (built
+# native - cross-compiling Apple targets from Linux needs Apple's SDK).
 #
 # Fires when a GitHub release is PUBLISHED (the curated-notes step in
 # docs/crate_release_process.md), so the binary attaches to that release with no
@@ -38,6 +37,12 @@ jobs:
           # glibc version.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+          # macOS Intel, built native on the Intel runner.
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          # macOS Apple Silicon, built native on the arm runner.
+          - os: macos-15
+            target: aarch64-apple-darwin
 
     steps:
       - name: Resolve tag
