@@ -1,6 +1,6 @@
 [package]
 name = "rcypher"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Reusable authenticated encryption (Argon2id + AES-256-CBC + HMAC-SHA256) for password-protected, versioned encrypted storage"
 repository = "https://github.com/justpresident/rcypher"
@@ -8,6 +8,8 @@ readme = "README.md"
 license = "Apache-2.0"
 keywords = ["encryption", "argon2", "aes", "password", "security"]
 categories = ["cryptography"]
+# Keep repo-meta out of the published crate (docs hold the release scratch file).
+exclude = ["/docs", "/.taska", "/.github", "/coverage", "/AGENTS.md", "/demo.gif", "/scripts"]
 
 [workspace]
 members = ["rcypher-cli"]

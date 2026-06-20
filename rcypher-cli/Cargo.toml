@@ -1,6 +1,6 @@
 [package]
 name = "rcypher-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A CLI for secure password management, built on the rcypher encryption library"
 repository = "https://github.com/justpresident/rcypher"
@@ -14,7 +14,7 @@ name = "rcypher"
 path = "src/main.rs"
 
 [dependencies]
-rcypher = { path = "..", version = "0.1.0", features = ["storage"] }
+rcypher = { path = "..", version = "0.2.0", features = ["storage"] }
 anyhow = "1.0"
 arboard = "3"
 chrono = "0.4"
