@@ -17,3 +17,7 @@ pub type KeyBytes = [u8; KEY_LEN];
 pub type SaltBytes = [u8; SALT_SIZE];
 pub type BlockBytes = [u8; BLOCK_SIZE];
 pub type HmacBytes = [u8; HMAC_SIZE];
+
+/// Length of a full key's material: a cipher key followed by an HMAC key.
+pub const KEY_MATERIAL_LEN: usize = KEY_LEN + HMAC_SIZE;
+pub type KeyMaterialBytes = [u8; KEY_MATERIAL_LEN];

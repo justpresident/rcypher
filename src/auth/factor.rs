@@ -12,12 +12,13 @@ use zeroize::Zeroizing;
 
 use super::format::FactorKind;
 use super::keyslot::KeyMaterial;
+use crate::constants::{KEY_MATERIAL_LEN, SaltBytes};
 use crate::crypto::Argon2Params;
 
 /// Builds the parameters for a new password factor: a fresh random salt and the
 /// given Argon2 cost parameters.
 pub fn new_password_kind(params: &Argon2Params) -> Result<FactorKind> {
-    let mut salt = [0u8; 32];
+    let mut salt = SaltBytes::default();
     rand::rngs::OsRng.try_fill_bytes(&mut salt)?;
     Ok(FactorKind::Password {
         salt,
@@ -40,11 +41,16 @@ pub fn password_kek(password: &str, kind: &FactorKind) -> Result<KeyMaterial> {
         bail!("factor is not a password factor");
     };
 
-    let params = Params::new(*memory_cost, *time_cost, *parallelism, Some(64))
-        .map_err(|e| anyhow::anyhow!("invalid Argon2 params: {e}"))?;
+    let params = Params::new(
+        *memory_cost,
+        *time_cost,
+        *parallelism,
+        Some(KEY_MATERIAL_LEN),
+    )
+    .map_err(|e| anyhow::anyhow!("invalid Argon2 params: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
 
-    let mut material = Zeroizing::new([0u8; 64]);
+    let mut material = Zeroizing::new([0u8; KEY_MATERIAL_LEN]);
     argon2
         .hash_password_into(password.as_bytes(), salt, material.as_mut())
         .map_err(|e| anyhow::anyhow!("key derivation failed: {e}"))?;
@@ -83,7 +89,7 @@ mod tests {
     #[test]
     fn kek_wraps_a_share_only_for_the_right_password() {
         let kind = insecure_kind();
-        let share = [9u8; 64];
+        let share = [9u8; KEY_MATERIAL_LEN];
 
         let kek = password_kek("correct", &kind).unwrap();
         let wrapped = wrap_share(&kek, &share).unwrap();
@@ -98,7 +104,7 @@ mod tests {
         let yk = FactorKind::Yubikey {
             credential_id: vec![1],
             rp_id: "rcypher".into(),
-            salt: [0u8; 32],
+            salt: SaltBytes::default(),
             require_pin: false,
         };
         assert!(password_kek("x", &yk).is_err());

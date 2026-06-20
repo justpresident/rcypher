@@ -22,6 +22,7 @@ use super::format::{
 use super::keyslot::{self, KeyMaterial};
 use super::parser::{parse_policy, render_policy, validate_factors};
 use super::policy::{Leaf, PolicyNode, distribute, reconstruct};
+use crate::constants::{KEY_LEN, KEY_MATERIAL_LEN, KeyBytes, KeyMaterialBytes};
 use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
 
 /// A user-supplied secret for one factor, presented at unlock or enroll time.
@@ -180,10 +181,10 @@ impl PolicyVault {
     /// values — the role the password-derived key played in a plain vault.
     #[must_use]
     pub fn cypher(&self) -> Cypher {
-        let mut key = [0u8; 32];
-        let mut hmac_key = [0u8; 32];
-        key.copy_from_slice(&self.dek[..32]);
-        hmac_key.copy_from_slice(&self.dek[32..]);
+        let mut key = KeyBytes::default();
+        let mut hmac_key = KeyBytes::default();
+        key.copy_from_slice(&self.dek[..KEY_LEN]);
+        hmac_key.copy_from_slice(&self.dek[KEY_LEN..]);
         Cypher::new(EncryptionKey::from_key_material(key, hmac_key))
     }
 
@@ -242,7 +243,7 @@ fn derive_authkek(kind: &FactorKind, secret: &FactorSecret) -> Result<KeyMateria
 /// factor's auth-key, returning the policy tree with shares filled in.
 fn distribute_and_wrap(
     template: &PolicyNode,
-    dek: &[u8; 64],
+    dek: &KeyMaterialBytes,
     authkeks: &HashMap<String, KeyMaterial>,
 ) -> Result<PolicyNode> {
     let shares = distribute(dek, template)?;
@@ -314,9 +315,12 @@ fn unwrap_leaves(
 }
 
 fn to_key_material(bytes: &[u8]) -> Result<KeyMaterial> {
-    let array: [u8; 64] = bytes
-        .try_into()
-        .map_err(|_| anyhow!("expected 64-byte key material, got {} bytes", bytes.len()))?;
+    let array: KeyMaterialBytes = bytes.try_into().map_err(|_| {
+        anyhow!(
+            "expected {KEY_MATERIAL_LEN}-byte key material, got {} bytes",
+            bytes.len()
+        )
+    })?;
     Ok(Zeroizing::new(array))
 }
 

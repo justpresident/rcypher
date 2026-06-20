@@ -2,6 +2,7 @@ use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
 
 use super::policy::PolicyNode;
+use crate::constants::SaltBytes;
 
 /// Outer version tag for a policy-protected (multi-factor) vault.
 ///
@@ -15,7 +16,7 @@ pub const POLICY_VAULT_VERSION: u16 = 8;
 pub enum FactorKind {
     /// A passphrase factor: Argon2id over the password and a per-factor salt.
     Password {
-        salt: [u8; 32],
+        salt: SaltBytes,
         memory_cost: u32,
         time_cost: u32,
         parallelism: u32,
@@ -26,7 +27,7 @@ pub enum FactorKind {
     Yubikey {
         credential_id: Vec<u8>,
         rp_id: String,
-        salt: [u8; 32],
+        salt: SaltBytes,
         require_pin: bool,
     },
 }
