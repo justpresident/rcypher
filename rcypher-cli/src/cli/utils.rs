@@ -6,8 +6,6 @@ use nix::fcntl::{Flock, FlockArg};
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use zeroize::{Zeroize, Zeroizing};
 
 pub fn format_timestamp(ts: u64) -> String {
@@ -45,32 +43,6 @@ pub fn secure_print(mut what: String, insecure_stdout: bool) -> Result<()> {
     Ok(())
 }
 
-/// A guard to signal background thread to stop when dropped
-pub struct ThreadStopGuard {
-    flag: Arc<AtomicBool>,
-    handle: std::thread::JoinHandle<()>,
-}
-
-impl ThreadStopGuard {
-    pub const fn new(flag: Arc<AtomicBool>, handle: std::thread::JoinHandle<()>) -> Self {
-        Self { flag, handle }
-    }
-}
-
-impl Drop for ThreadStopGuard {
-    fn drop(&mut self) {
-        // Signal the thread to stop
-        self.flag.store(true, Ordering::Relaxed);
-
-        // Try to join with a short timeout
-        let start = std::time::Instant::now();
-        while !self.handle.is_finished() && start.elapsed() < std::time::Duration::from_millis(200)
-        {
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-    }
-}
-
 pub struct Spinner {
     inner: Option<ProgressBar>,
 }
@@ -101,7 +73,7 @@ impl Spinner {
     }
 }
 
-pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) -> Result<()> {
+pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) {
     println!(
         "Secret copied to the clipboard and will be automatically removed in {} seconds.\n
         Warning: Clipboard managers may retain history",
@@ -117,14 +89,12 @@ pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) -> Result<()> {
             std::thread::sleep(ttl);
             if clipboard.get_text().ok().as_deref() == Some(copy.as_ref()) {
                 let _ = clipboard.set_text("deleted");
-                std::thread::sleep(std::time::Duration::from_millis(1000));
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
         } else {
             println!("Can't access clipboard");
         }
     });
-
-    Ok(())
 }
 
 pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<String> {
@@ -160,4 +130,21 @@ fn show_password_warning() {
     eprintln!("║  → Never share it with anyone                                      ║");
     eprintln!("║                                                                    ║");
     eprintln!("╚════════════════════════════════════════════════════════════════════╝\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_timestamp;
+
+    #[test]
+    fn test_format_timestamp() {
+        let ts = 1609459200; // 2021-01-01 00:00:00 UTC
+        let formatted = format_timestamp(ts);
+        assert!(formatted.contains("2021"));
+        assert!(formatted.contains("01"));
+
+        // Test zero timestamp
+        let formatted_zero = format_timestamp(0);
+        assert_eq!(formatted_zero, "N/A");
+    }
 }

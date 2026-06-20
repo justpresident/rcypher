@@ -21,6 +21,10 @@ use crate::version::{CypherVersion, Version7Header};
 
 pub struct Cypher {
     pub(super) key: EncryptionKey,
+    /// When true, `encrypt`/`decrypt` refuse to run while a debugger/tracer is
+    /// attached. On by default; disable via [`Cypher::with_trace_detection`] for
+    /// embedding contexts where the host process is legitimately traced.
+    detect_tracing: bool,
 }
 
 /// Calculates the encrypted size for V7 format given plaintext size
@@ -36,8 +40,35 @@ pub const fn calculate_padding(data_len: usize) -> u8 {
 }
 
 impl Cypher {
+    /// Creates a cypher with anti-debug tracing detection **enabled** (the
+    /// default). Every `encrypt`/`decrypt` call fails with `Debugger detected`
+    /// while a tracer is attached.
     pub const fn new(key: EncryptionKey) -> Self {
-        Self { key }
+        Self {
+            key,
+            detect_tracing: true,
+        }
+    }
+
+    /// Creates a cypher with explicit control over anti-debug tracing detection.
+    ///
+    /// Pass `detect_tracing = false` when embedding the library in a process
+    /// that is legitimately traced (e.g. running under a profiler or a
+    /// supervising debugger) and you do not want crypto operations to fail.
+    pub const fn with_trace_detection(key: EncryptionKey, detect_tracing: bool) -> Self {
+        Self {
+            key,
+            detect_tracing,
+        }
+    }
+
+    /// Returns an error if tracing detection is enabled and a debugger/tracer is
+    /// currently attached to this process.
+    fn check_tracing(&self) -> Result<()> {
+        if self.detect_tracing && is_debugger_attached() {
+            bail!("Debugger detected");
+        }
+        Ok(())
     }
 
     pub fn version(&self) -> CypherVersion {
@@ -45,6 +76,7 @@ impl Cypher {
     }
 
     // Initializes HMAC from a separate key derived from master key
+    #[allow(clippy::expect_used)] // HMAC-SHA256 accepts a key of any length; this never errors
     fn hmac_start(&self) -> HmacSha256 {
         HmacSha256::new_from_slice(self.key.hmac_key()).expect("HMAC can take key of any size")
     }
@@ -73,9 +105,7 @@ impl Cypher {
     }
 
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
-        if is_debugger_attached() {
-            bail!("Debugger detected");
-        }
+        self.check_tracing()?;
 
         match self.key.version() {
             CypherVersion::V7WithKdf => self.encrypt_v7(data),
@@ -133,9 +163,7 @@ impl Cypher {
         Ok(result)
     }
     pub fn encrypt_file<T: io::Write>(&self, path: &Path, out: &mut T) -> Result<()> {
-        if is_debugger_attached() {
-            bail!("Debugger detected");
-        }
+        self.check_tracing()?;
 
         match self.version() {
             CypherVersion::V7WithKdf => self.encrypt_file_v7(path, out),
@@ -154,9 +182,7 @@ impl Cypher {
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        if is_debugger_attached() {
-            bail!("Debugger detected");
-        }
+        self.check_tracing()?;
 
         match self.key.version() {
             CypherVersion::V7WithKdf => self.decrypt_v7(data),
@@ -226,9 +252,7 @@ impl Cypher {
     }
 
     pub fn decrypt_file<T: io::Write>(&self, input_path: &Path, out: &mut T) -> Result<()> {
-        if is_debugger_attached() {
-            bail!("Debugger detected");
-        }
+        self.check_tracing()?;
 
         match self.version() {
             CypherVersion::V7WithKdf => self.decrypt_file_v7(input_path, out),

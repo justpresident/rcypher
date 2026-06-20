@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Cursor;
 use std::mem::size_of;
 use std::path::Path;
 
@@ -48,7 +49,7 @@ impl Argon2Params {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct EncryptionKey {
     pub version: CypherVersion,
     key: Zeroizing<KeyBytes>,
@@ -146,6 +147,46 @@ impl EncryptionKey {
                 }
                 let header: Version7Header =
                     bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
+                header.validate()?;
+                Self::from_password_with_salt(version, password, &header.salt, argon2_params)
+            }
+        }
+    }
+
+    /// Creates a key for an existing in-memory encrypted blob with default
+    /// secure Argon2 parameters.
+    ///
+    /// Use this to decrypt a blob produced by [`Cypher::encrypt`](super::Cypher::encrypt)
+    /// when you hold the bytes in memory rather than in a file: the salt is read
+    /// back from the blob's header so the derived key matches the one used to
+    /// encrypt it.
+    pub fn for_data(password: &str, data: &[u8]) -> Result<Self> {
+        Self::for_data_with_params(password, data, &Argon2Params::default())
+    }
+
+    /// Creates a key for an existing in-memory encrypted blob with custom Argon2
+    /// parameters.
+    ///
+    /// # Arguments
+    /// * `password` - Password to derive key from
+    /// * `data` - The encrypted blob whose header carries the salt
+    /// * `argon2_params` - Argon2 parameters (use `Argon2Params::insecure()` for testing)
+    pub fn for_data_with_params(
+        password: &str,
+        data: &[u8],
+        argon2_params: &Argon2Params,
+    ) -> Result<Self> {
+        let version = CypherVersion::probe_data(data)?;
+
+        match version {
+            CypherVersion::V7WithKdf => {
+                if data.len() < size_of::<Version7Header>() {
+                    bail!("data is too small");
+                }
+                let header: Version7Header = bincode::decode_from_std_read(
+                    &mut Cursor::new(data),
+                    bincode::config::standard(),
+                )?;
                 header.validate()?;
                 Self::from_password_with_salt(version, password, &header.salt, argon2_params)
             }

@@ -286,18 +286,6 @@ fn test_invalid_file_truncated() {
 }
 
 #[test]
-fn test_format_timestamp() {
-    let ts = 1609459200; // 2021-01-01 00:00:00 UTC
-    let formatted = format_timestamp(ts);
-    assert!(formatted.contains("2021"));
-    assert!(formatted.contains("01"));
-
-    // Test zero timestamp
-    let formatted_zero = format_timestamp(0);
-    assert_eq!(formatted_zero, "N/A");
-}
-
-#[test]
 fn test_cypher_version_probe_data_too_short() {
     let result = CypherVersion::probe_data(&[]);
     assert!(result.is_err());
@@ -346,4 +334,68 @@ fn test_decrypt_file_too_small() {
     let mut out = Vec::new();
     let result = cypher.decrypt_file(&path, &mut out);
     assert!(result.is_err());
+}
+
+#[test]
+fn test_for_data_in_memory_roundtrip() {
+    // Encrypt with a key carrying a fresh random salt...
+    let cypher = Cypher::new(
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "pw",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
+    );
+    let data = b"bring your own format";
+    let blob = cypher.encrypt(data).unwrap();
+
+    // ...then re-derive the key purely from the blob's embedded salt (no file).
+    let reopened = Cypher::new(
+        EncryptionKey::for_data_with_params("pw", &blob, &Argon2Params::insecure()).unwrap(),
+    );
+    let plaintext = reopened.decrypt(&blob).unwrap();
+    assert_eq!(plaintext.as_slice(), data);
+}
+
+#[test]
+fn test_for_data_wrong_password_fails() {
+    let cypher = Cypher::new(
+        EncryptionKey::from_password_with_params(
+            CypherVersion::V7WithKdf,
+            "right",
+            &Argon2Params::insecure(),
+        )
+        .unwrap(),
+    );
+    let blob = cypher.encrypt(b"secret").unwrap();
+
+    let wrong = Cypher::new(
+        EncryptionKey::for_data_with_params("wrong", &blob, &Argon2Params::insecure()).unwrap(),
+    );
+    assert!(wrong.decrypt(&blob).is_err());
+}
+
+#[test]
+fn test_for_data_too_small() {
+    // Valid version tag (7) but not enough bytes for a full header.
+    let result = EncryptionKey::for_data_with_params("pw", &[0, 7], &Argon2Params::insecure());
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_with_trace_detection_disabled_roundtrip() {
+    // With detection disabled, encrypt/decrypt must succeed regardless of any
+    // tracer attached to the host process.
+    let key = EncryptionKey::from_password_with_params(
+        CypherVersion::V7WithKdf,
+        "pw",
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    let cypher = Cypher::with_trace_detection(key, false);
+
+    let blob = cypher.encrypt(b"hello").unwrap();
+    let out = cypher.decrypt(&blob).unwrap();
+    assert_eq!(out.as_slice(), b"hello");
 }

@@ -7,14 +7,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{BLOCK_SIZE, BlockBytes, SaltBytes};
 
+/// Version tag for the bundled key-value storage payload (the `storage` feature).
+/// Distinct from [`CypherVersion`], which versions the encryption envelope.
+#[cfg(feature = "storage")]
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]
 pub enum StoreVersion {
     Version4 = 4u16,
 }
 
+#[cfg(feature = "storage")]
 impl StoreVersion {
-    /// Probes data to determine its encryption version
+    /// Probes data to determine its storage-format version
     pub fn probe_data(data: &[u8]) -> Result<Self> {
         if data.len() < 2 {
             bail!("Data too short to determine version");

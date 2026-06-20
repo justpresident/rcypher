@@ -1,17 +1,15 @@
-use std::fs;
-use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use tempfile::NamedTempFile;
 
 use crate::crypto::Cypher;
+use crate::file_io::{load_encrypted, save_encrypted};
 use crate::version::StoreVersion;
 
 use super::store::Storage;
 use super::value::{EncryptedValue, ValueEntry};
 
-pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
+pub fn serialize_storage(storage: &Storage) -> Result<Vec<u8>> {
     let mut result = Vec::new();
 
     // Version
@@ -20,7 +18,7 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
 
     // Count elements
     let count: u32 = u32::try_from(storage.data.values().map(Vec::len).sum::<usize>())
-        .expect("Power user detected with > 4 billion keys");
+        .map_err(|_| anyhow::anyhow!("too many entries to serialize (max {})", u32::MAX))?;
     result.extend_from_slice(&count.to_be_bytes());
 
     // Serialize each entry
@@ -29,21 +27,23 @@ pub fn serialize_storage(storage: &Storage) -> Vec<u8> {
             let key_bytes = key.as_bytes();
             let val_bytes = entry.value.as_bytes();
 
-            result.extend_from_slice(
-                &(u16::try_from(key_bytes.len()).expect("key is too long")).to_be_bytes(),
-            );
+            let key_len = u16::try_from(key_bytes.len()).map_err(|_| {
+                anyhow::anyhow!("key too long to serialize (max {} bytes)", u16::MAX)
+            })?;
+            result.extend_from_slice(&key_len.to_be_bytes());
             result.extend_from_slice(key_bytes);
-            result.extend_from_slice(
-                &(u32::try_from(val_bytes.len()).expect("value is too long")).to_be_bytes(),
-            );
+            let val_len = u32::try_from(val_bytes.len()).map_err(|_| {
+                anyhow::anyhow!("value too long to serialize (max {} bytes)", u32::MAX)
+            })?;
+            result.extend_from_slice(&val_len.to_be_bytes());
             result.extend_from_slice(val_bytes);
-            // We store only seconds
+            // We store only seconds (truncating to u32; valid until year 2106)
             #[allow(clippy::cast_possible_truncation)]
             result.extend_from_slice(&(entry.timestamp as u32).to_be_bytes());
         }
     }
 
-    result
+    Ok(result)
 }
 
 pub fn deserialize_storage(data: &[u8]) -> Result<Storage> {
@@ -127,21 +127,12 @@ pub fn load_storage(cypher: &Cypher, path: &Path) -> Result<Storage> {
         return Ok(Storage::new());
     }
 
-    let encrypted = fs::read(path)?;
-    let decrypted = cypher.decrypt(&encrypted)?;
+    let decrypted = load_encrypted(cypher, path)?;
 
     deserialize_storage(&decrypted)
 }
 
 pub fn save_storage(cypher: &Cypher, storage: &Storage, path: &Path) -> Result<()> {
-    let dir = path.parent().expect("Can't get parent dir of a file");
-    let mut temp = NamedTempFile::new_in(dir)?;
-
-    let serialized = serialize_storage(storage);
-    let encrypted = cypher.encrypt(&serialized)?;
-
-    temp.write_all(&encrypted)?;
-    temp.persist(path)?;
-
-    Ok(())
+    let serialized = serialize_storage(storage)?;
+    save_encrypted(cypher, &serialized, path)
 }

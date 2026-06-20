@@ -32,6 +32,7 @@ pub fn disable_core_dumps() -> Result<()> {
 ///
 /// Returns Err if a debugger is already attached or fork fails.
 #[cfg(target_family = "unix")]
+#[allow(clippy::expect_used)] // getppid() always returns a positive PID in the forked child
 pub fn enable_ptrace_protection() -> Result<()> {
     use nix::libc::{_exit, PTRACE_TRACEME, getppid, ptrace};
     use nix::sys::wait::{WaitStatus, waitpid};

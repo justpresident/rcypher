@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::Storage;
+use rcypher::Storage;
 use rustyline::Helper;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -49,36 +49,34 @@ impl Completer for CypherCompleter {
             return Ok((start, matches));
         }
 
-        // Complete keys for commands that need them
-        if !parts.is_empty() {
-            let cmd = parts[0];
-            match cmd {
-                "get" | "history" | "del" | "rm" | "put" | "copy" | "search" => {
-                    // Only complete if we have exactly 1 argument (the command itself)
-                    // or 2 arguments where the second is incomplete
-                    if parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')) {
-                        let prefix = if parts.len() == 2 { parts[1] } else { "" };
+        // Complete keys for commands that need them.
+        // Only complete if we have exactly 1 argument (the command itself)
+        // or 2 arguments where the second is incomplete.
+        if !parts.is_empty()
+            && matches!(
+                parts[0],
+                "get" | "history" | "del" | "rm" | "put" | "copy" | "search"
+            )
+            && (parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' ')))
+        {
+            let prefix = if parts.len() == 2 { parts[1] } else { "" };
 
-                        let storage = self.storage.lock().expect("able to take a lock");
-                        let mut keys: Vec<String> = storage.data.keys().cloned().collect();
-                        drop(storage);
-                        keys.sort();
+            let storage = self.storage.lock().expect("able to take a lock");
+            let mut keys: Vec<String> = storage.data.keys().cloned().collect();
+            drop(storage);
+            keys.sort();
 
-                        let matches: Vec<Pair> = keys
-                            .iter()
-                            .filter(|key| key.starts_with(prefix))
-                            .map(|key| Pair {
-                                display: key.clone(),
-                                replacement: key.clone(),
-                            })
-                            .collect();
+            let matches: Vec<Pair> = keys
+                .iter()
+                .filter(|key| key.starts_with(prefix))
+                .map(|key| Pair {
+                    display: key.clone(),
+                    replacement: key.clone(),
+                })
+                .collect();
 
-                        let start = pos - prefix.len();
-                        return Ok((start, matches));
-                    }
-                }
-                _ => {}
-            }
+            let start = pos - prefix.len();
+            return Ok((start, matches));
         }
 
         Ok((pos, vec![]))

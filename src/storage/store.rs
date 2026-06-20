@@ -23,7 +23,7 @@ impl Storage {
     pub fn put(&mut self, key: String, value: EncryptedValue) {
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .expect("time should go forward")
+            .unwrap_or_default()
             .as_secs();
 
         self.put_ts(key, value, timestamp);

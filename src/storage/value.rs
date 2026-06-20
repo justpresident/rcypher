@@ -13,12 +13,18 @@ pub struct EncryptedValue {
     ciphertext: Vec<u8>,
 }
 
-// This is a helper constructor only available in tests
 #[cfg(debug_assertions)]
-impl<T: AsRef<str>> From<T> for EncryptedValue {
-    fn from(value: T) -> Self {
+impl EncryptedValue {
+    /// Wraps plaintext bytes as if they were ciphertext, performing **no
+    /// encryption**. Intended only for tests and benchmarks that exercise the
+    /// storage format without a real key — never use it in production code.
+    ///
+    /// Replaces a former `From<&str>` impl: an explicit, clearly-named call site
+    /// makes it obvious the bytes are not actually encrypted.
+    #[doc(hidden)]
+    pub fn from_plaintext_unchecked(plaintext: impl AsRef<str>) -> Self {
         Self {
-            ciphertext: value.as_ref().as_bytes().to_vec(),
+            ciphertext: plaintext.as_ref().as_bytes().to_vec(),
         }
     }
 }

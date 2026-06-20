@@ -17,15 +17,17 @@
     clippy::missing_panics_doc
 )]
 
+mod cli;
+
+use crate::cli::utils::{Spinner, get_password};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigEvent, SigSet, SigevNotify, SigmaskHow, Signal, pthread_sigmask};
 use nix::sys::timer::{Expiration, Timer, TimerSetTimeFlags};
 use nix::time::ClockId;
-use rcypher::cli::utils::get_password;
-use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Spinner};
-use rcypher::{cli, disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
+use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey};
+use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
 use std::io;
 use std::io::Write;
@@ -242,7 +244,7 @@ fn start_security_timer(
             }
 
             let last_secs = last_activity.load(Ordering::Relaxed);
-            if last_secs > 0 && now_secs.saturating_sub(last_secs) > rcypher::cli::STANDBY_TIMEOUT {
+            if last_secs > 0 && now_secs.saturating_sub(last_secs) > cli::STANDBY_TIMEOUT {
                 std::process::exit(0);
             }
         }

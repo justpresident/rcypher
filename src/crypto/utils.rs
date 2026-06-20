@@ -147,9 +147,11 @@ impl<R: Read> Read for LimitedReader<R> {
         }
 
         let remaining = self.limit - self.position;
+        // On 64-bit, `remaining` always fits usize; on 32-bit a huge limit
+        // saturates to usize::MAX and is then bounded by buf.len() below.
         let to_read = buf
             .len()
-            .min(usize::try_from(remaining).expect("correctness"));
+            .min(usize::try_from(remaining).unwrap_or(usize::MAX));
         let n = self.inner.read(&mut buf[..to_read])?;
         self.position += n as u64;
         Ok(n)

@@ -1092,25 +1092,36 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "anyhow",
- "arboard",
  "argon2",
- "assert_cmd",
  "bincode",
  "cbc",
- "chrono",
  "cipher",
- "clap",
  "hmac",
- "indicatif",
  "nix 0.30.1",
  "num_enum",
- "predicates",
  "rand",
  "regex",
- "rpassword",
- "rustyline",
  "serde",
  "sha2",
+ "tempfile",
+ "zeroize",
+]
+
+[[package]]
+name = "rcypher-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "assert_cmd",
+ "chrono",
+ "clap",
+ "indicatif",
+ "nix 0.30.1",
+ "predicates",
+ "rcypher",
+ "rpassword",
+ "rustyline",
  "tempfile",
  "zeroize",
 ]

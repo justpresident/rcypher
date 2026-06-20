@@ -1,6 +1,6 @@
 use crate::cli::utils::{format_timestamp, secure_print};
-use crate::{Cypher, EncryptedValue, EncryptionKey, Storage, load_storage, save_storage};
 use anyhow::Result;
+use rcypher::{Cypher, EncryptedValue, EncryptionKey, Storage, load_storage, save_storage};
 use std::io;
 use std::io::Write;
 use std::path::Path;
@@ -293,7 +293,7 @@ pub fn run_update_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CypherVersion, Storage};
+    use rcypher::{CypherVersion, Storage};
 
     fn create_test_cypher() -> Cypher {
         let key = EncryptionKey::from_password(CypherVersion::default(), "test_password")

@@ -112,6 +112,56 @@ Apply updates? (a)ll at once, (i)nteractive, (c)ancel [a/i/c]:
 
 ---
 
+# Use as a library
+
+This repository is a Cargo workspace:
+
+* **`rcypher`** — the reusable encryption library (this is the published library crate).
+* **`rcypher-cli`** — the command-line tool described above, built on top of it.
+
+Another application can encrypt and sign **its own data format** with the exact
+same envelope rcypher uses (Argon2id → AES-256-CBC → HMAC-SHA256, encrypt-then-MAC),
+and read those files back. Add the dependency:
+
+```toml
+[dependencies]
+rcypher = "0.1"
+
+# crypto envelope only, without rcypher's bundled key-value storage format:
+# rcypher = { version = "0.1", default-features = false }
+```
+
+Bring your own serialization and hand rcypher the bytes:
+
+```rust
+use rcypher::{Cypher, CypherVersion, EncryptionKey};
+
+// Encrypt your own bytes (a fresh random salt is embedded in the blob header):
+let cypher = Cypher::new(EncryptionKey::from_password(CypherVersion::default(), "pw")?);
+let blob = cypher.encrypt(my_serialized_bytes)?;
+
+// Decrypt in memory — the key is re-derived from the salt inside the blob:
+let reopened = Cypher::new(EncryptionKey::for_data("pw", &blob)?);
+let plaintext = reopened.decrypt(&blob)?;
+```
+
+The blob is self-contained (`[ header | ciphertext | hmac ]`), so it round-trips
+from memory (`encrypt`/`decrypt` + `EncryptionKey::for_data`) or from disk
+(`save_encrypted`/`load_encrypted` + `EncryptionKey::for_file`). See
+[`examples/custom_format.rs`](examples/custom_format.rs) for a complete example,
+and the **Cryptography Overview** below for the construction details.
+
+`Cypher` refuses to operate while a debugger is attached by default; for a
+legitimately-traced host process, opt out with `Cypher::with_trace_detection(key, false)`.
+
+## Installing the CLI
+
+```sh
+cargo install rcypher-cli   # installs the `rcypher` binary
+```
+
+---
+
 # Features
 
 * Offline, single-file encrypted storage

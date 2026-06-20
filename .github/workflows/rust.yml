@@ -26,10 +26,15 @@ jobs:
       - name: Run tests
         run: cargo test --all --all-features
 
+      - name: Build & test core without default features
+        run: cargo test -p rcypher --no-default-features
+
       - name: Run clippy
         run: |
           cargo clippy --all --all-features -- \
             -D warnings
+      - name: Run clippy (core, no default features)
+        run: cargo clippy -p rcypher --no-default-features -- -D warnings
       - name: Check formatting
         run: cargo fmt --all -- --check
 
@@ -54,7 +59,7 @@ jobs:
 
       - name: Generate coverage
         run: |
-          cargo tarpaulin --out xml --output-dir coverage --all-features --engine llvm --run-types AllTargets --workspace --exclude-files 'tests/*' 'src/cli/utils.rs' 'src/cli/completer.rs' --timeout 300
+          cargo tarpaulin --out xml --output-dir coverage --all-features --engine llvm --run-types AllTargets --workspace --exclude-files 'tests/*' 'rcypher-cli/tests/*' 'examples/*' 'rcypher-cli/src/cli/utils.rs' 'rcypher-cli/src/cli/completer.rs' --timeout 300
 
       - name: Extract coverage percentage
         id: coverage

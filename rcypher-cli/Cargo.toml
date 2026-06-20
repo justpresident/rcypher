@@ -1,0 +1,31 @@
+[package]
+name = "rcypher-cli"
+version = "0.1.0"
+edition = "2024"
+description = "A CLI for secure password management, built on the rcypher encryption library"
+repository = "https://github.com/justpresident/rcypher"
+readme = "../README.md"
+license = "Apache-2.0"
+keywords = ["password", "security", "cli"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "rcypher"
+path = "src/main.rs"
+
+[dependencies]
+rcypher = { path = "..", version = "0.1.0", features = ["storage"] }
+anyhow = "1.0"
+arboard = "3"
+chrono = "0.4"
+clap = { version = "4.4", features = ["derive"] }
+indicatif = "0.18.3"
+nix = { version = "0.30.1", features = ["fs", "signal", "time"] }
+rpassword = "7.3"
+rustyline = "13.0"
+zeroize = "1.8.2"
+
+[dev-dependencies]
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3.23.0"

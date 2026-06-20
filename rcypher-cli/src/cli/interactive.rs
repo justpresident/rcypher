@@ -1,13 +1,8 @@
-use crate::Cypher;
-use crate::EncryptedValue;
-use crate::Storage;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp, secure_print};
-use crate::is_debugger_attached;
-use crate::load_storage;
-use crate::save_storage;
 use anyhow::{Result, bail};
+use rcypher::{Cypher, EncryptedValue, Storage, is_debugger_attached, load_storage, save_storage};
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
@@ -219,7 +214,7 @@ impl InteractiveCli {
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
-                        )?;
+                        );
                         secret.zeroize();
                     }
                 }
