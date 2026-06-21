@@ -1,14 +1,13 @@
-use crate::cli::Backend;
 use crate::cli::CLIPBOARD_TTL_MS;
-use crate::cli::DEFAULT_FACTOR_ID;
 use crate::cli::completer::CypherCompleter;
+use crate::cli::persist_store;
 use crate::cli::utils::{
     confirm_if_weak_password, copy_to_clipboard, format_timestamp, prompt_new_password,
     secure_print,
 };
 use anyhow::{Result, anyhow, bail};
 use rcypher::{
-    Argon2Params, EncryptedValue, FactorKind, PolicyVault, Storage, check_factor_password,
+    Argon2Params, Cypher, EncryptedValue, FactorKind, PolicyVault, Storage, check_factor_password,
     is_debugger_attached,
 };
 use rustyline::CompletionType;
@@ -24,7 +23,14 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    backend: Backend,
+    /// The unlocked store. Every store is a policy vault in memory (legacy files
+    /// are converted on open).
+    vault: PolicyVault,
+    /// A `Cypher` keyed by the vault's (stable) DEK, for per-value crypto.
+    cypher: Cypher,
+    /// True while the store was opened from a legacy file and hasn't yet been
+    /// rewritten in the current format; the first save backs up the original.
+    pending_legacy_backup: bool,
     argon2_params: Argon2Params,
     filename: PathBuf,
     /// Enrolled factor ids, shared with the completer so Tab completion of
@@ -38,48 +44,48 @@ impl InteractiveCli {
     pub fn new(
         prompt: String,
         insecure_stdout: bool,
-        backend: Backend,
+        vault: PolicyVault,
+        from_legacy: bool,
         argon2_params: Argon2Params,
         filename: PathBuf,
-        last_activity: Arc<AtomicU64>,
-        last_security_check: Arc<AtomicU64>,
+        clock: crate::SecurityClock,
     ) -> Self {
-        let factors = backend
-            .policy_vault()
-            .map(PolicyVault::factor_ids)
-            .unwrap_or_default();
+        let factors = vault.factor_ids();
+        let cypher = vault.cypher();
         Self {
             prompt,
             insecure_stdout,
-            backend,
+            vault,
+            cypher,
+            pending_legacy_backup: from_legacy,
             argon2_params,
             filename,
             factors: Arc::new(Mutex::new(factors)),
-            last_activity,
-            last_security_check,
+            last_activity: clock.last_activity,
+            last_security_check: clock.last_security_check,
         }
     }
 
     /// Re-reads the enrolled factor ids into the shared completion list, so Tab
     /// completion stays in sync after `auth factor add` / `remove`.
     fn refresh_completion_factors(&self) {
-        let ids = self
-            .backend
-            .policy_vault()
-            .map(PolicyVault::factor_ids)
-            .unwrap_or_default();
-        *self.factors.lock().expect("able to lock factors") = ids;
+        *self.factors.lock().expect("able to lock factors") = self.vault.factor_ids();
     }
 
-    pub fn run(&mut self) -> Result<()> {
-        let storage = Arc::new(Mutex::new(self.backend.load_store(&self.filename)?));
+    /// Writes the store, backing up the original legacy file on the first save.
+    fn save(&mut self, storage: &Storage) -> Result<()> {
+        persist_store(
+            &self.vault,
+            storage,
+            &self.filename,
+            self.pending_legacy_backup,
+        )?;
+        self.pending_legacy_backup = false;
+        Ok(())
+    }
 
-        if self.backend.policy_vault().is_none() {
-            eprintln!(
-                "Note: this is a legacy single-password store. Run 'auth upgrade' to enable \
-                 multi-factor unlock (factors, policies, YubiKey)."
-            );
-        }
+    pub fn run(mut self, storage: Storage) -> Result<()> {
+        let storage = Arc::new(Mutex::new(storage));
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -199,13 +205,13 @@ impl InteractiveCli {
         }
     }
 
-    fn cmd_put(&self, key: &str, value: &str, storage: &mut Storage) -> Result<()> {
-        let encrypted_value = EncryptedValue::encrypt(self.backend.cypher(), value)?;
+    fn cmd_put(&mut self, key: &str, value: &str, storage: &mut Storage) -> Result<()> {
+        let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
         storage.put(key.to_string(), encrypted_value);
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
-        self.backend.save_store(storage, &self.filename)?;
+        self.save(storage)?;
         Ok(())
     }
 
@@ -215,7 +221,7 @@ impl InteractiveCli {
                 let mut found = false;
                 for (key, val) in results {
                     found = true;
-                    let mut secret = val.decrypt(self.backend.cypher())?;
+                    let mut secret = val.decrypt(&self.cypher)?;
                     let output = format!("{}: {}", key, &*secret);
                     secret.zeroize();
                     secure_print(output, self.insecure_stdout)?;
@@ -248,7 +254,7 @@ impl InteractiveCli {
                     }
                     (Some((_, val)), None) => {
                         // Exactly one result - copy to clipboard
-                        let mut secret = val.decrypt(self.backend.cypher())?;
+                        let mut secret = val.decrypt(&self.cypher)?;
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
@@ -265,7 +271,7 @@ impl InteractiveCli {
     fn cmd_history(&self, key: &str, storage: &Storage) -> Result<()> {
         if let Some(entries) = storage.history(key) {
             for entry in entries {
-                let mut secret = entry.value.decrypt(self.backend.cypher())?;
+                let mut secret = entry.value.decrypt(&self.cypher)?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 secure_print(output, self.insecure_stdout)?;
@@ -288,41 +294,30 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_delete(&self, key: &str, storage: &mut Storage) -> Result<()> {
+    fn cmd_delete(&mut self, key: &str, storage: &mut Storage) -> Result<()> {
         if storage.delete(key) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
-            self.backend.save_store(storage, &self.filename)?;
+            self.save(storage)?;
         } else {
             bail!("No such key '{key}' found");
         }
         Ok(())
     }
 
-    /// The store's policy vault, or a "legacy store" error pointing at `upgrade`.
-    fn require_policy_vault(&self) -> Result<&rcypher::PolicyVault> {
-        self.backend.policy_vault().ok_or_else(|| {
-            anyhow!(
-                "this store has no multi-factor policy to manage — run 'auth upgrade' to convert \
-                 this legacy store to a policy vault"
-            )
-        })
-    }
-
     /// `auth …` — multi-factor management. Subcommands: `auth policy {show|set
-    /// EXPR}`, `auth factor {list|add password NAME|add yubikey NAME|remove
-    /// NAME}`, and `auth upgrade`.
-    fn cmd_auth(&mut self, line: &str, storage: &mut Storage) -> Result<()> {
+    /// EXPR}` and `auth factor {list|add password NAME|add yubikey NAME|remove
+    /// NAME}`.
+    fn cmd_auth(&mut self, line: &str, storage: &Storage) -> Result<()> {
         let args = line.strip_prefix("auth").unwrap_or("").trim_start();
         let (sub, rest) = split_first_word(args);
         match sub {
             "policy" => self.cmd_auth_policy(rest, storage),
             "factor" => self.cmd_auth_factor(rest, storage),
-            "upgrade" => self.cmd_upgrade(storage),
             "" => {
                 print_auth_help();
                 Ok(())
             }
-            other => bail!("unknown auth subcommand '{other}' (try: auth policy|factor|upgrade)"),
+            other => bail!("unknown auth subcommand '{other}' (try: auth policy|factor)"),
         }
     }
 
@@ -330,7 +325,7 @@ impl InteractiveCli {
         let (verb, rest) = split_first_word(args);
         match verb {
             "" | "show" => {
-                let expr = self.require_policy_vault()?.policy_expr();
+                let expr = self.vault.policy_expr();
                 secure_print(expr, self.insecure_stdout)
             }
             "set" => {
@@ -376,7 +371,7 @@ impl InteractiveCli {
 
     /// Lists the enrolled factors and their kinds.
     fn list_factors(&self) -> Result<()> {
-        for factor in self.require_policy_vault()?.metadata().factors {
+        for factor in self.vault.metadata().factors {
             let kind = match factor.kind {
                 FactorKind::Password { .. } => "password",
                 FactorKind::Yubikey { .. } => "yubikey",
@@ -411,13 +406,10 @@ impl InteractiveCli {
         }
 
         let params = self.argon2_params;
-        self.backend
-            .policy_vault_mut()
-            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'auth upgrade' to convert this legacy store to a policy vault"))?
-            .enroll_password(id, &password, &params)?;
+        self.vault.enroll_password(id, &password, &params)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
-        self.backend.save_store(storage, &self.filename)?;
+        self.save(storage)?;
         self.refresh_completion_factors();
         secure_print(
             format!(
@@ -431,14 +423,11 @@ impl InteractiveCli {
 
     fn set_policy(&mut self, expr: &str, storage: &Storage) -> Result<()> {
         let new_expr = {
-            let vault = self
-                .backend
-                .policy_vault_mut()
-                .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'auth upgrade' to convert this legacy store to a policy vault"))?;
+            let vault = &mut self.vault;
             vault.set_policy(expr)?;
             vault.policy_expr()
         };
-        self.backend.save_store(storage, &self.filename)?;
+        self.save(storage)?;
         secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
         Ok(())
     }
@@ -446,67 +435,12 @@ impl InteractiveCli {
     /// Drops a factor (must not be referenced by the policy).
     fn remove_factor(&mut self, id: &str, storage: &Storage) -> Result<()> {
         {
-            let vault = self.backend.policy_vault_mut().ok_or_else(|| {
-                anyhow!("this store has no multi-factor policy to manage — run 'auth upgrade' to convert this legacy store to a policy vault")
-            })?;
+            let vault = &mut self.vault;
             vault.remove_factor(id)?;
         }
-        self.backend.save_store(storage, &self.filename)?;
+        self.save(storage)?;
         self.refresh_completion_factors();
         secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
-    }
-
-    /// `auth upgrade` — convert a legacy single-password store into a multi-factor
-    /// policy vault. The entered password becomes the first factor, `primary`,
-    /// and every stored value is re-encrypted under the vault's fresh key.
-    fn cmd_upgrade(&mut self, storage: &mut Storage) -> Result<()> {
-        if self.backend.policy_vault().is_some() {
-            bail!("this store is already a multi-factor policy vault");
-        }
-
-        secure_print(
-            "Upgrading this legacy store to a multi-factor policy vault. The password you set \
-             next becomes the first factor, 'primary'."
-                .to_string(),
-            self.insecure_stdout,
-        )?;
-
-        let mut password = prompt_new_password("the upgraded store (factor 'primary')")?;
-        check_factor_password(DEFAULT_FACTOR_ID, &password)?;
-        if !confirm_if_weak_password(&password, &[DEFAULT_FACTOR_ID, "rcypher"])? {
-            bail!("upgrade cancelled (weak password not confirmed)");
-        }
-
-        let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, &self.argon2_params)?;
-        password.zeroize(); // wipe as soon as the vault's key material is derived
-        let new_cypher = vault.cypher();
-
-        // Re-encrypt every stored value from the legacy key to the new DEK, in the
-        // in-memory store, before swapping the backend.
-        {
-            let old_cypher = self.backend.cypher();
-            for entries in storage.data.values_mut() {
-                for entry in entries {
-                    let plaintext = entry.value.decrypt(old_cypher)?;
-                    entry.value = EncryptedValue::encrypt(&new_cypher, &plaintext)?;
-                }
-            }
-        }
-
-        self.backend = Backend::Policy {
-            vault,
-            cypher: new_cypher,
-        };
-        self.backend.save_store(storage, &self.filename)?;
-        self.refresh_completion_factors();
-
-        secure_print(
-            "Upgraded to a multi-factor policy vault. Enrolled factor 'primary'; use \
-             'auth factor add'/'auth policy set' to add more."
-                .to_string(),
-            self.insecure_stdout,
-        )?;
-        Ok(())
     }
 }
 
@@ -549,9 +483,6 @@ fn print_help() {
 
 fn print_auth_help() {
     println!("AUTH COMMANDS (multi-factor stores):");
-    println!(
-        "  auth upgrade               - Convert a legacy single-password store to a policy vault"
-    );
     println!("  auth factor list           - List enrolled factors");
     println!(
         "  auth factor add password NAME - Add a password factor (NAME is a label, not the password)"

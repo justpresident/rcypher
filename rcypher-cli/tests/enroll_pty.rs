@@ -1,5 +1,5 @@
 //! PTY-driven end-to-end tests for the interactive auth commands (factor
-//! enrollment, upgrade, multi-factor unlock).
+//! enrollment, transparent legacy conversion, multi-factor unlock).
 //!
 //! Their password prompts are read from `/dev/tty` (so a snooped pipe can't
 //! capture them), which the stdin-based `cli_tests` cannot drive. Here the binary
@@ -212,26 +212,25 @@ fn enroll_weak_password_accepted_after_double_confirm() {
 }
 
 #[test]
-fn upgrade_legacy_store_to_policy_vault() {
+fn legacy_store_auto_converts_and_backs_up_on_write() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
     create_legacy_store_with_value(&path, "k", "v");
 
     // Initially a legacy version-7 store (not a version-8 policy vault).
     let head = fs::read(&path).unwrap();
-    assert_ne!(&head[..2], &rcypher::ContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &rcypher::ContainerFormat::V7.tag());
 
     let mut p = spawn_session(&path);
 
-    p.send_line("auth upgrade").unwrap();
-    p.exp_string("New password for the upgraded store").unwrap();
-    p.send_line(STRONG_PASSWORD).unwrap();
-    p.exp_string("Confirm password").unwrap();
-    p.send_line(STRONG_PASSWORD).unwrap();
-    p.exp_string("Upgraded to a multi-factor policy vault")
-        .unwrap();
+    // Opening a legacy store notifies the user it will be upgraded on next write.
+    p.exp_string("legacy store").unwrap();
 
-    // Auth commands now work, and the existing value survives the re-encryption.
+    // The first write triggers the upgrade: rewrites the file as v8 and backs up
+    // the original. The pre-existing value survives the re-encryption, and auth
+    // commands work because the store is a real policy vault in memory.
+    p.send_line("put x y").unwrap();
+    p.exp_string("x stored").unwrap();
     p.send_line("auth factor list").unwrap();
     p.exp_string("primary (password)").unwrap();
     p.send_line("get k").unwrap();
@@ -240,24 +239,23 @@ fn upgrade_legacy_store_to_policy_vault() {
     p.send_control('d').unwrap();
     p.exp_eof().unwrap();
 
-    // On disk it is now a version-8 policy vault, unlockable with the new password.
+    // On disk it is now a version-8 policy vault, unlockable with the original
+    // password (now the 'primary' factor)...
     let head = fs::read(&path).unwrap();
     assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
-    assert!(unlocks_with(&path, "primary", STRONG_PASSWORD));
-}
+    assert!(unlocks_with(&path, "primary", "test_password"));
 
-#[test]
-fn upgrade_rejected_on_a_policy_vault() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join("vault");
-    create_policy_vault(&path, "primary", "test_password");
-
-    let mut p = spawn_session(&path);
-    p.send_line("auth upgrade").unwrap();
-    p.exp_string("already a multi-factor policy vault").unwrap();
-
-    p.send_control('d').unwrap();
-    p.exp_eof().unwrap();
+    // ...and the untouched original is preserved as a <path>.bak (still v7).
+    let bak = {
+        let mut p = path.clone().into_os_string();
+        p.push(".bak");
+        std::path::PathBuf::from(p)
+    };
+    assert!(bak.exists(), "expected a .bak backup of the original");
+    assert_eq!(
+        &fs::read(&bak).unwrap()[..2],
+        &rcypher::ContainerFormat::V7.tag()
+    );
 }
 
 const P1_PASSWORD: &str = "alpha-one-vault-secret";

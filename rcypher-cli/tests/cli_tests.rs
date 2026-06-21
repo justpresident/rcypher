@@ -622,9 +622,12 @@ fn test_policy_vault_set_policy_and_remove_factor() {
 }
 
 /// Writes a legacy version-7 password store (the pre-policy format) at `path`,
-/// encrypted with "test_password" under insecure Argon2 params.
+/// encrypted with "test_password" under insecure Argon2 params, holding a single
+/// `legacy_key -> legacy_val` entry so conversion can be checked to preserve values.
 fn create_legacy_store(path: &Path) {
-    use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, save_storage};
+    use rcypher::{
+        Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Storage, save_storage,
+    };
 
     let key = EncryptionKey::from_password_with_params(
         CypherVersion::default(),
@@ -632,7 +635,13 @@ fn create_legacy_store(path: &Path) {
         &Argon2Params::insecure(),
     )
     .unwrap();
-    save_storage(&Cypher::new(key), &Storage::new(), path).unwrap();
+    let cypher = Cypher::new(key);
+    let mut storage = Storage::new();
+    storage.put(
+        "legacy_key".to_string(),
+        EncryptedValue::encrypt(&cypher, "legacy_val").unwrap(),
+    );
+    save_storage(&cypher, &storage, path).unwrap();
 }
 
 #[test]
@@ -650,18 +659,48 @@ fn test_new_store_is_policy_vault() {
 }
 
 #[test]
-fn test_legacy_store_opens_and_rejects_auth_commands() {
+fn test_legacy_store_auto_converts_to_policy_vault() {
     let (_dir, file_path) = temp_test_file();
     create_legacy_store(&file_path);
 
-    // A legacy store still opens and stores/reads values.
+    // Sanity: the seeded file really is a legacy (v7) container.
+    assert_eq!(
+        &fs::read(&file_path).unwrap()[..2],
+        &rcypher::ContainerFormat::V7.tag()
+    );
+
+    // Opening it and writing triggers the transparent upgrade: the original is
+    // backed up to <path>.bak and the file is rewritten in the current (v8) format.
     run_commands(&file_path, b"put k v\n".to_vec());
-    let got = run_commands_str(&file_path, "get k\n");
+
+    let bak = {
+        let mut p = file_path.clone().into_os_string();
+        p.push(".bak");
+        PathBuf::from(p)
+    };
+    assert!(bak.exists(), "expected a .bak backup of the original");
+    assert_eq!(
+        &fs::read(&bak).unwrap()[..2],
+        &rcypher::ContainerFormat::V7.tag(),
+        "the backup must be the untouched legacy file"
+    );
+    assert_eq!(
+        &fs::read(&file_path).unwrap()[..2],
+        &rcypher::ContainerFormat::V8.tag(),
+        "the upgraded file must be a v8 policy vault"
+    );
+
+    // The pre-existing value survived the conversion, and the new value is stored.
+    let got = run_commands_str(&file_path, "get legacy_key\nget k\n");
+    assert!(got.contains("legacy_key: legacy_val"), "{got}");
     assert!(got.contains("k: v"), "{got}");
 
-    // But it has no policy to manage.
-    let out = run_commands_str(&file_path, "auth policy show\n");
-    assert!(out.contains("no multi-factor policy"), "{out}");
+    // The converted store is a real policy vault: the unlock password became the
+    // 'primary' factor, so auth commands now work.
+    let factors = run_commands_str(&file_path, "auth factor list\n");
+    assert!(factors.contains("primary (password)"), "{factors}");
+    let policy = run_commands_str(&file_path, "auth policy show\n");
+    assert!(policy.contains("primary"), "{policy}");
 }
 
 #[test]

@@ -34,7 +34,6 @@ USER COMMANDS:
   help            - Show this help
 
 AUTH COMMANDS (multi-factor stores):
-  auth upgrade               - Convert a legacy single-password store to a policy vault
   auth factor list           - List enrolled factors
   auth factor add password NAME - Add a password factor (NAME is a label, not the password)
   auth factor remove NAME    - Remove a factor (not used by the policy)
@@ -50,8 +49,9 @@ Secrets are:
 
 * written directly to the terminal (TTY)
 
-New stores are created as multi-factor **policy vaults** (see below); existing
-single-password stores keep opening exactly as before.
+New stores are created as multi-factor **policy vaults** (see below); legacy
+single-password stores still open with their password and are upgraded to a
+policy vault automatically (see [Upgrading a legacy store](#upgrading-a-legacy-store-to-multi-factor)).
 
 ## Multi-factor unlock (policy vaults)
 
@@ -176,23 +176,25 @@ $ rcypher --decrypt input.txt.enc > input.txt
 ## Upgrading a legacy store to multi-factor
 
 A store created before multi-factor support is a **legacy single-password store**
-(version 7). It opens and works as always, but the `auth` commands above aren't
-available — there's no policy to manage. On open, rcypher points this out, and
-`auth upgrade` converts it into a policy vault in place:
+(version 7). rcypher upgrades it to a policy vault **automatically** — there's no
+command to run. When you open such a store, it is decrypted with your password and
+converted to a policy vault in memory: a fresh random data-encryption key is
+generated, your unlock password becomes the `primary` factor, and your secrets are
+re-encrypted under the new key. rcypher tells you the upgrade is pending:
 
 ```sh
-cypher > auth upgrade
-Upgrading this legacy store to a multi-factor policy vault. The password you set
-next becomes the first factor, 'primary'.
-New password for the upgraded store (factor 'primary'): ********
-Confirm password: ********
-Upgraded to a multi-factor policy vault. Enrolled factor 'primary'; use
-'auth factor add'/'auth policy set' to add more.
+$ rcypher secrets.db
+Note: 'secrets.db' is a legacy store; it will be upgraded to the current format on
+the next write (the original is backed up to secrets.db.bak first).
 ```
 
-The store is re-encrypted under a fresh data-encryption key (the password you
-enter becomes the `primary` factor), after which you can enroll more factors and
-set a policy as above. Your stored secrets are preserved.
+The on-disk file is rewritten in the new format **lazily**, on the next write
+(`put`, `del`, an `auth` change, …). Before that first write, rcypher copies the
+original file to `secrets.db.bak` so you keep an untouched backup, and prints a
+line confirming it. A read-only session leaves the file untouched.
+
+Once upgraded, the `auth` commands above work immediately, and you can enroll more
+factors and set a policy. Your stored secrets are preserved throughout.
 
 ## Merging conflicting storage files
 

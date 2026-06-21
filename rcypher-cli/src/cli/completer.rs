@@ -86,7 +86,7 @@ fn candidates(line: &str, pos: usize, keys: &[String], factors: &[String]) -> (u
 
     match words.first().copied() {
         Some("auth") => match (idx, words.get(1).copied(), words.get(2).copied()) {
-            (1, _, _) => fixed(&["policy", "factor", "upgrade"]),
+            (1, _, _) => fixed(&["policy", "factor"]),
             (2, Some("policy"), _) => fixed(&["show", "set"]),
             (2, Some("factor"), _) => fixed(&["list", "add", "remove"]),
             (3, Some("factor"), Some("add")) => fixed(&["password", "yubikey"]),
@@ -191,11 +191,7 @@ mod tests {
     fn completes_auth_subsystems() {
         assert_eq!(
             complete("auth "),
-            vec![
-                "policy".to_string(),
-                "factor".to_string(),
-                "upgrade".to_string()
-            ]
+            vec!["policy".to_string(), "factor".to_string()]
         );
         assert_eq!(complete("auth p"), vec!["policy".to_string()]);
     }
@@ -260,7 +256,7 @@ mod tests {
     #[test]
     fn no_completion_for_argless_or_unknown_positions() {
         assert!(complete("help ").is_empty());
-        assert!(complete("auth upgrade ").is_empty());
+        assert!(complete("auth policy show ").is_empty());
         assert!(complete("auth factor add password ").is_empty());
     }
 }

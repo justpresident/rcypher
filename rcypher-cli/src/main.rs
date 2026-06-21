@@ -24,7 +24,10 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, serialize_storage};
+use rcypher::{
+    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Storage,
+    deserialize_storage, load_storage, serialize_storage,
+};
 use rcypher::{ContainerFormat, PolicyMetadata, PolicyVault, UnlockSession, parse_policy_vault};
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -136,29 +139,18 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
     Ok(())
 }
 
-fn run_interactive(
-    params: &CliParams,
-    backend: cli::Backend,
-    last_activity: Arc<AtomicU64>,
-    last_security_check: Arc<AtomicU64>,
-) -> Result<()> {
-    let mut interactive_cli = cli::InteractiveCli::new(
+fn run_interactive(params: &CliParams, opened: OpenedStore, clock: SecurityClock) -> Result<()> {
+    let interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
-        backend,
+        opened.vault,
+        opened.from_legacy,
         get_argon2_params(params),
         params.filename.clone(),
-        last_activity,
-        last_security_check,
+        clock,
     );
-    interactive_cli.run()?;
+    interactive_cli.run(opened.storage)?;
     Ok(())
-}
-
-/// Whether `path` is an existing multi-factor policy vault (the current
-/// container format), as opposed to a legacy password envelope.
-fn is_policy_vault(path: &Path) -> bool {
-    ContainerFormat::probe_file(path).is_ok_and(|format| format == ContainerFormat::V8)
 }
 
 /// Unlocks a policy vault by collecting factor secrets until the policy is met.
@@ -218,36 +210,91 @@ fn obtain_store_password(
     )
 }
 
-/// Opens an existing store at `path`, unlocking it as a multi-factor policy vault
-/// (version 8) or as a legacy password store (version 7).
-fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Result<cli::Backend> {
-    if is_policy_vault(path) {
-        let data = std::fs::read(path)?;
-        let (meta, _payload) = parse_policy_vault(&data)?;
-        eprintln!(
-            "Unlock policy for {}: {}",
-            path.display(),
-            meta.policy_expr()
-        );
+/// An unlocked store — always a policy vault in memory. `from_legacy` is true
+/// when it was transparently converted from a legacy (v7) file and is not yet
+/// persisted in the current format.
+struct OpenedStore {
+    vault: PolicyVault,
+    storage: Storage,
+    from_legacy: bool,
+}
 
-        let vault = unlock_interactively(meta, params)?;
-        let cypher = vault.cypher();
-        Ok(cli::Backend::Policy { vault, cypher })
-    } else {
-        let mut password = obtain_store_password(params, path, false)?;
-        let spinner = Spinner::new("Deriving encryption key", params.quiet);
-        let key = EncryptionKey::for_file_with_params(&password, path, argon2);
-        password.zeroize(); // wipe as soon as the key is derived
-        spinner.finish_and_clear();
-        Ok(cli::Backend::Legacy {
-            cypher: Cypher::new(key?),
-        })
+/// Opens an existing store, unlocking it. A current-format (v8) file is unlocked
+/// against its policy; a legacy (v7) file is decrypted and transparently
+/// converted to a policy vault in memory (its password becomes the `primary`
+/// factor; values are re-encrypted under a fresh key; the file is rewritten in
+/// the new format on the next save).
+fn open_existing_store(
+    params: &CliParams,
+    path: &Path,
+    argon2: &Argon2Params,
+) -> Result<OpenedStore> {
+    match ContainerFormat::probe_file(path)? {
+        ContainerFormat::V8 => {
+            let data = std::fs::read(path)?;
+            let (meta, _payload) = parse_policy_vault(&data)?;
+            eprintln!(
+                "Unlock policy for {}: {}",
+                path.display(),
+                meta.policy_expr()
+            );
+            let vault = unlock_interactively(meta, params)?;
+            let payload = vault.load_payload(path)?;
+            let storage = deserialize_storage(&payload)?;
+            Ok(OpenedStore {
+                vault,
+                storage,
+                from_legacy: false,
+            })
+        }
+        ContainerFormat::V7 => {
+            let opened = open_and_convert_legacy(params, path, argon2)?;
+            eprintln!(
+                "Note: '{}' is a legacy store; it will be upgraded to the current format on the \
+                 next write (the original is backed up to {} first).",
+                path.display(),
+                cli::backup_path(path).display()
+            );
+            Ok(opened)
+        }
     }
+}
+
+/// Decrypts a legacy (v7) store and converts it to a policy vault in memory: a
+/// fresh random DEK, the unlock password as the `primary` factor, and every value
+/// re-encrypted under the new key.
+fn open_and_convert_legacy(
+    params: &CliParams,
+    path: &Path,
+    argon2: &Argon2Params,
+) -> Result<OpenedStore> {
+    let mut password = obtain_store_password(params, path, false)?;
+    let spinner = Spinner::new("Unlocking store", params.quiet);
+    let result = EncryptionKey::for_file_with_params(&password, path, argon2).and_then(|key| {
+        let legacy = Cypher::new(key);
+        let mut storage = load_storage(&legacy, path)?;
+        let vault = PolicyVault::create(cli::DEFAULT_FACTOR_ID, &password, argon2)?;
+        let new_cypher = vault.cypher();
+        for entries in storage.data.values_mut() {
+            for entry in entries {
+                let plaintext = entry.value.decrypt(&legacy)?;
+                entry.value = EncryptedValue::encrypt(&new_cypher, &plaintext)?;
+            }
+        }
+        Ok(OpenedStore {
+            vault,
+            storage,
+            from_legacy: true,
+        })
+    });
+    spinner.finish_and_clear();
+    password.zeroize();
+    result
 }
 
 /// Creates a new store as a multi-factor policy vault with a single password
 /// factor, persisting an empty store so the file exists for later unlocks.
-fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
+fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<OpenedStore> {
     // The password is held in a zeroizing buffer, wiped on drop — including the
     // early returns from the strength check below.
     let mut password = obtain_store_password(params, &params.filename, true)?;
@@ -266,21 +313,22 @@ fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Back
     spinner.finish_and_clear();
     let vault = vault?;
 
-    // YubiKey enrollment can be offered here once the FIDO2 factor lands; for now
-    // the user can add factors later with the in-store `enroll`/`policy` commands.
-
-    let cypher = vault.cypher();
+    // Persist an empty store so the file exists as a policy vault.
     vault.save(&serialize_storage(&Storage::new())?, &params.filename)?;
-    Ok(cli::Backend::Policy { vault, cypher })
+    Ok(OpenedStore {
+        vault,
+        storage: Storage::new(),
+        from_legacy: false,
+    })
 }
 
-/// Acquires the backend for the interactive session: opens an existing store, or
+/// Acquires the store for the interactive session: opens an existing one, or
 /// creates a new policy vault when the file does not yet exist.
-fn acquire_store_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
+fn acquire_store(params: &CliParams, argon2: &Argon2Params) -> Result<OpenedStore> {
     if params.filename.exists() {
-        open_backend(params, &params.filename, argon2)
+        open_existing_store(params, &params.filename, argon2)
     } else {
-        create_backend(params, argon2)
+        create_store(params, argon2)
     }
 }
 
@@ -300,6 +348,16 @@ fn current_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// The two shared timestamps that coordinate the security timer thread with the
+/// interactive loop. `last_activity` drives the idle timeout; `last_security_check`
+/// is the timer's heartbeat (a stale value means the timer thread was paused, e.g.
+/// by a debugger).
+#[derive(Clone)]
+struct SecurityClock {
+    last_activity: Arc<AtomicU64>,
+    last_security_check: Arc<AtomicU64>,
 }
 
 /// RAII guard that disarms the interval timer on drop.
@@ -393,10 +451,12 @@ fn arm_alarm_timer() -> Result<AlarmTimer> {
 /// SIGALRM is blocked in the calling thread before the timer is armed, so
 /// every subsequent thread inherits the blocked mask and the signal is
 /// consumed only by the dedicated handler thread via `sigwait`.
-fn start_security_timer(
-    last_activity: Arc<AtomicU64>,
-    last_security_check: Arc<AtomicU64>,
-) -> Result<SecurityTimerGuard> {
+fn start_security_timer(clock: SecurityClock) -> Result<SecurityTimerGuard> {
+    let SecurityClock {
+        last_activity,
+        last_security_check,
+    } = clock;
+
     // Block SIGALRM in this thread; all threads spawned afterwards inherit
     // the mask, ensuring only our sigwait thread receives the signal.
     let mut alrm_mask = SigSet::empty();
@@ -464,10 +524,12 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    let last_activity = Arc::new(AtomicU64::new(0));
-    // Initialise to now so the watchdog doesn't fire before the first tick.
-    let last_security_check = Arc::new(AtomicU64::new(current_unix_secs()));
-    let _security_guard = start_security_timer(last_activity.clone(), last_security_check.clone())?;
+    let clock = SecurityClock {
+        last_activity: Arc::new(AtomicU64::new(0)),
+        // Initialise to now so the watchdog doesn't fire before the first tick.
+        last_security_check: Arc::new(AtomicU64::new(current_unix_secs())),
+    };
+    let _security_guard = start_security_timer(clock.clone())?;
 
     let argon2_params = get_argon2_params(&params);
 
@@ -486,19 +548,32 @@ fn main() -> Result<()> {
         password.zeroize(); // wipe eagerly, before the (slower) decryption runs
         run_decrypt(&params, key)
     } else if let Some(update_file) = &params.update_with {
-        // Each store is unlocked through its own backend (legacy or policy vault),
-        // so a conflict copy can be merged regardless of either side's format.
-        let main_backend = open_backend(&params, &params.filename, &argon2_params)?;
-        let update_backend = open_backend(&params, update_file, &argon2_params)?;
+        // Open both stores (each transparently upgraded if legacy), merge the
+        // update file into the main one, and persist the main store.
+        let main = open_existing_store(&params, &params.filename, &argon2_params)?;
+        let update = open_existing_store(&params, update_file, &argon2_params)?;
+
+        let main_cypher = main.vault.cypher();
+        let update_cypher = update.vault.cypher();
+        let main_vault = main.vault;
+        let mut main_storage = main.storage;
+        let path = params.filename.clone();
+        let mut backup_pending = main.from_legacy;
+
         cli::update::run_update_with(
-            &main_backend,
-            &params.filename,
-            &update_backend,
-            update_file,
+            &main_cypher,
+            &update_cypher,
+            &mut main_storage,
+            &update.storage,
             params.insecure_stdout,
+            |storage| {
+                cli::persist_store(&main_vault, storage, &path, backup_pending)?;
+                backup_pending = false;
+                Ok(())
+            },
         )
     } else {
-        let backend = acquire_store_backend(&params, &argon2_params)?;
-        run_interactive(&params, backend, last_activity, last_security_check)
+        let opened = acquire_store(&params, &argon2_params)?;
+        run_interactive(&params, opened, clock)
     }
 }
