@@ -104,6 +104,29 @@ fn enroll_rejects_password_typed_as_factor_name() {
 }
 
 #[test]
+fn enroll_trivially_weak_password_is_hard_rejected() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_policy_vault(&path, "primary", "test_password");
+
+    let mut p = spawn_session(&path);
+
+    // A "too guessable" password (zxcvbn score 0) — like the factor name, the app
+    // name, or "abc123" — is refused outright, with no override prompt.
+    p.send_line("enroll password backup").unwrap();
+    p.exp_string("New password for factor 'backup'").unwrap();
+    p.send_line("abc123").unwrap();
+    p.exp_string("Confirm password").unwrap();
+    p.send_line("abc123").unwrap();
+    p.exp_string("too weak").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+
+    assert!(!unlocks_with(&path, "backup", "abc123"));
+}
+
+#[test]
 fn enroll_weak_password_warns_and_can_be_declined() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
@@ -113,9 +136,9 @@ fn enroll_weak_password_warns_and_can_be_declined() {
 
     p.send_line("enroll password backup").unwrap();
     p.exp_string("New password for factor 'backup'").unwrap();
-    p.send_line("abc123").unwrap();
+    p.send_line("letmein99").unwrap();
     p.exp_string("Confirm password").unwrap();
-    p.send_line("abc123").unwrap();
+    p.send_line("letmein99").unwrap();
 
     // A weak password triggers the warning; declining cancels enrollment.
     p.exp_string("WEAK PASSWORD").unwrap();
@@ -126,7 +149,7 @@ fn enroll_weak_password_warns_and_can_be_declined() {
     p.send_control('d').unwrap();
     p.exp_eof().unwrap();
 
-    assert!(!unlocks_with(&path, "backup", "abc123"));
+    assert!(!unlocks_with(&path, "backup", "letmein99"));
 }
 
 #[test]
@@ -139,9 +162,9 @@ fn enroll_weak_password_accepted_after_double_confirm() {
 
     p.send_line("enroll password backup").unwrap();
     p.exp_string("New password for factor 'backup'").unwrap();
-    p.send_line("abc123").unwrap();
+    p.send_line("letmein99").unwrap();
     p.exp_string("Confirm password").unwrap();
-    p.send_line("abc123").unwrap();
+    p.send_line("letmein99").unwrap();
 
     // The double confirmation lets a determined user proceed anyway.
     p.exp_string("WEAK PASSWORD").unwrap();
@@ -159,5 +182,5 @@ fn enroll_weak_password_accepted_after_double_confirm() {
     p.exp_eof().unwrap();
 
     // The weak password was accepted and works as the factor's secret.
-    assert!(unlocks_with(&path, "backup", "abc123"));
+    assert!(unlocks_with(&path, "backup", "letmein99"));
 }

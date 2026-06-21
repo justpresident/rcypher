@@ -126,20 +126,36 @@ pub fn prompt_factor_password(id: &str) -> Result<Option<String>> {
     }
 }
 
-/// Scores a candidate password with zxcvbn and, when it is weak (below "safely
-/// unguessable" — crackable in fewer than ~10^10 guesses), prints a prominent
-/// warning with the estimated crack time and feedback, then requires a double
-/// confirmation. Returns whether the caller should proceed with this password.
+/// Scores a candidate password with zxcvbn and gates on the result:
+/// - score 3–4 (safely unguessable): accepted silently (`Ok(true)`);
+/// - score 1–2 (weak): a prominent warning, then proceed only after a double
+///   confirmation (`Ok(true)`/`Ok(false)`);
+/// - score 0 (too guessable — the factor name, the app name, "abc123", …):
+///   refused outright (`Err`), with no override.
 ///
 /// `user_inputs` (e.g. the factor name) make a password derived from them score
-/// lower. The confirmation is read from the controlling terminal.
+/// lower, so the factor name itself lands in the hard-rejected tier. The
+/// confirmation is read from the controlling terminal.
 pub fn confirm_if_weak_password(password: &str, user_inputs: &[&str]) -> Result<bool> {
     let entropy = zxcvbn(password, user_inputs);
-    if entropy.score() >= Score::Three {
+    let score = entropy.score();
+    if score >= Score::Three {
         return Ok(true);
     }
     show_weak_password_warning(&entropy);
-    // Double confirmation — both answers must be an explicit "yes".
+
+    // Score 0 is "too guessable" (crackable in under ~1000 guesses) — this is
+    // where the factor name, the app name, and the worst passwords land (the name
+    // is passed as a zxcvbn input). Refuse outright; do not offer an override.
+    if score == Score::Zero {
+        bail!(
+            "this password is far too weak to use — it (or something very close, such as \
+             the factor name) would be cracked almost instantly. Choose a stronger one."
+        );
+    }
+
+    // Scores 1–2 are weak but not trivial: allow proceeding after a double
+    // confirmation, where both answers must be an explicit "yes".
     if !read_tty_confirmation("Use this weak password anyway? [y/N]: ")? {
         return Ok(false);
     }
@@ -196,16 +212,16 @@ pub fn warn_single_password_unlock(unlockers: &[String]) {
 }
 
 /// Prompts for a new password, twice, and fails unless the two entries match.
-/// Used when enrolling a new factor into an unlocked store.
-pub fn prompt_new_password(label: &str) -> Result<String> {
-    let mut password = rpassword::prompt_password(format!("New password for {label}: "))?;
-    let mut confirmation = rpassword::prompt_password("Confirm password: ")?;
-    if password != confirmation {
-        password.zeroize();
-        confirmation.zeroize();
+/// Used when enrolling a new factor into an unlocked store. The returned password
+/// is held in a zeroizing buffer.
+pub fn prompt_new_password(label: &str) -> Result<Zeroizing<String>> {
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "New password for {label}: "
+    ))?);
+    let confirmation = Zeroizing::new(rpassword::prompt_password("Confirm password: ")?);
+    if *password != *confirmation {
         bail!("Passwords do not match");
     }
-    confirmation.zeroize();
     Ok(password)
 }
 

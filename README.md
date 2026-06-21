@@ -112,10 +112,11 @@ checks the password with [zxcvbn](https://github.com/dropbox/zxcvbn) — the mod
 estimator that scores by how many guesses a password resists and flags dictionary
 words, sequences, and reuse of context (like the factor name). It follows current
 NIST guidance: length and unpredictability matter, not arbitrary "must contain a
-symbol" rules. If the password is weak, rcypher shows a prominent warning with an
-estimated crack time and requires a double confirmation before accepting it — it
-never blocks you, just makes the risk explicit. A long passphrase of a few random
-words is the easiest way to score well.
+symbol" rules. A weak password shows a prominent warning with an estimated crack
+time and requires a double confirmation. A *trivially* guessable one — the factor
+name itself, the app name, or something like `abc123` — is refused outright, with
+no override. A long passphrase of a few random words is the easiest way to score
+well.
 
 Because the factor name is stored unencrypted, a password may not be too similar
 to its name: it must be at least twice as long as any prefix it shares with the

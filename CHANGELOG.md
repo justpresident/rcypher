@@ -27,8 +27,9 @@ minor; features and fixes bump the patch).
   `or` branch is only as strong as its weakest satisfying set.
 - **Password strength check.** Creating a store or enrolling a password factor
   scores the password with zxcvbn (NIST-aligned: guess-resistance and pattern
-  detection, no composition rules) and, when it is weak, shows a prominent
-  warning with an estimated crack time and requires a double confirmation.
+  detection, no composition rules). A weak password shows a prominent warning
+  with an estimated crack time and requires a double confirmation; a trivially
+  guessable one — including the factor name itself — is refused outright.
 
 ### Security
 - A factor's password may not be too similar to its (cleartext) name — it must be

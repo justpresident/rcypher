@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
 #[command(group(
@@ -269,21 +269,21 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
 /// Creates a new store as a multi-factor policy vault with a single password
 /// factor, persisting an empty store so the file exists for later unlocks.
 fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
-    let mut password = obtain_store_password(params, &params.filename, true)?;
+    // A zeroizing buffer wipes the password on drop, including the early returns
+    // from the strength check below.
+    let password = Zeroizing::new(obtain_store_password(params, &params.filename, true)?);
 
     // Strength-check an interactively chosen password (skip in the test-only
     // `--insecure-password` path, which is non-interactive).
     if params.insecure_password.is_none()
         && !confirm_if_weak_password(&password, &[DEFAULT_FACTOR_ID, "rcypher"])?
     {
-        password.zeroize();
         bail!("store creation cancelled (weak password not confirmed)");
     }
 
     let spinner = Spinner::new("Deriving encryption key", params.quiet);
     let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, argon2);
     spinner.finish_and_clear();
-    password.zeroize();
     let vault = vault?;
 
     // YubiKey enrollment can be offered here once the FIDO2 factor lands; for now

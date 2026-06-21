@@ -301,27 +301,22 @@ impl InteractiveCli {
             ),
             self.insecure_stdout,
         )?;
-        let mut password = prompt_new_password(&format!("factor '{id}'"))?;
+        // The password is held in a zeroizing buffer, so every early return below
+        // wipes it on drop.
+        let password = prompt_new_password(&format!("factor '{id}'"))?;
 
         // Reject a password that resembles the (cleartext) name first, so that
         // mix-up gets its specific message rather than a generic strength warning.
-        if let Err(err) = check_factor_password(id, &password) {
-            password.zeroize();
-            return Err(err);
-        }
+        check_factor_password(id, &password)?;
         if !confirm_if_weak_password(&password, &[id, "rcypher"])? {
-            password.zeroize();
             bail!("enrollment cancelled (weak password not confirmed)");
         }
 
         let params = self.argon2_params;
-        let result = self
-            .backend
+        self.backend
             .policy_vault_mut()
-            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))
-            .and_then(|vault| vault.enroll_password(id, &password, &params));
-        password.zeroize();
-        result?;
+            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?
+            .enroll_password(id, &password, &params)?;
 
         self.backend.save_store(storage, &self.filename)?;
         secure_print(
