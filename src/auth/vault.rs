@@ -237,6 +237,103 @@ impl PolicyVault {
     }
 }
 
+/// An incremental unlock of a policy vault.
+///
+/// Present factor secrets one at a time — without saying which factor each
+/// belongs to — until the policy is satisfied, then reconstruct the vault. Built
+/// from on-disk [`PolicyMetadata`]; a caller drives it from a prompt loop.
+pub struct UnlockSession {
+    factors: Vec<Factor>,
+    policy: PolicyNode,
+    authkeks: HashMap<String, KeyMaterial>,
+}
+
+impl UnlockSession {
+    #[must_use]
+    pub fn new(meta: PolicyMetadata) -> Self {
+        Self {
+            factors: meta.factors,
+            policy: meta.policy,
+            authkeks: HashMap::new(),
+        }
+    }
+
+    fn satisfied_ids(&self) -> HashSet<String> {
+        self.authkeks.keys().cloned().collect()
+    }
+
+    /// Whether the factors gathered so far satisfy the unlock policy.
+    #[must_use]
+    pub fn is_complete(&self) -> bool {
+        self.policy.is_satisfied_by(&self.satisfied_ids())
+    }
+
+    /// Whether the policy can be satisfied by password factors alone — i.e. the
+    /// store is unlockable without the not-yet-supported `YubiKey` factors.
+    #[must_use]
+    pub fn satisfiable_by_passwords(&self) -> bool {
+        let passwords: HashSet<String> = self
+            .factors
+            .iter()
+            .filter(|f| matches!(f.kind, FactorKind::Password { .. }))
+            .map(|f| f.id.clone())
+            .collect();
+        self.policy.is_satisfied_by(&passwords)
+    }
+
+    /// Tries `password` against every not-yet-satisfied password factor, recording
+    /// and returning the ids it newly satisfies (usually one, or several if the
+    /// same password was enrolled for more than one factor).
+    pub fn try_password(&mut self, password: &str) -> Result<Vec<String>> {
+        let candidates: Vec<(String, FactorKind)> = self
+            .factors
+            .iter()
+            .filter(|f| {
+                matches!(f.kind, FactorKind::Password { .. }) && !self.authkeks.contains_key(&f.id)
+            })
+            .map(|f| (f.id.clone(), f.kind.clone()))
+            .collect();
+
+        let mut satisfied = Vec::new();
+        for (id, kind) in candidates {
+            let authkek = password_kek(password, &kind)?;
+            let verified = leaf_wrapped_share(&self.policy, &id)
+                .is_some_and(|wrapped| keyslot::unwrap_share(&authkek, wrapped).is_some());
+            if verified {
+                self.authkeks.insert(id.clone(), authkek);
+                satisfied.push(id);
+            }
+        }
+        Ok(satisfied)
+    }
+
+    /// Reconstructs the data-encryption key from the gathered factors and returns
+    /// the unlocked vault. Errors if the policy is not yet satisfied.
+    pub fn finish(self) -> Result<PolicyVault> {
+        let mut provided = Vec::new();
+        unwrap_leaves(&self.policy, &self.authkeks, &mut provided);
+        let dek_bytes = reconstruct(&self.policy, &provided)
+            .ok_or_else(|| anyhow!("the provided factors do not satisfy the unlock policy"))?;
+        let dek = to_key_material(&dek_bytes)?;
+        Ok(PolicyVault {
+            factors: self.factors,
+            policy: self.policy,
+            dek,
+        })
+    }
+}
+
+/// The first wrapped share in `node` belonging to factor `id`, if any.
+fn leaf_wrapped_share<'a>(node: &'a PolicyNode, id: &str) -> Option<&'a [u8]> {
+    match node {
+        PolicyNode::Leaf(leaf) if leaf.factor == id => Some(leaf.wrapped_share.as_slice()),
+        PolicyNode::Leaf(_) => None,
+        PolicyNode::And(children) | PolicyNode::Or(children) => children
+            .iter()
+            .find_map(|child| leaf_wrapped_share(child, id)),
+    }
+}
+
 fn derive_authkek(kind: &FactorKind, secret: &FactorSecret) -> Result<KeyMaterial> {
     match (kind, secret) {
         (FactorKind::Password { .. }, FactorSecret::Password(pw)) => password_kek(pw, kind),

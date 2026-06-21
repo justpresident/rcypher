@@ -19,17 +19,16 @@
 
 mod cli;
 
-use crate::cli::utils::{Spinner, confirm_if_weak_password, get_password, prompt_factor_password};
+use crate::cli::utils::{Spinner, confirm_if_weak_password, get_password, prompt_password};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, serialize_storage};
 use rcypher::{
-    FactorKind, FactorSecret, POLICY_VAULT_VERSION, PolicyMetadata, PolicyVault, parse_policy_vault,
+    POLICY_VAULT_VERSION, PolicyMetadata, PolicyVault, UnlockSession, parse_policy_vault,
 };
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
-use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io;
 use std::io::{Read, Write};
@@ -171,51 +170,49 @@ fn is_policy_vault(path: &Path) -> bool {
     u16::from_be_bytes(head) == POLICY_VAULT_VERSION
 }
 
-/// Prompts for a satisfying set of factor secrets for a policy vault.
+/// Unlocks a policy vault by collecting factor secrets until the policy is met.
 ///
-/// Password factors are requested in enrollment order, skipping any the user
-/// leaves empty, and stopping as soon as the collected set satisfies the policy.
-/// `YubiKey` factors are not yet interactive and are skipped. When
-/// `--insecure-password` is set (testing only), it is offered for every password
-/// factor instead of prompting.
-fn collect_policy_secrets(
-    meta: &PolicyMetadata,
-    insecure_password: Option<&str>,
-) -> Result<HashMap<String, FactorSecret>> {
-    let mut secrets = HashMap::new();
-    let mut have: HashSet<String> = HashSet::new();
+/// Asks for a password in a loop (not per named factor): each entry is tried
+/// against every still-unsatisfied factor, satisfied factors are reported, and
+/// the loop continues until the policy is satisfied. When `--insecure-password`
+/// is set (testing only), that one password is tried once instead of prompting.
+fn unlock_interactively(meta: PolicyMetadata, params: &CliParams) -> Result<PolicyVault> {
+    let mut session = UnlockSession::new(meta);
+    if !session.satisfiable_by_passwords() {
+        bail!("this store's policy requires a YubiKey factor, which is not yet supported");
+    }
 
-    for factor in &meta.factors {
-        if meta.policy.is_satisfied_by(&have) {
-            break;
+    // Non-interactive testing path: one password, which must satisfy on its own.
+    if let Some(pw) = params.insecure_password.as_deref() {
+        session.try_password(pw)?;
+        if !session.is_complete() {
+            bail!("the provided password does not satisfy the unlock policy");
         }
-        match factor.kind {
-            FactorKind::Password { .. } => {
-                let password: Option<Zeroizing<String>> = match insecure_password {
-                    Some(pw) => Some(Zeroizing::new(pw.to_string())),
-                    None => prompt_factor_password(&factor.id)?,
-                };
-                if let Some(password) = password {
-                    secrets.insert(factor.id.clone(), FactorSecret::Password(password));
-                    have.insert(factor.id.clone());
-                }
+        return session.finish();
+    }
+
+    while !session.is_complete() {
+        let password = prompt_password("Password (empty to cancel)")?;
+        if password.is_empty() {
+            bail!("unlock cancelled");
+        }
+
+        let spinner = Spinner::new("Checking", params.quiet);
+        let satisfied = session.try_password(&password)?;
+        spinner.finish_and_clear();
+
+        if satisfied.is_empty() {
+            eprintln!("That password did not match any factor — try again.");
+        } else {
+            for id in &satisfied {
+                eprintln!("Factor '{id}' unlocked.");
             }
-            FactorKind::Yubikey { .. } => {
-                eprintln!(
-                    "Skipping YubiKey factor '{}' (YubiKey unlock is not yet supported).",
-                    factor.id
-                );
+            if !session.is_complete() {
+                eprintln!("More factors are required to satisfy the policy.");
             }
         }
     }
-
-    if !meta.policy.is_satisfied_by(&have) {
-        bail!(
-            "the provided factors cannot satisfy the unlock policy: {}",
-            meta.policy_expr()
-        );
-    }
-    Ok(secrets)
+    session.finish()
 }
 
 /// Returns the store password — the one supplied via `--insecure-password`
@@ -243,12 +240,7 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
             meta.policy_expr()
         );
 
-        let secrets = collect_policy_secrets(&meta, params.insecure_password.as_deref())?;
-
-        let spinner = Spinner::new("Unlocking vault", params.quiet);
-        let (vault, _payload) = PolicyVault::open(path, &secrets)?;
-        spinner.finish_and_clear();
-
+        let vault = unlock_interactively(meta, params)?;
         let cypher = vault.cypher();
         Ok(cli::Backend::Policy { vault, cypher })
     } else {

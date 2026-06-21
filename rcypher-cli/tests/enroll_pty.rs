@@ -258,3 +258,58 @@ fn upgrade_rejected_on_a_policy_vault() {
     p.send_control('d').unwrap();
     p.exp_eof().unwrap();
 }
+
+const P1_PASSWORD: &str = "alpha-one-vault-secret";
+const P2_PASSWORD: &str = "bravo-two-vault-secret";
+
+/// Writes a version-8 vault requiring BOTH `p1` and `p2` password factors.
+fn create_and_vault(path: &Path) {
+    let mut vault = PolicyVault::create("p1", P1_PASSWORD, &Argon2Params::insecure()).unwrap();
+    vault
+        .enroll_password("p2", P2_PASSWORD, &Argon2Params::insecure())
+        .unwrap();
+    vault.set_policy("p1 and p2").unwrap();
+    let payload = serialize_storage(&Storage::new()).unwrap();
+    vault.save(&payload, path).unwrap();
+}
+
+/// Spawns the binary under a PTY without `--insecure-password`, so the multi-
+/// factor unlock prompts interactively.
+fn spawn_interactive_unlock(path: &Path) -> PtySession {
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    cmd.args(["--quiet", "--insecure-stdout", "--insecure-allow-debugging"]);
+    cmd.arg(path);
+    cmd.env("TERM", "xterm");
+    spawn_command(cmd, Some(30_000)).expect("spawn under PTY")
+}
+
+#[test]
+fn interactive_unlock_prompts_generically_and_loops() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_and_vault(&path);
+
+    let mut p = spawn_interactive_unlock(&path);
+
+    // One generic prompt (not per-factor); a wrong password is reported and retried.
+    p.exp_string("Password (empty to cancel)").unwrap();
+    p.send_line("totally-wrong-password").unwrap();
+    p.exp_string("did not match any factor").unwrap();
+
+    // Either password works in any order; each unlock is reported, and the AND
+    // policy keeps asking until it is satisfied.
+    p.send_line(P2_PASSWORD).unwrap();
+    p.exp_string("Factor 'p2' unlocked").unwrap();
+    p.exp_string("More factors are required").unwrap();
+    p.send_line(P1_PASSWORD).unwrap();
+    p.exp_string("Factor 'p1' unlocked").unwrap();
+
+    // Unlocked: the interactive session is live.
+    p.send_line("put k v").unwrap();
+    p.exp_string("k stored").unwrap();
+    p.send_line("get k").unwrap();
+    p.exp_string("k: v").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+}

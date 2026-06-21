@@ -17,8 +17,9 @@ minor; features and fixes bump the patch).
     `policy show`, `policy set EXPR` (e.g. `p1 or (p2 and yk)`),
     `remove factor NAME`, and `upgrade` (convert a legacy single-password store
     into a policy vault, re-encrypting under a fresh key).
-  - On open, rcypher prints the policy and prompts only for as many factors as
-    are needed to satisfy it.
+  - On open, rcypher asks for a password in a loop (you don't pick a factor):
+    each entry is matched against the factors and the loop continues until the
+    policy is satisfied.
   - The payload is encrypted under a random data-encryption key (DEK) that is
     monotone-secret-shared across the policy tree; changing the policy or adding
     a factor never re-encrypts stored secrets (the DEK is stable; only the IV

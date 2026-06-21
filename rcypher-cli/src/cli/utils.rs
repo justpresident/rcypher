@@ -112,19 +112,12 @@ pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<Zeroi
     Ok(password)
 }
 
-/// Prompts for one factor's password while unlocking a multi-factor vault.
-///
-/// An empty entry means "skip this factor" — the caller may be able to satisfy
-/// the policy another way — and returns `None`.
-pub fn prompt_factor_password(id: &str) -> Result<Option<Zeroizing<String>>> {
-    let password = Zeroizing::new(rpassword::prompt_password(format!(
-        "Password for factor '{id}' (empty to skip): "
-    ))?);
-    if password.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(password))
-    }
+/// Prompts (without echo) for a password, returning it in a zeroizing buffer.
+/// `prompt` is shown verbatim, followed by `: `.
+pub fn prompt_password(prompt: &str) -> Result<Zeroizing<String>> {
+    Ok(Zeroizing::new(rpassword::prompt_password(format!(
+        "{prompt}: "
+    ))?))
 }
 
 /// Scores a candidate password with zxcvbn and gates on the result:

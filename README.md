@@ -101,8 +101,11 @@ present), but for one person it just means typing two secrets every time for
 little gain — the combination pays off when one factor is a hardware key, which
 is the upcoming FIDO2/YubiKey factor.
 
-On open, rcypher prints the policy and prompts only for as many factors as are
-needed to satisfy it (leave a prompt empty to skip a factor you don't have).
+On open, rcypher prints the policy and asks for a password in a loop — you don't
+pick a factor. Each password you enter is matched against the factors, the ones
+it unlocks are reported, and it keeps asking until the policy is satisfied (an
+empty entry cancels). So for `primary or recovery` one password is enough; for
+`primary and recovery` it asks again until both are given.
 
 ### Password strength
 
