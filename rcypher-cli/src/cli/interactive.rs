@@ -2,11 +2,13 @@ use crate::cli::Backend;
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{
-    copy_to_clipboard, format_timestamp, prompt_new_password, secure_print,
-    warn_single_password_unlock,
+    confirm_if_weak_password, copy_to_clipboard, format_timestamp, prompt_new_password,
+    secure_print, warn_single_password_unlock,
 };
 use anyhow::{Result, anyhow, bail};
-use rcypher::{Argon2Params, EncryptedValue, FactorKind, Storage, is_debugger_attached};
+use rcypher::{
+    Argon2Params, EncryptedValue, FactorKind, Storage, check_factor_password, is_debugger_attached,
+};
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
@@ -300,6 +302,18 @@ impl InteractiveCli {
             self.insecure_stdout,
         )?;
         let mut password = prompt_new_password(&format!("factor '{id}'"))?;
+
+        // Reject a password that resembles the (cleartext) name first, so that
+        // mix-up gets its specific message rather than a generic strength warning.
+        if let Err(err) = check_factor_password(id, &password) {
+            password.zeroize();
+            return Err(err);
+        }
+        if !confirm_if_weak_password(&password, &[id, "rcypher"])? {
+            password.zeroize();
+            bail!("enrollment cancelled (weak password not confirmed)");
+        }
+
         let params = self.argon2_params;
         let result = self
             .backend

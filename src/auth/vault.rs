@@ -45,8 +45,7 @@ impl PolicyVault {
     /// policy is just that factor. Enroll more factors and refine the policy with
     /// [`PolicyVault::enroll_password`] and [`PolicyVault::set_policy`].
     pub fn create(id: &str, password: &str, params: &Argon2Params) -> Result<Self> {
-        validate_factor_id(id)?;
-        reject_password_equal_to_id(id, password)?;
+        check_factor_password(id, password)?;
         let dek = keyslot::generate_dek()?;
 
         let kind = new_password_kind(params)?;
@@ -103,8 +102,7 @@ impl PolicyVault {
         password: &str,
         params: &Argon2Params,
     ) -> Result<()> {
-        validate_factor_id(id)?;
-        reject_password_equal_to_id(id, password)?;
+        check_factor_password(id, password)?;
         if self.factors.iter().any(|f| f.id == id) {
             bail!("a factor named '{id}' already exists");
         }
@@ -351,15 +349,39 @@ fn validate_factor_id(id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Guards against a common mix-up where a password is typed into the slot meant
-/// for the factor *name*: the name is stored unencrypted as a label, so a name
-/// equal to the password would expose the password on disk.
-fn reject_password_equal_to_id(id: &str, password: &str) -> Result<()> {
-    if password == id {
+/// Guards against a password that is too similar to the factor *name*.
+///
+/// The name is stored unencrypted as a label, so a password that shares a long
+/// prefix with it (e.g. name `foobar`, password `foobar1`) leaks most of the
+/// password to anyone reading the file. Require the password to be at least twice
+/// as long as the prefix it shares with the name — which also rejects a password
+/// equal to the name, catching the mix-up of typing a password into the name
+/// slot. Comparison is case-insensitive, since an attacker would try case
+/// variants of a known label cheaply.
+/// Validates that `password` is acceptable for a factor named `id`, independent
+/// of any vault — so a caller can check it before doing more work (e.g. a
+/// strength prompt). The name must be well-formed and the password must not be
+/// too similar to it. [`PolicyVault::create`] and [`PolicyVault::enroll_password`]
+/// apply the same check.
+pub fn check_factor_password(id: &str, password: &str) -> Result<()> {
+    validate_factor_id(id)?;
+    reject_password_resembling_id(id, password)
+}
+
+fn reject_password_resembling_id(id: &str, password: &str) -> Result<()> {
+    let shared_prefix = id
+        .chars()
+        .flat_map(char::to_lowercase)
+        .zip(password.chars().flat_map(char::to_lowercase))
+        .take_while(|(a, b)| a == b)
+        .count();
+    if password.chars().count() < 2 * shared_prefix {
         bail!(
-            "the factor name and its password must differ — the name '{id}' is stored \
-             unencrypted as a label. Did you type your password where the factor name belongs? \
-             The name is just a label; you are prompted for the password separately."
+            "the password is too similar to the factor name '{id}': they share a \
+             {shared_prefix}-character prefix, and the name is stored unencrypted. Use a \
+             password at least twice as long as any prefix it shares with the name (or pick a \
+             different name). Did you type your password where the factor name belongs? The \
+             name is just a label; the password is prompted separately."
         );
     }
     Ok(())
@@ -464,20 +486,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_factor_name_equal_to_password() {
-        // The footgun: a password typed into the factor-name slot, then repeated
-        // at the password prompt, would otherwise store the password as a
-        // cleartext label.
+    fn rejects_password_resembling_factor_name() {
+        // Equal name and password (a full shared prefix) is rejected — the footgun
+        // of typing a password into the name slot and repeating it.
         assert!(PolicyVault::create("hunter2", "hunter2", &params()).is_err());
 
         let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        // A shared prefix longer than half the password length is rejected.
         assert!(
             vault
-                .enroll_password("s3cret", "s3cret", &params())
+                .enroll_password("foobar", "foobar1", &params())
                 .is_err()
+        ); // prefix 6, len 7
+        // Case-insensitively, too.
+        assert!(
+            vault
+                .enroll_password("foobar", "FOOBAR12", &params())
+                .is_err()
+        ); // prefix 6, len 8
+        // A password at least twice the shared prefix is fine.
+        assert!(
+            vault
+                .enroll_password("foobar", "foobarsecret", &params())
+                .is_ok()
+        ); // prefix 6, len 12
+        // An unrelated password is fine.
+        assert!(
+            vault
+                .enroll_password("backup", "s3cret-xyz", &params())
+                .is_ok()
         );
-        // A name that merely differs from the password is fine.
-        assert!(vault.enroll_password("backup", "s3cret", &params()).is_ok());
     }
 
     #[test]

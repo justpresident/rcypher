@@ -21,4 +21,4 @@ pub use format::{
     serialize_policy_header,
 };
 pub use policy::{Leaf, PolicyNode, Share, distribute, reconstruct};
-pub use vault::{FactorSecret, PolicyVault};
+pub use vault::{FactorSecret, PolicyVault, check_factor_password};

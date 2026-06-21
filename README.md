@@ -105,6 +105,23 @@ is the upcoming FIDO2/YubiKey factor.
 On open, rcypher prints the policy and prompts only for as many factors as are
 needed to satisfy it (leave a prompt empty to skip a factor you don't have).
 
+### Password strength
+
+When you create a store or enroll a password factor (interactively), rcypher
+checks the password with [zxcvbn](https://github.com/dropbox/zxcvbn) — the modern
+estimator that scores by how many guesses a password resists and flags dictionary
+words, sequences, and reuse of context (like the factor name). It follows current
+NIST guidance: length and unpredictability matter, not arbitrary "must contain a
+symbol" rules. If the password is weak, rcypher shows a prominent warning with an
+estimated crack time and requires a double confirmation before accepting it — it
+never blocks you, just makes the risk explicit. A long passphrase of a few random
+words is the easiest way to score well.
+
+Because the factor name is stored unencrypted, a password may not be too similar
+to its name: it must be at least twice as long as any prefix it shares with the
+name (so `foobar` / `foobar1` is rejected). This also blocks accidentally typing
+a password into the name slot.
+
 ### How it works
 
 The store payload is encrypted under a random **data-encryption key (DEK)**. The

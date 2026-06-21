@@ -20,7 +20,8 @@
 mod cli;
 
 use crate::cli::utils::{
-    Spinner, get_password, prompt_factor_password, warn_single_password_unlock,
+    Spinner, confirm_if_weak_password, get_password, prompt_factor_password,
+    warn_single_password_unlock,
 };
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
@@ -269,6 +270,16 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
 /// factor, persisting an empty store so the file exists for later unlocks.
 fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
     let mut password = obtain_store_password(params, &params.filename, true)?;
+
+    // Strength-check an interactively chosen password (skip in the test-only
+    // `--insecure-password` path, which is non-interactive).
+    if params.insecure_password.is_none()
+        && !confirm_if_weak_password(&password, &[DEFAULT_FACTOR_ID, "rcypher"])?
+    {
+        password.zeroize();
+        bail!("store creation cancelled (weak password not confirmed)");
+    }
+
     let spinner = Spinner::new("Deriving encryption key", params.quiet);
     let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, argon2);
     spinner.finish_and_clear();

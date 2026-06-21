@@ -4,9 +4,10 @@ use chrono::{Local, TimeZone};
 use indicatif::ProgressBar;
 use nix::fcntl::{Flock, FlockArg};
 use std::fs::OpenOptions;
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use zeroize::{Zeroize, Zeroizing};
+use zxcvbn::{Score, zxcvbn};
 
 pub fn format_timestamp(ts: u64) -> String {
     if ts == 0 {
@@ -123,6 +124,62 @@ pub fn prompt_factor_password(id: &str) -> Result<Option<String>> {
     } else {
         Ok(Some(password))
     }
+}
+
+/// Scores a candidate password with zxcvbn and, when it is weak (below "safely
+/// unguessable" — crackable in fewer than ~10^10 guesses), prints a prominent
+/// warning with the estimated crack time and feedback, then requires a double
+/// confirmation. Returns whether the caller should proceed with this password.
+///
+/// `user_inputs` (e.g. the factor name) make a password derived from them score
+/// lower. The confirmation is read from the controlling terminal.
+pub fn confirm_if_weak_password(password: &str, user_inputs: &[&str]) -> Result<bool> {
+    let entropy = zxcvbn(password, user_inputs);
+    if entropy.score() >= Score::Three {
+        return Ok(true);
+    }
+    show_weak_password_warning(&entropy);
+    // Double confirmation — both answers must be an explicit "yes".
+    if !read_tty_confirmation("Use this weak password anyway? [y/N]: ")? {
+        return Ok(false);
+    }
+    read_tty_confirmation("A weak password undermines the whole vault — are you sure? [y/N]: ")
+}
+
+fn show_weak_password_warning(entropy: &zxcvbn::Entropy) {
+    let crack_time = entropy.crack_times().offline_slow_hashing_1e4_per_second();
+    eprintln!("\n╔════════════════════════════════════════════════════════════════════╗");
+    eprintln!("║                        ⚠️  WEAK PASSWORD  ⚠️                       ║");
+    eprintln!("╠════════════════════════════════════════════════════════════════════╣");
+    eprintln!("║  This password is easy to guess. Anyone who obtains the vault file  ║");
+    eprintln!("║  could crack it offline far faster than is safe.                    ║");
+    eprintln!("╚════════════════════════════════════════════════════════════════════╝");
+    eprintln!("  Estimated offline crack time (slow hashing): {crack_time}");
+    if let Some(feedback) = entropy.feedback() {
+        if let Some(warning) = feedback.warning() {
+            eprintln!("  • {warning}");
+        }
+        for suggestion in feedback.suggestions() {
+            eprintln!("  • {suggestion}");
+        }
+    }
+    eprintln!("  Tip: a long passphrase of several random words is both strong and memorable.\n");
+}
+
+/// Reads a yes/no answer from the controlling terminal (`/dev/tty`), so the
+/// prompt works even while the interactive line editor owns stdin. Returns
+/// `false` for anything other than an explicit yes.
+fn read_tty_confirmation(prompt: &str) -> Result<bool> {
+    let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    let mut writer = tty.try_clone()?;
+    writer.write_all(prompt.as_bytes())?;
+    writer.flush()?;
+
+    let mut reader = BufReader::new(tty);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(answer == "y" || answer == "yes")
 }
 
 /// Warns (on stderr) if any single password factor alone can unlock the store,

@@ -25,8 +25,16 @@ minor; features and fixes bump the patch).
 - **Weak-policy warning.** rcypher warns — at `policy set` time and on open —
   when a single password factor alone can unlock a multi-factor store, since an
   `or` branch is only as strong as its weakest satisfying set.
+- **Password strength check.** Creating a store or enrolling a password factor
+  scores the password with zxcvbn (NIST-aligned: guess-resistance and pattern
+  detection, no composition rules) and, when it is weak, shows a prominent
+  warning with an estimated crack time and requires a double confirmation.
 
 ### Security
+- A factor's password may not be too similar to its (cleartext) name — it must be
+  at least twice as long as any shared prefix — preventing a password from being
+  exposed as a label, including the mix-up of typing a password where the factor
+  name belongs.
 - Transient secret-shares and recovered per-factor auth-keys are now held in
   zeroizing buffers throughout the unlock/secret-sharing path, so no share or
   auth-key lingers in memory un-wiped.

@@ -574,7 +574,7 @@ fn create_multifactor_vault(path: &Path) {
     let mut vault =
         PolicyVault::create("main", "test_password", &Argon2Params::insecure()).unwrap();
     vault
-        .enroll_password("backup", "backup_pw", &Argon2Params::insecure())
+        .enroll_password("backup", "recovery-secret-9", &Argon2Params::insecure())
         .unwrap();
     vault.set_policy("main or backup").unwrap();
     let payload = serialize_storage(&Storage::new()).unwrap();
