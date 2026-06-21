@@ -318,7 +318,10 @@ impl InteractiveCli {
             "policy" => self.cmd_auth_policy(rest, storage),
             "factor" => self.cmd_auth_factor(rest, storage),
             "upgrade" => self.cmd_upgrade(storage),
-            "" => bail!("syntax: auth policy|factor|upgrade …"),
+            "" => {
+                print_auth_help();
+                Ok(())
+            }
             other => bail!("unknown auth subcommand '{other}' (try: auth policy|factor|upgrade)"),
         }
     }
@@ -541,6 +544,10 @@ fn print_help() {
     println!("  del|rm KEY      - Delete a key");
     println!("  help            - Show this help");
     println!();
+    print_auth_help();
+}
+
+fn print_auth_help() {
     println!("AUTH COMMANDS (multi-factor stores):");
     println!(
         "  auth upgrade               - Convert a legacy single-password store to a policy vault"

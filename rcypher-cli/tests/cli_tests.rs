@@ -663,3 +663,12 @@ fn test_legacy_store_opens_and_rejects_auth_commands() {
     let out = run_commands_str(&file_path, "auth policy show\n");
     assert!(out.contains("no multi-factor policy"), "{out}");
 }
+
+#[test]
+fn test_bare_auth_prints_help() {
+    let (_dir, file_path) = temp_test_file();
+    let out = run_commands_str(&file_path, "auth\n");
+    assert!(out.contains("AUTH COMMANDS"), "{out}");
+    assert!(out.contains("auth factor list"), "{out}");
+    assert!(out.contains("auth policy set"), "{out}");
+}
