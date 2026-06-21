@@ -280,6 +280,56 @@ fn test_load_with_wrong_password() {
 }
 
 #[test]
+fn test_reencrypt_rekeys_all_values_and_history() {
+    let make = |pw: &str| {
+        Cypher::new(
+            EncryptionKey::from_password_with_params(
+                CypherVersion::default(),
+                pw,
+                &Argon2Params::insecure(),
+            )
+            .unwrap(),
+        )
+    };
+    let old = make("old_password");
+    let new = make("new_password");
+
+    let mut storage = Storage::new();
+    // A key with two historical versions, plus a second key.
+    storage.put_ts(
+        "k".to_string(),
+        EncryptedValue::encrypt(&old, "v1").unwrap(),
+        100,
+    );
+    storage.put_ts(
+        "k".to_string(),
+        EncryptedValue::encrypt(&old, "v2").unwrap(),
+        200,
+    );
+    storage.put(
+        "other".to_string(),
+        EncryptedValue::encrypt(&old, "secret").unwrap(),
+    );
+
+    storage.reencrypt(&old, &new).unwrap();
+
+    // The full history of every key now decrypts under the new cypher...
+    let history: Vec<String> = storage
+        .history("k")
+        .unwrap()
+        .map(|e| e.value.decrypt(&new).unwrap().to_string())
+        .collect();
+    assert_eq!(history, vec!["v1".to_string(), "v2".to_string()]);
+
+    let (_, latest_other) = storage.get("other").unwrap().next().unwrap();
+    assert_eq!(*latest_other.decrypt(&new).unwrap(), *"secret");
+
+    // ...and the old cypher can no longer read the re-encrypted values.
+    let (_, latest_k) = storage.get("k").unwrap().next().unwrap();
+    assert!(latest_k.decrypt(&old).is_err());
+}
+
+#[test]
 fn test_storage_ordering() {
     let mut storage = Storage::new();
 

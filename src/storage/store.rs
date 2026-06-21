@@ -7,6 +7,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use super::value::{EncryptedValue, ValueEntry};
+use crate::crypto::Cypher;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Storage {
@@ -63,6 +64,23 @@ impl Storage {
 
     pub fn delete(&mut self, key: &str) -> bool {
         self.data.remove(key).is_some()
+    }
+
+    /// Re-encrypts every stored value — across all keys and their full history —
+    /// from the `from` cypher to the `to` cypher, in place.
+    ///
+    /// Used when a store's data-encryption key changes, e.g. converting a legacy
+    /// single-password file to the current multi-factor format under a fresh key.
+    /// Each decrypted plaintext lives only in a zeroizing buffer for the single
+    /// re-encryption and is wiped before the next entry.
+    pub fn reencrypt(&mut self, from: &Cypher, to: &Cypher) -> Result<()> {
+        for entries in self.data.values_mut() {
+            for entry in entries {
+                let plaintext = entry.value.decrypt(from)?;
+                entry.value = EncryptedValue::encrypt(to, &plaintext)?;
+            }
+        }
+        Ok(())
     }
 
     /// Returns an iterator over all keys matching the given regex pattern.

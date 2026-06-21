@@ -8,16 +8,16 @@ minor; features and fixes bump the patch).
 ## [Unreleased]
 
 ### Added
-- **Multi-factor unlock (policy vaults).** A store can now require more than one
-  secret, combined by a boolean access policy.
-  - New stores are created as version-8 policy vaults with a single `password`
-    factor. Legacy version-7 password stores still open with their password and
-    are **upgraded automatically**: on open they are converted to a policy vault
-    in memory (the unlock password becomes the `primary` factor and secrets are
-    re-encrypted under a fresh random key). The on-disk file is rewritten in the
-    new format lazily, on the next write — after copying the untouched original to
-    `<file>.bak`; rcypher notifies you both on open and when the backup is made. A
-    read-only session leaves the file unchanged.
+- **Multi-factor unlock.** A store can now require more than one secret, combined
+  by a boolean access policy.
+  - New stores use the version-8 format with a single `password` factor. Legacy
+    version-7 password stores still open with their password and are **upgraded
+    automatically**: on open they are converted in memory (the unlock password
+    becomes the `primary` factor and secrets are re-encrypted under a fresh random
+    key). The on-disk file is rewritten in the new format lazily, on the next
+    write — after copying the untouched original to `<file>.bak`; rcypher notifies
+    you both on open and when the backup is made. A read-only session leaves the
+    file unchanged.
   - In-store `auth` commands while unlocked: `auth factor {list, add password
     NAME, remove NAME}` and `auth policy {show, set EXPR}` (e.g. `p1 or (p2 and
     yk)`). Enrolling a password rejects one that duplicates an existing factor's.

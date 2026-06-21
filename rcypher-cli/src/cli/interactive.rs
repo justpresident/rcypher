@@ -23,8 +23,8 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    /// The unlocked store. Every store is a policy vault in memory (legacy files
-    /// are converted on open).
+    /// The unlocked store's auth keyslots and access policy. Every store carries
+    /// one in memory (legacy files are converted on open).
     vault: PolicyVault,
     /// A `Cypher` keyed by the vault's (stable) DEK, for per-value crypto.
     cypher: Cypher,

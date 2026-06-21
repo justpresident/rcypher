@@ -13,7 +13,7 @@ pub const SECURITY_WATCHDOG_TIMEOUT_SECS: u64 = 2; // 2× the 1-second timer int
 const CLIPBOARD_TTL_MS: u64 = 10000;
 
 /// The factor id given to the password enrolled when a new store is created, or
-/// when a legacy store is upgraded to a policy vault.
+/// when a legacy store is converted on open.
 pub const DEFAULT_FACTOR_ID: &str = "primary";
 
 pub use interactive::InteractiveCli;
@@ -26,9 +26,9 @@ pub fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Writes `storage` to `path` as a policy vault. When `backup_first` (the
-/// legacy-upgrade case), the original file is first copied to `<path>.bak` and the
-/// user is told.
+/// Writes `storage` to `path` in the current store format. When `backup_first`
+/// (the legacy-upgrade case), the original file is first copied to `<path>.bak`
+/// and the user is told.
 pub fn persist_store(
     vault: &PolicyVault,
     storage: &Storage,

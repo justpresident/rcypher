@@ -237,8 +237,8 @@ fn prompt_merge_mode() -> Result<String> {
 /// Both sides are already unlocked: `main_cypher`/`update_cypher` key the
 /// respective stores' per-value crypto, so the merge works the same regardless of
 /// how each file was opened. Persisting the merged result is delegated to `save`,
-/// which the caller wires to the main store's policy vault (and the one-time
-/// legacy-upgrade backup).
+/// which the caller wires to the main store (and the one-time legacy-upgrade
+/// backup).
 pub fn run_update_with(
     main_cypher: &Cypher,
     update_cypher: &Cypher,

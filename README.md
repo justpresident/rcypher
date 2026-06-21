@@ -49,11 +49,11 @@ Secrets are:
 
 * written directly to the terminal (TTY)
 
-New stores are created as multi-factor **policy vaults** (see below); legacy
-single-password stores still open with their password and are upgraded to a
-policy vault automatically (see [Upgrading a legacy store](#upgrading-a-legacy-store-to-multi-factor)).
+New stores support **multi-factor unlock** (see below); legacy single-password
+stores still open with their password and are upgraded to the current format
+automatically (see [Upgrading a legacy store](#upgrading-a-legacy-store-to-multi-factor)).
 
-## Multi-factor unlock (policy vaults)
+## Multi-factor unlock
 
 A store can require more than one secret to unlock. Each secret is a named
 **factor** (today: a password; FIDO2 security keys are on the way), and an
@@ -176,11 +176,11 @@ $ rcypher --decrypt input.txt.enc > input.txt
 ## Upgrading a legacy store to multi-factor
 
 A store created before multi-factor support is a **legacy single-password store**
-(version 7). rcypher upgrades it to a policy vault **automatically** — there's no
-command to run. When you open such a store, it is decrypted with your password and
-converted to a policy vault in memory: a fresh random data-encryption key is
-generated, your unlock password becomes the `primary` factor, and your secrets are
-re-encrypted under the new key. rcypher tells you the upgrade is pending:
+(version 7). rcypher upgrades it to the current format **automatically** — there's
+no command to run. When you open such a store, it is decrypted with your password
+and converted in memory: a fresh random data-encryption key is generated, your
+unlock password becomes the `primary` factor, and your secrets are re-encrypted
+under the new key. rcypher tells you the upgrade is pending:
 
 ```sh
 $ rcypher secrets.db
@@ -497,11 +497,11 @@ Header includes:
 
 This allows forward-compatible format upgrades.
 
-A **policy vault** (version 8, the default for new stores) prepends a keyslot
-header — the enrolled factors and the access policy, whose leaves carry the
-secret-shares of the data-encryption key — to the encrypted payload above. The
-leading version tag lets rcypher tell a policy vault from a plain version-7
-password store and pick the right unlock path. See
+The current store format (version 8, the default for new stores) prepends a
+keyslot header — the enrolled factors and the access policy, whose leaves carry
+the secret-shares of the data-encryption key — to the encrypted payload above. The
+leading version tag lets rcypher tell it apart from a plain version-7 password
+store and pick the right unlock path. See
 [`docs/auth-protocol.md`](docs/auth-protocol.md) for the normative spec.
 
 ## Clipboard Behavior (Important)
