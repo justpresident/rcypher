@@ -19,10 +19,7 @@
 
 mod cli;
 
-use crate::cli::utils::{
-    Spinner, confirm_if_weak_password, get_password, prompt_factor_password,
-    warn_single_password_unlock,
-};
+use crate::cli::utils::{Spinner, confirm_if_weak_password, get_password, prompt_factor_password};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
@@ -245,7 +242,6 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
             path.display(),
             meta.policy_expr()
         );
-        warn_single_password_unlock(&meta.single_password_unlockers());
 
         let secrets = collect_policy_secrets(&meta, params.insecure_password.as_deref())?;
 

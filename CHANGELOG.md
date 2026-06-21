@@ -23,9 +23,6 @@ minor; features and fixes bump the patch).
     monotone-secret-shared across the policy tree; changing the policy or adding
     a factor never re-encrypts stored secrets (the DEK is stable; only the IV
     changes per save). See `docs/auth-protocol.md`.
-- **Weak-policy warning.** rcypher warns — at `policy set` time and on open —
-  when a single password factor alone can unlock a multi-factor store, since an
-  `or` branch is only as strong as its weakest satisfying set.
 - **Password strength check.** Creating a store or enrolling a password factor
   scores the password with zxcvbn (NIST-aligned: guess-resistance and pattern
   detection, no composition rules). A weak password shows a prominent warning

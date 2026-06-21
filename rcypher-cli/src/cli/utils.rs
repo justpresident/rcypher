@@ -199,19 +199,6 @@ fn read_tty_confirmation(prompt: &str) -> Result<bool> {
     Ok(answer == "y" || answer == "yes")
 }
 
-/// Warns (on stderr) if any single password factor alone can unlock the store,
-/// silently bypassing a stronger policy. No-op when `unlockers` is empty.
-pub fn warn_single_password_unlock(unlockers: &[String]) {
-    if unlockers.is_empty() {
-        return;
-    }
-    eprintln!(
-        "⚠ Weak policy: factor(s) {} each unlock this store on their own — \
-         an OR branch is only as strong as its weakest factor.",
-        unlockers.join(", ")
-    );
-}
-
 /// Prompts for a new password, twice, and fails unless the two entries match.
 /// Used when enrolling a new factor into an unlocked store. The returned password
 /// is held in a zeroizing buffer.

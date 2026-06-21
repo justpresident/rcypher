@@ -4,7 +4,7 @@ use crate::cli::DEFAULT_FACTOR_ID;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{
     confirm_if_weak_password, copy_to_clipboard, format_timestamp, prompt_new_password,
-    secure_print, warn_single_password_unlock,
+    secure_print,
 };
 use anyhow::{Result, anyhow, bail};
 use rcypher::{
@@ -398,20 +398,16 @@ impl InteractiveCli {
     }
 
     fn set_policy(&mut self, expr: &str, storage: &Storage) -> Result<()> {
-        let (new_expr, weak) = {
+        let new_expr = {
             let vault = self
                 .backend
                 .policy_vault_mut()
                 .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
             vault.set_policy(expr)?;
-            (
-                vault.policy_expr(),
-                vault.metadata().single_password_unlockers(),
-            )
+            vault.policy_expr()
         };
         self.backend.save_store(storage, &self.filename)?;
         secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
-        warn_single_password_unlock(&weak);
         Ok(())
     }
 

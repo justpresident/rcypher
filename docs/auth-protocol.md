@@ -242,8 +242,8 @@ Unlock outcomes:
 - **OR is as strong as its weakest satisfying set.** In `p1 OR (…)`, an attacker
   attacks `p1` alone — the strongest other branch does not help. Any factor (or
   set) that can unlock on its own must itself be strong; a password-only branch
-  bounds the vault's offline strength by that password. The CLI warns when a lone
-  password factor satisfies a multi-factor policy.
+  bounds the vault's offline strength by that password. Password strength is
+  enforced per factor at enroll time (see Argon2/zxcvbn below).
 - **`authkek_under_dek` is safe to store.** Without the DEK it is opaque
   authenticated ciphertext; with the DEK the holder already has full access, and
   it never reveals a password (Argon2id is one-way).

@@ -80,8 +80,6 @@ Factor 'recovery' enrolled. It is not yet used by the policy — run
 
 cypher > policy set primary or recovery   # either one unlocks the store
 Policy: primary or recovery
-⚠ Weak policy: factor(s) primary, recovery each unlock this store on their own —
- an OR branch is only as strong as its weakest factor.
 
 cypher > factors
 primary (password)
@@ -150,8 +148,8 @@ IVs change on each save. The full construction is specified in
 An `or` is only as strong as its **weakest** satisfying set. A policy like
 `primary or (recovery and yubikey)` can be opened by `primary` alone, so the
 extra security key adds nothing against an attacker who has that one password.
-rcypher warns when a single password factor on its own can unlock a multi-factor
-store — both when you set the policy and when you open the store.
+That's a fine trade-off when each branch is itself strong (e.g. a recovery
+password you keep in another manager) — just choose each branch deliberately.
 
 ## Encrypting/Decrypting a file
 
