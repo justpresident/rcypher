@@ -34,12 +34,12 @@ USER COMMANDS:
   help            - Show this help
 
 AUTH COMMANDS (multi-factor stores):
-  upgrade             - Convert a legacy single-password store to a policy vault
-  factors             - List enrolled factors
-  enroll password NAME - Enroll a new password factor
-  policy show         - Show the current unlock policy
-  policy set EXPR     - Set the unlock policy, e.g. p1 or (p2 and yk)
-  remove factor NAME  - Remove a factor (not used by the policy)
+  auth upgrade               - Convert a legacy single-password store to a policy vault
+  auth factor list           - List enrolled factors
+  auth factor add password NAME - Add a password factor (NAME is a label, not the password)
+  auth factor remove NAME    - Remove a factor (not used by the policy)
+  auth policy show           - Show the current unlock policy
+  auth policy set EXPR       - Set the unlock policy, e.g. p1 or (p2 and yk)
 ```
 ![demo](demo.gif)
 Secrets are:
@@ -64,24 +64,24 @@ A new store starts with one password factor named `primary` and the policy
 `primary`. For example, add a **recovery password** as a second way in, so a
 forgotten primary password doesn't lock you out:
 
-In `enroll password NAME`, **`NAME` is a label** (shown by `factors`, stored
-unencrypted) — *not* the password; you are prompted for the password separately.
-rcypher refuses to enrol a factor whose name equals its password, to catch the
-mix-up of typing a password where the name belongs.
+In `auth factor add password NAME`, **`NAME` is a label** (shown by `auth factor
+list`, stored unencrypted) — *not* the password; you are prompted for the
+password separately. rcypher refuses to enrol a factor whose name equals its
+password (or whose password duplicates an existing factor's).
 
 ```sh
-cypher > enroll password recovery   # 'recovery' is the label; the passphrase is prompted
-Enrolling factor 'recovery'. The name is a public label (shown by 'factors',
-stored unencrypted) — not the password; you'll enter the password next.
+cypher > auth factor add password recovery   # 'recovery' is the label; the passphrase is prompted
+Enrolling factor 'recovery'. The name is a public label (shown by 'auth factor
+list', stored unencrypted) — not the password; you'll enter the password next.
 New password for factor 'recovery': ********
 Confirm password: ********
 Factor 'recovery' enrolled. It is not yet used by the policy — run
-'policy set EXPR' to require or accept it.
+'auth policy set EXPR' to require or accept it.
 
-cypher > policy set primary or recovery   # either one unlocks the store
+cypher > auth policy set primary or recovery   # either one unlocks the store
 Policy: primary or recovery
 
-cypher > factors
+cypher > auth factor list
 primary (password)
 recovery (password)
 ```
@@ -176,19 +176,18 @@ $ rcypher --decrypt input.txt.enc > input.txt
 ## Upgrading a legacy store to multi-factor
 
 A store created before multi-factor support is a **legacy single-password store**
-(version 7). It opens and works as always, but the auth commands above
-(`factors`, `enroll`, `policy`, …) aren't available — there's no policy to manage.
-On open, rcypher points this out, and the in-store `upgrade` command converts it
-into a policy vault in place:
+(version 7). It opens and works as always, but the `auth` commands above aren't
+available — there's no policy to manage. On open, rcypher points this out, and
+`auth upgrade` converts it into a policy vault in place:
 
 ```sh
-cypher > upgrade
+cypher > auth upgrade
 Upgrading this legacy store to a multi-factor policy vault. The password you set
 next becomes the first factor, 'primary'.
 New password for the upgraded store (factor 'primary'): ********
 Confirm password: ********
 Upgraded to a multi-factor policy vault. Enrolled factor 'primary'; use
-'enroll'/'policy' to add more.
+'auth factor add'/'auth policy set' to add more.
 ```
 
 The store is re-encrypted under a fresh data-encryption key (the password you

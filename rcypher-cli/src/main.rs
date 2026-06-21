@@ -198,17 +198,16 @@ fn unlock_interactively(meta: PolicyMetadata, params: &CliParams) -> Result<Poli
         }
 
         let spinner = Spinner::new("Checking", params.quiet);
-        let satisfied = session.try_password(&password)?;
+        let matched = session.try_password(&password)?;
         spinner.finish_and_clear();
 
-        if satisfied.is_empty() {
-            eprintln!("That password did not match any factor — try again.");
-        } else {
-            for id in &satisfied {
+        match matched {
+            None => eprintln!("That password did not match any factor — try again."),
+            Some(id) => {
                 eprintln!("Factor '{id}' unlocked.");
-            }
-            if !session.is_complete() {
-                eprintln!("More factors are required to satisfy the policy.");
+                if !session.is_complete() {
+                    eprintln!("More factors are required to satisfy the policy.");
+                }
             }
         }
     }

@@ -1,8 +1,9 @@
-//! PTY-driven end-to-end tests for the in-store `enroll password` command.
+//! PTY-driven end-to-end tests for the interactive auth commands (factor
+//! enrollment, upgrade, multi-factor unlock).
 //!
-//! Its password prompt is read from `/dev/tty` (so a snooped pipe can't capture
-//! it), which the stdin-based `cli_tests` cannot drive. Here the binary is run
-//! under a real pseudo-terminal so the prompts can be answered.
+//! Their password prompts are read from `/dev/tty` (so a snooped pipe can't
+//! capture them), which the stdin-based `cli_tests` cannot drive. Here the binary
+//! is run under a real pseudo-terminal so the prompts can be answered.
 
 use std::collections::HashMap;
 use std::fs;
@@ -84,7 +85,7 @@ fn enroll_password_via_pty_persists_a_working_factor() {
     let mut p = spawn_session(&path);
 
     // Enroll a new (strong) password factor through the interactive TTY prompts.
-    p.send_line("enroll password backup").unwrap();
+    p.send_line("auth factor add password backup").unwrap();
     p.exp_string("New password for factor 'backup'").unwrap();
     p.send_line(STRONG_PASSWORD).unwrap();
     p.exp_string("Confirm password").unwrap();
@@ -92,10 +93,10 @@ fn enroll_password_via_pty_persists_a_working_factor() {
     p.exp_string("Factor 'backup' enrolled").unwrap();
 
     // Make the new factor usable: either factor now unlocks the store.
-    p.send_line("policy set primary or backup").unwrap();
+    p.send_line("auth policy set primary or backup").unwrap();
     p.exp_string("Policy: primary or backup").unwrap();
 
-    p.send_line("factors").unwrap();
+    p.send_line("auth factor list").unwrap();
     p.exp_string("backup (password)").unwrap();
 
     p.send_control('d').unwrap();
@@ -115,7 +116,7 @@ fn enroll_rejects_password_typed_as_factor_name() {
 
     // The footgun: a password typed where the factor NAME belongs, then repeated
     // at the prompt. The store must refuse rather than persist it as a label.
-    p.send_line("enroll password hunter2").unwrap();
+    p.send_line("auth factor add password hunter2").unwrap();
     p.exp_string("New password for factor 'hunter2'").unwrap();
     p.send_line("hunter2").unwrap();
     p.exp_string("Confirm password").unwrap();
@@ -138,7 +139,7 @@ fn enroll_trivially_weak_password_is_hard_rejected() {
 
     // A "too guessable" password (zxcvbn score 0) — like the factor name, the app
     // name, or "abc123" — is refused outright, with no override prompt.
-    p.send_line("enroll password backup").unwrap();
+    p.send_line("auth factor add password backup").unwrap();
     p.exp_string("New password for factor 'backup'").unwrap();
     p.send_line("abc123").unwrap();
     p.exp_string("Confirm password").unwrap();
@@ -159,7 +160,7 @@ fn enroll_weak_password_warns_and_can_be_declined() {
 
     let mut p = spawn_session(&path);
 
-    p.send_line("enroll password backup").unwrap();
+    p.send_line("auth factor add password backup").unwrap();
     p.exp_string("New password for factor 'backup'").unwrap();
     p.send_line("letmein99").unwrap();
     p.exp_string("Confirm password").unwrap();
@@ -185,7 +186,7 @@ fn enroll_weak_password_accepted_after_double_confirm() {
 
     let mut p = spawn_session(&path);
 
-    p.send_line("enroll password backup").unwrap();
+    p.send_line("auth factor add password backup").unwrap();
     p.exp_string("New password for factor 'backup'").unwrap();
     p.send_line("letmein99").unwrap();
     p.exp_string("Confirm password").unwrap();
@@ -200,7 +201,7 @@ fn enroll_weak_password_accepted_after_double_confirm() {
     p.exp_string("Factor 'backup' enrolled").unwrap();
 
     // Reference the new factor in the policy so it can unlock on its own.
-    p.send_line("policy set primary or backup").unwrap();
+    p.send_line("auth policy set primary or backup").unwrap();
     p.exp_string("Policy: primary or backup").unwrap();
 
     p.send_control('d').unwrap();
@@ -222,7 +223,7 @@ fn upgrade_legacy_store_to_policy_vault() {
 
     let mut p = spawn_session(&path);
 
-    p.send_line("upgrade").unwrap();
+    p.send_line("auth upgrade").unwrap();
     p.exp_string("New password for the upgraded store").unwrap();
     p.send_line(STRONG_PASSWORD).unwrap();
     p.exp_string("Confirm password").unwrap();
@@ -231,7 +232,7 @@ fn upgrade_legacy_store_to_policy_vault() {
         .unwrap();
 
     // Auth commands now work, and the existing value survives the re-encryption.
-    p.send_line("factors").unwrap();
+    p.send_line("auth factor list").unwrap();
     p.exp_string("primary (password)").unwrap();
     p.send_line("get k").unwrap();
     p.exp_string("k: v").unwrap();
@@ -252,7 +253,7 @@ fn upgrade_rejected_on_a_policy_vault() {
     create_policy_vault(&path, "primary", "test_password");
 
     let mut p = spawn_session(&path);
-    p.send_line("upgrade").unwrap();
+    p.send_line("auth upgrade").unwrap();
     p.exp_string("already a multi-factor policy vault").unwrap();
 
     p.send_control('d').unwrap();

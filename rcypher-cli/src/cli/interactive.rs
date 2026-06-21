@@ -28,7 +28,7 @@ pub struct InteractiveCli {
     argon2_params: Argon2Params,
     filename: PathBuf,
     /// Enrolled factor ids, shared with the completer so Tab completion of
-    /// `remove factor` / `policy set` reflects enroll/remove.
+    /// `auth factor remove` / `auth policy set` reflects add/remove.
     factors: Arc<Mutex<Vec<String>>>,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
@@ -61,7 +61,7 @@ impl InteractiveCli {
     }
 
     /// Re-reads the enrolled factor ids into the shared completion list, so Tab
-    /// completion stays in sync after `enroll` / `remove factor`.
+    /// completion stays in sync after `auth factor add` / `remove`.
     fn refresh_completion_factors(&self) {
         let ids = self
             .backend
@@ -76,7 +76,7 @@ impl InteractiveCli {
 
         if self.backend.policy_vault().is_none() {
             eprintln!(
-                "Note: this is a legacy single-password store. Run 'upgrade' to enable \
+                "Note: this is a legacy single-password store. Run 'auth upgrade' to enable \
                  multi-factor unlock (factors, policies, YubiKey)."
             );
         }
@@ -188,11 +188,7 @@ impl InteractiveCli {
                 }
                 self.cmd_delete(parts[1], storage)
             }
-            "enroll" => self.cmd_enroll(&parts, storage),
-            "factors" => self.cmd_factors(),
-            "policy" => self.cmd_policy(&parts, storage),
-            "remove" => self.cmd_remove(&parts, storage),
-            "upgrade" => self.cmd_upgrade(storage),
+            "auth" => self.cmd_auth(line, storage),
             "help" => {
                 print_help();
                 Ok(())
@@ -302,31 +298,101 @@ impl InteractiveCli {
         Ok(())
     }
 
-    /// `enroll password NAME` — add a new password factor (prompted, with
-    /// confirmation). `NAME` is a label, not the password; the password is
-    /// prompted separately. The new factor is not used by the policy until a
-    /// `policy set` references it.
-    fn cmd_enroll(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
-        match parts.get(1).copied() {
-            Some("password") => {
-                let id = parts
-                    .get(2)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("syntax: enroll password NAME (NAME is a label)"))?;
-                self.enroll_password(id, storage)
-            }
-            Some("yubikey") => bail!("YubiKey enrollment is not yet supported"),
-            _ => bail!("syntax: enroll password NAME (NAME is a label, not the password)"),
+    /// The store's policy vault, or a "legacy store" error pointing at `upgrade`.
+    fn require_policy_vault(&self) -> Result<&rcypher::PolicyVault> {
+        self.backend.policy_vault().ok_or_else(|| {
+            anyhow!(
+                "this store has no multi-factor policy to manage — run 'auth upgrade' to convert \
+                 this legacy store to a policy vault"
+            )
+        })
+    }
+
+    /// `auth …` — multi-factor management. Subcommands: `auth policy {show|set
+    /// EXPR}`, `auth factor {list|add password NAME|add yubikey NAME|remove
+    /// NAME}`, and `auth upgrade`.
+    fn cmd_auth(&mut self, line: &str, storage: &mut Storage) -> Result<()> {
+        let args = line.strip_prefix("auth").unwrap_or("").trim_start();
+        let (sub, rest) = split_first_word(args);
+        match sub {
+            "policy" => self.cmd_auth_policy(rest, storage),
+            "factor" => self.cmd_auth_factor(rest, storage),
+            "upgrade" => self.cmd_upgrade(storage),
+            "" => bail!("syntax: auth policy|factor|upgrade …"),
+            other => bail!("unknown auth subcommand '{other}' (try: auth policy|factor|upgrade)"),
         }
     }
 
+    fn cmd_auth_policy(&mut self, args: &str, storage: &Storage) -> Result<()> {
+        let (verb, rest) = split_first_word(args);
+        match verb {
+            "" | "show" => {
+                let expr = self.require_policy_vault()?.policy_expr();
+                secure_print(expr, self.insecure_stdout)
+            }
+            "set" => {
+                if rest.is_empty() {
+                    bail!("syntax: auth policy set EXPR");
+                }
+                self.set_policy(rest, storage)
+            }
+            other => bail!("unknown 'auth policy' subcommand '{other}' (try: show | set EXPR)"),
+        }
+    }
+
+    fn cmd_auth_factor(&mut self, args: &str, storage: &Storage) -> Result<()> {
+        let (verb, rest) = split_first_word(args);
+        match verb {
+            "list" => self.list_factors(),
+            "add" => self.cmd_auth_factor_add(rest, storage),
+            "remove" => {
+                let id =
+                    first_word(rest).ok_or_else(|| anyhow!("syntax: auth factor remove NAME"))?;
+                self.remove_factor(id, storage)
+            }
+            "" => bail!("syntax: auth factor list|add|remove …"),
+            other => {
+                bail!("unknown 'auth factor' subcommand '{other}' (try: list | add | remove NAME)")
+            }
+        }
+    }
+
+    fn cmd_auth_factor_add(&mut self, args: &str, storage: &Storage) -> Result<()> {
+        let (kind, rest) = split_first_word(args);
+        match kind {
+            "password" => {
+                let id = first_word(rest).ok_or_else(|| {
+                    anyhow!("syntax: auth factor add password NAME (NAME is a label)")
+                })?;
+                self.enroll_password(id, storage)
+            }
+            "yubikey" => bail!("YubiKey enrollment is not yet supported"),
+            _ => bail!("syntax: auth factor add password|yubikey NAME"),
+        }
+    }
+
+    /// Lists the enrolled factors and their kinds.
+    fn list_factors(&self) -> Result<()> {
+        for factor in self.require_policy_vault()?.metadata().factors {
+            let kind = match factor.kind {
+                FactorKind::Password { .. } => "password",
+                FactorKind::Yubikey { .. } => "yubikey",
+            };
+            secure_print(format!("{} ({kind})", factor.id), self.insecure_stdout)?;
+        }
+        Ok(())
+    }
+
+    /// Adds a new password factor. `id` is a public label, not the password; the
+    /// password is prompted separately. The factor is unused by the policy until
+    /// an `auth policy set` references it.
     fn enroll_password(&mut self, id: &str, storage: &Storage) -> Result<()> {
         // Make the role of NAME explicit: it is a public label, not the secret.
         // Catches the mix-up of typing a password where the factor name belongs.
         secure_print(
             format!(
-                "Enrolling factor '{id}'. The name is a public label (shown by 'factors', \
-                 stored unencrypted) — not the password; you'll enter the password next."
+                "Enrolling factor '{id}'. The name is a public label (shown by 'auth factor \
+                 list', stored unencrypted) — not the password; you'll enter the password next."
             ),
             self.insecure_stdout,
         )?;
@@ -344,7 +410,7 @@ impl InteractiveCli {
         let params = self.argon2_params;
         self.backend
             .policy_vault_mut()
-            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?
+            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'auth upgrade' to convert this legacy store to a policy vault"))?
             .enroll_password(id, &password, &params)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
@@ -353,48 +419,11 @@ impl InteractiveCli {
         secure_print(
             format!(
                 "Factor '{id}' enrolled. It is not yet used by the policy — run \
-                 'policy set EXPR' to require or accept it."
+                 'auth policy set EXPR' to require or accept it."
             ),
             self.insecure_stdout,
         )?;
         Ok(())
-    }
-
-    /// `factors` — list the enrolled factors and their kinds.
-    fn cmd_factors(&self) -> Result<()> {
-        let vault = self
-            .backend
-            .policy_vault()
-            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
-        for factor in vault.metadata().factors {
-            let kind = match factor.kind {
-                FactorKind::Password { .. } => "password",
-                FactorKind::Yubikey { .. } => "yubikey",
-            };
-            secure_print(format!("{} ({kind})", factor.id), self.insecure_stdout)?;
-        }
-        Ok(())
-    }
-
-    /// `policy` / `policy show` — print the policy; `policy set EXPR` — replace it.
-    fn cmd_policy(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
-        match parts.get(1).copied() {
-            None | Some("show") => {
-                let vault = self
-                    .backend
-                    .policy_vault()
-                    .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
-                secure_print(vault.policy_expr(), self.insecure_stdout)
-            }
-            Some("set") => {
-                let expr = parts
-                    .get(2)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("syntax: policy set EXPR"))?;
-                self.set_policy(expr, storage)
-            }
-            Some(other) => bail!("unknown policy subcommand '{other}' (try: policy show|set EXPR)"),
-        }
     }
 
     fn set_policy(&mut self, expr: &str, storage: &Storage) -> Result<()> {
@@ -402,7 +431,7 @@ impl InteractiveCli {
             let vault = self
                 .backend
                 .policy_vault_mut()
-                .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
+                .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'auth upgrade' to convert this legacy store to a policy vault"))?;
             vault.set_policy(expr)?;
             vault.policy_expr()
         };
@@ -411,29 +440,20 @@ impl InteractiveCli {
         Ok(())
     }
 
-    /// `remove factor NAME` — drop a factor (must not be referenced by the policy).
-    fn cmd_remove(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
-        match parts.get(1).copied() {
-            Some("factor") => {
-                let id = parts
-                    .get(2)
-                    .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("syntax: remove factor NAME"))?;
-                {
-                    let vault = self.backend.policy_vault_mut().ok_or_else(|| {
-                        anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault")
-                    })?;
-                    vault.remove_factor(id)?;
-                }
-                self.backend.save_store(storage, &self.filename)?;
-                self.refresh_completion_factors();
-                secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
-            }
-            _ => bail!("syntax: remove factor NAME"),
+    /// Drops a factor (must not be referenced by the policy).
+    fn remove_factor(&mut self, id: &str, storage: &Storage) -> Result<()> {
+        {
+            let vault = self.backend.policy_vault_mut().ok_or_else(|| {
+                anyhow!("this store has no multi-factor policy to manage — run 'auth upgrade' to convert this legacy store to a policy vault")
+            })?;
+            vault.remove_factor(id)?;
         }
+        self.backend.save_store(storage, &self.filename)?;
+        self.refresh_completion_factors();
+        secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
     }
 
-    /// `upgrade` — convert a legacy single-password store into a multi-factor
+    /// `auth upgrade` — convert a legacy single-password store into a multi-factor
     /// policy vault. The entered password becomes the first factor, `primary`,
     /// and every stored value is re-encrypted under the vault's fresh key.
     fn cmd_upgrade(&mut self, storage: &mut Storage) -> Result<()> {
@@ -479,12 +499,25 @@ impl InteractiveCli {
 
         secure_print(
             "Upgraded to a multi-factor policy vault. Enrolled factor 'primary'; use \
-             'enroll'/'policy' to add more."
+             'auth factor add'/'auth policy set' to add more."
                 .to_string(),
             self.insecure_stdout,
         )?;
         Ok(())
     }
+}
+
+/// Splits off the first whitespace-delimited word, returning it and the trimmed
+/// remainder (which may contain spaces, e.g. a policy expression).
+fn split_first_word(s: &str) -> (&str, &str) {
+    let s = s.trim_start();
+    s.find(char::is_whitespace)
+        .map_or((s, ""), |i| (&s[..i], s[i..].trim_start()))
+}
+
+/// The first whitespace-delimited word of `s`, if any.
+fn first_word(s: &str) -> Option<&str> {
+    s.split_whitespace().next()
 }
 
 fn current_unix_secs() -> u64 {
@@ -509,12 +542,14 @@ fn print_help() {
     println!("  help            - Show this help");
     println!();
     println!("AUTH COMMANDS (multi-factor stores):");
-    println!("  upgrade             - Convert a legacy single-password store to a policy vault");
-    println!("  factors             - List enrolled factors");
     println!(
-        "  enroll password NAME - Enroll a new password factor (NAME is a label, not the password)"
+        "  auth upgrade               - Convert a legacy single-password store to a policy vault"
     );
-    println!("  policy show         - Show the current unlock policy");
-    println!("  policy set EXPR     - Set the unlock policy, e.g. p1 or (p2 and yk)");
-    println!("  remove factor NAME  - Remove a factor (not used by the policy)");
+    println!("  auth factor list           - List enrolled factors");
+    println!(
+        "  auth factor add password NAME - Add a password factor (NAME is a label, not the password)"
+    );
+    println!("  auth factor remove NAME    - Remove a factor (not used by the policy)");
+    println!("  auth policy show           - Show the current unlock policy");
+    println!("  auth policy set EXPR       - Set the unlock policy, e.g. p1 or (p2 and yk)");
 }

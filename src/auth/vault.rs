@@ -108,6 +108,12 @@ impl PolicyVault {
         if self.factors.iter().any(|f| f.id == id) {
             bail!("a factor named '{id}' already exists");
         }
+        if let Some(existing) = self.factor_matching_password(password)? {
+            bail!(
+                "that password is already in use by factor '{existing}'; each factor needs a \
+                 distinct password"
+            );
+        }
         let kind = new_password_kind(params)?;
         let authkek = password_kek(password, &kind)?;
         self.factors.push(Factor {
@@ -116,6 +122,26 @@ impl PolicyVault {
             authkek_under_dek: keyslot::wrap_share(&self.dek, authkek.as_slice())?,
         });
         Ok(())
+    }
+
+    /// The id of an enrolled password factor whose password equals `password`, if
+    /// any — re-derives each factor's auth-key from `password` (with that factor's
+    /// salt) and compares it to the factor's actual auth-key recovered from the
+    /// DEK. Lets enrollment refuse a password already used by another factor.
+    fn factor_matching_password(&self, password: &str) -> Result<Option<String>> {
+        for factor in &self.factors {
+            if !matches!(factor.kind, FactorKind::Password { .. }) {
+                continue;
+            }
+            let candidate = password_kek(password, &factor.kind)?;
+            let Some(actual) = keyslot::unwrap_share(&self.dek, &factor.authkek_under_dek) else {
+                continue;
+            };
+            if candidate.as_slice() == actual.as_slice() {
+                return Ok(Some(factor.id.clone()));
+            }
+        }
+        Ok(None)
     }
 
     /// Removes a factor. Fails if the current policy still references it.
@@ -281,10 +307,11 @@ impl UnlockSession {
         self.policy.is_satisfied_by(&passwords)
     }
 
-    /// Tries `password` against every not-yet-satisfied password factor, recording
-    /// and returning the ids it newly satisfies (usually one, or several if the
-    /// same password was enrolled for more than one factor).
-    pub fn try_password(&mut self, password: &str) -> Result<Vec<String>> {
+    /// Tries `password` against the not-yet-satisfied password factors and, on the
+    /// first match, records its auth-key and returns the factor id. Each factor
+    /// has a distinct password (enforced at enroll), so one match is conclusive —
+    /// no need to try the rest.
+    pub fn try_password(&mut self, password: &str) -> Result<Option<String>> {
         let candidates: Vec<(String, FactorKind)> = self
             .factors
             .iter()
@@ -294,17 +321,16 @@ impl UnlockSession {
             .map(|f| (f.id.clone(), f.kind.clone()))
             .collect();
 
-        let mut satisfied = Vec::new();
         for (id, kind) in candidates {
             let authkek = password_kek(password, &kind)?;
             let verified = leaf_wrapped_share(&self.policy, &id)
                 .is_some_and(|wrapped| keyslot::unwrap_share(&authkek, wrapped).is_some());
             if verified {
                 self.authkeks.insert(id.clone(), authkek);
-                satisfied.push(id);
+                return Ok(Some(id));
             }
         }
-        Ok(satisfied)
+        Ok(None)
     }
 
     /// Reconstructs the data-encryption key from the gathered factors and returns
@@ -582,6 +608,23 @@ mod tests {
         let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
         assert!(vault.enroll_password("p1", "x", &params()).is_err());
         assert!(vault.set_policy("p1 or missing").is_err()); // unknown factor
+    }
+
+    #[test]
+    fn rejects_duplicate_password_on_enroll() {
+        let mut vault = PolicyVault::create("p1", "alpha-secret-1", &params()).unwrap();
+        // The same password as an existing factor is refused.
+        assert!(
+            vault
+                .enroll_password("p2", "alpha-secret-1", &params())
+                .is_err()
+        );
+        // A distinct password enrolls fine.
+        assert!(
+            vault
+                .enroll_password("p2", "bravo-secret-2", &params())
+                .is_ok()
+        );
     }
 
     #[test]

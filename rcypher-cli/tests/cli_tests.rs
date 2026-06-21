@@ -586,7 +586,7 @@ fn test_policy_vault_factors_and_policy_show() {
     let (_dir, file_path) = temp_test_file();
     create_multifactor_vault(&file_path);
 
-    let lines = run_commands(&file_path, b"factors\npolicy show\n".to_vec());
+    let lines = run_commands(&file_path, b"auth factor list\nauth policy show\n".to_vec());
     assert!(lines.iter().any(|l| l == "main (password)"), "{lines:?}");
     assert!(lines.iter().any(|l| l == "backup (password)"), "{lines:?}");
     assert!(lines.iter().any(|l| l == "main or backup"), "{lines:?}");
@@ -598,23 +598,23 @@ fn test_policy_vault_set_policy_and_remove_factor() {
     create_multifactor_vault(&file_path);
 
     // A factor still referenced by the policy cannot be removed.
-    let out = run_commands_str(&file_path, "remove factor backup\n");
+    let out = run_commands_str(&file_path, "auth factor remove backup\n");
     assert!(
         out.contains("still used by the policy") || out.contains("change the policy"),
         "{out}"
     );
 
     // Narrow the policy to just 'main'; the change is persisted.
-    run_commands(&file_path, b"policy set main\n".to_vec());
-    let shown = run_commands_str(&file_path, "policy show\n");
+    run_commands(&file_path, b"auth policy set main\n".to_vec());
+    let shown = run_commands_str(&file_path, "auth policy show\n");
     assert!(
         shown.contains("main") && !shown.contains("backup"),
         "{shown}"
     );
 
     // Now the unused factor can be removed.
-    run_commands(&file_path, b"remove factor backup\n".to_vec());
-    let factors = run_commands_str(&file_path, "factors\n");
+    run_commands(&file_path, b"auth factor remove backup\n".to_vec());
+    let factors = run_commands_str(&file_path, "auth factor list\n");
     assert!(
         factors.contains("main") && !factors.contains("backup"),
         "{factors}"
@@ -645,7 +645,7 @@ fn test_new_store_is_policy_vault() {
     let head = fs::read(&file_path).unwrap();
     assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
 
-    let factors = run_commands_str(&file_path, "factors\n");
+    let factors = run_commands_str(&file_path, "auth factor list\n");
     assert!(factors.contains("primary (password)"), "{factors}");
 }
 
@@ -660,6 +660,6 @@ fn test_legacy_store_opens_and_rejects_auth_commands() {
     assert!(got.contains("k: v"), "{got}");
 
     // But it has no policy to manage.
-    let out = run_commands_str(&file_path, "policy show\n");
+    let out = run_commands_str(&file_path, "auth policy show\n");
     assert!(out.contains("no multi-factor policy"), "{out}");
 }

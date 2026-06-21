@@ -13,10 +13,11 @@ minor; features and fixes bump the patch).
   - New stores are created as version-8 policy vaults with a single `password`
     factor; existing version-7 password stores keep opening through the legacy
     path unchanged.
-  - In-store commands while unlocked: `factors`, `enroll password NAME`,
-    `policy show`, `policy set EXPR` (e.g. `p1 or (p2 and yk)`),
-    `remove factor NAME`, and `upgrade` (convert a legacy single-password store
-    into a policy vault, re-encrypting under a fresh key).
+  - In-store `auth` commands while unlocked: `auth factor {list, add password
+    NAME, remove NAME}`, `auth policy {show, set EXPR}` (e.g. `p1 or (p2 and
+    yk)`), and `auth upgrade` (convert a legacy single-password store into a
+    policy vault, re-encrypting under a fresh key). Enrolling a password rejects
+    one that duplicates an existing factor's.
   - On open, rcypher asks for a password in a loop (you don't pick a factor):
     each entry is matched against the factors and the loop continues until the
     policy is satisfied.
