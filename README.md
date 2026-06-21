@@ -59,33 +59,41 @@ A store can require more than one secret to unlock. Each secret is a named
 **access policy** — a boolean expression over factor names — decides which
 combinations open the store.
 
+A new store starts with one password factor named `primary` and the policy
+`primary`. For example, add a **recovery password** as a second way in, so a
+forgotten primary password doesn't lock you out:
+
 ```sh
-cypher > enroll password backup     # add a second password factor
-New password for factor 'backup': ********
+cypher > enroll password recovery   # a long passphrase kept in another manager
+New password for factor 'recovery': ********
 Confirm password: ********
-Factor 'backup' enrolled. It is not yet used by the policy — run
+Factor 'recovery' enrolled. It is not yet used by the policy — run
 'policy set EXPR' to require or accept it.
 
-cypher > policy set work and backup # require BOTH to unlock
-Policy: work and backup
+cypher > policy set primary or recovery   # either one unlocks the store
+Policy: primary or recovery
+⚠ Weak policy: factor(s) primary, recovery each unlock this store on their own —
+ an OR branch is only as strong as its weakest factor.
 
 cypher > factors
-work (password)
-backup (password)
-
-cypher > policy show
-work and backup
+primary (password)
+recovery (password)
 ```
 
 Policies combine factors with `and` / `or` and parentheses (`and` binds tighter
 than `or`):
 
-| Policy                     | Unlocks when…                                  |
-|----------------------------|------------------------------------------------|
-| `work`                     | the `work` password is given                   |
-| `work or backup`           | **either** password is given                   |
-| `work and yubikey`         | **both** the password and the security key     |
-| `work or (backup and yubikey)` | `work` alone, **or** `backup` + the key    |
+| Policy                     | Unlocks when…                                  | Good for |
+|----------------------------|------------------------------------------------|----------|
+| `primary`                  | the `primary` password is given                | the default single-secret store |
+| `primary or recovery`      | **either** password is given                   | a backup/recovery password (note: only as strong as the weaker one) |
+| `primary and yubikey`      | **both** the password and the security key     | real two-factor — *(YubiKey factor coming)* |
+| `primary or (recovery and yubikey)` | `primary` alone, **or** `recovery` + the key | day-to-day password, plus a 2-of-2 recovery path |
+
+`and` of two passwords *is* allowed (e.g. two custodians who must both be
+present), but for one person it just means typing two secrets every time for
+little gain — the combination pays off when one factor is a hardware key, which
+is the upcoming FIDO2/YubiKey factor.
 
 On open, rcypher prints the policy and prompts only for as many factors as are
 needed to satisfy it (leave a prompt empty to skip a factor you don't have).
@@ -114,10 +122,10 @@ IVs change on each save. The full construction is specified in
 ### A note on `or` branches
 
 An `or` is only as strong as its **weakest** satisfying set. A policy like
-`work or (backup and yubikey)` can be opened by `work` alone, so the extra
-security key adds nothing against an attacker who has that one password. rcypher
-warns when a single password factor on its own can unlock a multi-factor store —
-both when you set the policy and when you open the store.
+`primary or (recovery and yubikey)` can be opened by `primary` alone, so the
+extra security key adds nothing against an attacker who has that one password.
+rcypher warns when a single password factor on its own can unlock a multi-factor
+store — both when you set the policy and when you open the store.
 
 ## Encrypting/Decrypting a file
 

@@ -230,10 +230,20 @@ Unlock outcomes:
 - **At-rest cost against a password is unchanged.** An attacker with the file must
   still break Argon2id on a keyslot to recover an `auth-KEK`. The envelope/DEK
   layer adds no shortcut.
+- **The XOR split leaks nothing below threshold (information-theoretic).** An
+  `And` over *n* children uses n-of-n additive sharing: `s₁…sₙ₋₁` are drawn from
+  the OS CSPRNG and `sₙ = secret ⊕ s₁ ⊕ … ⊕ sₙ₋₁`. Any *n−1* of the *n* shares are
+  jointly uniform and independent of `secret` — a one-time-pad argument — so a
+  coalition missing even one child learns *nothing* about the reconstructed
+  secret, with no computational assumption. Each share is *also* wrapped under its
+  factor key, so an unsatisfied factor's share cannot even be obtained in the
+  clear. Soundness rests only on the CSPRNG quality and on shares being the
+  secret's full length (both hold here).
 - **OR is as strong as its weakest satisfying set.** In `p1 OR (…)`, an attacker
   attacks `p1` alone — the strongest other branch does not help. Any factor (or
   set) that can unlock on its own must itself be strong; a password-only branch
-  bounds the vault's offline strength by that password.
+  bounds the vault's offline strength by that password. The CLI warns when a lone
+  password factor satisfies a multi-factor policy.
 - **`authkek_under_dek` is safe to store.** Without the DEK it is opaque
   authenticated ciphertext; with the DEK the holder already has full access, and
   it never reveals a password (Argon2id is one-way).
@@ -244,9 +254,10 @@ Unlock outcomes:
 - **Anti-debug.** Internal `wrap`/`unwrap` operations do not each run the
   debugger check; it is enforced once at the unlock entry point (and continuously
   by the watchdog), so the keyslot operations are not a per-call oracle for it.
-- **Zeroization (in progress).** The DEK and recovered auth-KEKs are held in
-  zeroizing buffers; tightening the zeroization of transient share/auth-KEK byte
-  buffers in the sharing path is tracked separately.
+- **Zeroization.** The DEK, recovered auth-KEKs, and the transient secret-shares
+  in the sharing path are all held in zeroizing buffers (`distribute` /
+  `reconstruct` / `unwrap_share` carry `Zeroizing<Vec<u8>>` end to end), so no
+  share or recovered key lingers in memory un-wiped.
 
 ## References
 

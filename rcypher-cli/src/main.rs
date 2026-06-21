@@ -221,7 +221,7 @@ fn collect_policy_secrets(
 }
 
 /// The factor id given to the password enrolled when a new store is created.
-const DEFAULT_FACTOR_ID: &str = "password";
+const DEFAULT_FACTOR_ID: &str = "primary";
 
 /// Returns the store password — the one supplied via `--insecure-password`
 /// (testing) or prompted from the user. `confirm` asks for a second entry.

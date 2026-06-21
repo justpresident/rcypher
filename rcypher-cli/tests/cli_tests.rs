@@ -646,7 +646,7 @@ fn test_new_store_is_policy_vault() {
     assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
 
     let factors = run_commands_str(&file_path, "factors\n");
-    assert!(factors.contains("password (password)"), "{factors}");
+    assert!(factors.contains("primary (password)"), "{factors}");
 }
 
 #[test]
