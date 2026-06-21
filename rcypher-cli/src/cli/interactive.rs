@@ -7,7 +7,8 @@ use crate::cli::utils::{
 };
 use anyhow::{Result, anyhow, bail};
 use rcypher::{
-    Argon2Params, EncryptedValue, FactorKind, Storage, check_factor_password, is_debugger_attached,
+    Argon2Params, EncryptedValue, FactorKind, PolicyVault, Storage, check_factor_password,
+    is_debugger_attached,
 };
 use rustyline::CompletionType;
 use rustyline::Config;
@@ -25,12 +26,15 @@ pub struct InteractiveCli {
     backend: Backend,
     argon2_params: Argon2Params,
     filename: PathBuf,
+    /// Enrolled factor ids, shared with the completer so Tab completion of
+    /// `remove factor` / `policy set` reflects enroll/remove.
+    factors: Arc<Mutex<Vec<String>>>,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
 }
 
 impl InteractiveCli {
-    pub const fn new(
+    pub fn new(
         prompt: String,
         insecure_stdout: bool,
         backend: Backend,
@@ -39,15 +43,31 @@ impl InteractiveCli {
         last_activity: Arc<AtomicU64>,
         last_security_check: Arc<AtomicU64>,
     ) -> Self {
+        let factors = backend
+            .policy_vault()
+            .map(PolicyVault::factor_ids)
+            .unwrap_or_default();
         Self {
             prompt,
             insecure_stdout,
             backend,
             argon2_params,
             filename,
+            factors: Arc::new(Mutex::new(factors)),
             last_activity,
             last_security_check,
         }
+    }
+
+    /// Re-reads the enrolled factor ids into the shared completion list, so Tab
+    /// completion stays in sync after `enroll` / `remove factor`.
+    fn refresh_completion_factors(&self) {
+        let ids = self
+            .backend
+            .policy_vault()
+            .map(PolicyVault::factor_ids)
+            .unwrap_or_default();
+        *self.factors.lock().expect("able to lock factors") = ids;
     }
 
     pub fn run(&mut self) -> Result<()> {
@@ -61,7 +81,7 @@ impl InteractiveCli {
             .max_history_size(5)?
             .build();
 
-        let completer = CypherCompleter::new(storage.clone());
+        let completer = CypherCompleter::new(storage.clone(), self.factors.clone());
         let mut rl = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
 
@@ -320,6 +340,7 @@ impl InteractiveCli {
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
         self.backend.save_store(storage, &self.filename)?;
+        self.refresh_completion_factors();
         secure_print(
             format!(
                 "Factor '{id}' enrolled. It is not yet used by the policy — run \
@@ -400,6 +421,7 @@ impl InteractiveCli {
                     vault.remove_factor(id)?;
                 }
                 self.backend.save_store(storage, &self.filename)?;
+                self.refresh_completion_factors();
                 secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
             }
             _ => bail!("syntax: remove factor NAME"),

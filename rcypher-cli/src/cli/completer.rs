@@ -16,6 +16,9 @@ const COMMANDS: &[&str] = &[
 /// Commands whose argument is a store key (and so completes from the store).
 const KEY_COMMANDS: &[&str] = &["get", "history", "del", "rm", "put", "copy", "search"];
 
+/// Boolean operators allowed in a `policy set` expression.
+const OPERATORS: &[&str] = &["and", "or"];
+
 /// The fixed keyword arguments of the multi-factor auth commands.
 fn subcommands_of(command: &str) -> &'static [&'static str] {
     match command {
@@ -26,49 +29,84 @@ fn subcommands_of(command: &str) -> &'static [&'static str] {
     }
 }
 
-/// Pure completion logic: given the input up to the cursor and the known store
-/// keys, returns the replacement start position and the candidate strings. Kept
-/// free of rustyline's `Context` (which the completer ignores) so it is unit
-/// testable.
-fn candidates(line: &str, pos: usize, keys: &[String]) -> (usize, Vec<String>) {
+/// The trailing run of factor-name characters (`[A-Za-z0-9_-]`) at the end of
+/// `line` — the partial token being completed inside a policy expression, even
+/// when it directly follows a `(`.
+fn trailing_ident(line: &str) -> &str {
+    let start = line
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '-' || *c == '_')
+        .last()
+        .map_or(line.len(), |(i, _)| i);
+    &line[start..]
+}
+
+fn matching(options: &[&str], prefix: &str) -> Vec<String> {
+    options
+        .iter()
+        .filter(|opt| opt.starts_with(prefix))
+        .map(|opt| (*opt).to_string())
+        .collect()
+}
+
+fn matching_sorted(options: &[String], prefix: &str) -> Vec<String> {
+    let mut matches: Vec<String> = options
+        .iter()
+        .filter(|opt| opt.starts_with(prefix))
+        .cloned()
+        .collect();
+    matches.sort();
+    matches
+}
+
+/// Pure completion logic: given the input up to the cursor, the known store
+/// keys, and the enrolled factor ids, returns the replacement start position and
+/// the candidate strings. Kept free of rustyline's `Context` (which the completer
+/// ignores) so it is unit testable.
+fn candidates(line: &str, pos: usize, keys: &[String], factors: &[String]) -> (usize, Vec<String>) {
     let line = &line[..pos];
     let parts: Vec<&str> = line.split_whitespace().collect();
-    let typing_first_word = parts.len() <= 1 && !line.ends_with(' ');
+    let ends_with_space = line.ends_with(' ');
     // Whether we're on the second token (the command's first argument).
-    let on_arg = parts.len() == 1 || (parts.len() == 2 && !line.ends_with(' '));
+    let on_arg = parts.len() == 1 || (parts.len() == 2 && !ends_with_space);
     let arg_prefix = if parts.len() == 2 { parts[1] } else { "" };
 
-    // Completing the command itself.
-    if parts.is_empty() || typing_first_word {
+    // 1. Completing the command itself.
+    if parts.is_empty() || (parts.len() == 1 && !ends_with_space) {
         let prefix = parts.first().copied().unwrap_or("");
-        let matches = COMMANDS
-            .iter()
-            .filter(|cmd| cmd.starts_with(prefix))
-            .map(|cmd| (*cmd).to_string())
-            .collect();
+        return (pos - prefix.len(), matching(COMMANDS, prefix));
+    }
+
+    // 2. `policy set EXPR` — complete factor names and the and/or operators
+    //    anywhere in the expression (the prefix is the trailing identifier, so it
+    //    works right after a `(` too).
+    if parts[0] == "policy" && parts.get(1).copied() == Some("set") && !on_arg {
+        let prefix = trailing_ident(line);
+        let mut matches = matching_sorted(factors, prefix);
+        matches.extend(matching(OPERATORS, prefix));
         return (pos - prefix.len(), matches);
     }
 
-    // Completing an auth command's keyword argument (e.g. `policy ` → show/set).
+    // 3. Completing an auth command's keyword argument (e.g. `policy ` → show/set).
     let subcommands = subcommands_of(parts[0]);
     if !subcommands.is_empty() && on_arg {
-        let matches = subcommands
-            .iter()
-            .filter(|sub| sub.starts_with(arg_prefix))
-            .map(|sub| (*sub).to_string())
-            .collect();
-        return (pos - arg_prefix.len(), matches);
+        return (pos - arg_prefix.len(), matching(subcommands, arg_prefix));
     }
 
-    // Completing a store key for the commands that take one.
+    // 4. `remove factor NAME` — complete factor names.
+    if parts[0] == "remove" && parts.get(1).copied() == Some("factor") {
+        let on_name =
+            (parts.len() == 2 && ends_with_space) || (parts.len() == 3 && !ends_with_space);
+        if on_name {
+            let prefix = if parts.len() == 3 { parts[2] } else { "" };
+            return (pos - prefix.len(), matching_sorted(factors, prefix));
+        }
+    }
+
+    // 5. Completing a store key for the commands that take one.
     if KEY_COMMANDS.contains(&parts[0]) && on_arg {
-        let mut matches: Vec<String> = keys
-            .iter()
-            .filter(|key| key.starts_with(arg_prefix))
-            .cloned()
-            .collect();
-        matches.sort();
-        return (pos - arg_prefix.len(), matches);
+        return (pos - arg_prefix.len(), matching_sorted(keys, arg_prefix));
     }
 
     (pos, vec![])
@@ -76,11 +114,14 @@ fn candidates(line: &str, pos: usize, keys: &[String]) -> (usize, Vec<String>) {
 
 pub struct CypherCompleter {
     storage: Arc<Mutex<Storage>>,
+    /// The currently enrolled factor ids, shared with the interactive session so
+    /// `enroll`/`remove` keep completion in sync.
+    factors: Arc<Mutex<Vec<String>>>,
 }
 
 impl CypherCompleter {
-    pub const fn new(storage: Arc<Mutex<Storage>>) -> Self {
-        Self { storage }
+    pub const fn new(storage: Arc<Mutex<Storage>>, factors: Arc<Mutex<Vec<String>>>) -> Self {
+        Self { storage, factors }
     }
 }
 
@@ -97,8 +138,9 @@ impl Completer for CypherCompleter {
             let storage = self.storage.lock().expect("able to take a lock");
             storage.data.keys().cloned().collect()
         };
+        let factors = self.factors.lock().expect("able to take a lock").clone();
 
-        let (start, cands) = candidates(line, pos, &keys);
+        let (start, cands) = candidates(line, pos, &keys, &factors);
         let pairs = cands
             .into_iter()
             .map(|c| Pair {
@@ -125,10 +167,11 @@ mod tests {
     use super::candidates;
 
     /// Candidate strings for `line` with the cursor at its end, against a small
-    /// fixed set of store keys.
+    /// fixed set of store keys and factor ids.
     fn complete(line: &str) -> Vec<String> {
         let keys = ["alpha".to_string(), "beta".to_string()];
-        candidates(line, line.len(), &keys).1
+        let factors = ["primary".to_string(), "backup".to_string()];
+        candidates(line, line.len(), &keys, &factors).1
     }
 
     #[test]
@@ -170,6 +213,32 @@ mod tests {
             vec!["alpha".to_string(), "beta".to_string()]
         );
         assert_eq!(complete("get a"), vec!["alpha".to_string()]);
+    }
+
+    #[test]
+    fn completes_factor_names_for_remove_factor() {
+        assert_eq!(
+            complete("remove factor "),
+            vec!["backup".to_string(), "primary".to_string()]
+        );
+        assert_eq!(complete("remove factor p"), vec!["primary".to_string()]);
+    }
+
+    #[test]
+    fn completes_factors_and_operators_in_policy_set() {
+        assert_eq!(
+            complete("policy set "),
+            vec![
+                "backup".to_string(),
+                "primary".to_string(),
+                "and".to_string(),
+                "or".to_string(),
+            ]
+        );
+        assert_eq!(complete("policy set pr"), vec!["primary".to_string()]);
+        assert_eq!(complete("policy set primary o"), vec!["or".to_string()]);
+        // The prefix is the trailing identifier, so completion works after a `(`.
+        assert_eq!(complete("policy set (ba"), vec!["backup".to_string()]);
     }
 
     #[test]
