@@ -39,6 +39,13 @@ minor; features and fixes bump the patch).
 - Transient secret-shares and recovered per-factor auth-keys are now held in
   zeroizing buffers throughout the unlock/secret-sharing path, so no share or
   auth-key lingers in memory un-wiped.
+- Codebase-wide zeroization audit: every function returning sensitive data now
+  returns it wrapped in `Zeroizing` (decrypted values and payloads, passwords,
+  derived keys, secret-shares, serialized store payloads), and intermediate
+  copies are eliminated — key material is split directly into zeroizing buffers
+  (no Copy-array left behind), and `EncryptedValue::decrypt` validates UTF-8 by
+  borrowing so plaintext is never moved into an un-zeroized buffer. `FactorSecret`
+  and the CLI password prompts now hold their secrets zeroizing.
 
 ## [0.2.0] - 2026-06-20
 

@@ -12,6 +12,7 @@ use assert_cmd::cargo;
 use rcypher::{Argon2Params, FactorSecret, PolicyVault, Storage, serialize_storage};
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
+use zeroize::Zeroizing;
 
 // A passphrase zxcvbn rates as strong, so the weak-password prompt is skipped.
 const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
@@ -43,10 +44,12 @@ fn spawn_session(path: &Path) -> PtySession {
 }
 
 fn unlocks_with(path: &Path, id: &str, password: &str) -> bool {
-    let secrets: HashMap<String, FactorSecret> =
-        [(id.to_string(), FactorSecret::Password(password.to_string()))]
-            .into_iter()
-            .collect();
+    let secrets: HashMap<String, FactorSecret> = [(
+        id.to_string(),
+        FactorSecret::Password(Zeroizing::new(password.to_string())),
+    )]
+    .into_iter()
+    .collect();
     PolicyVault::open(path, &secrets).is_ok()
 }
 

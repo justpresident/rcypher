@@ -92,19 +92,19 @@ pub fn copy_to_clipboard(secret: &str, ttl: std::time::Duration) {
     });
 }
 
-pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<String> {
+pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<Zeroizing<String>> {
     if require_confirmation {
         show_password_warning();
     }
 
-    let mut password =
-        rpassword::prompt_password(format!("Enter Password for {}: ", filename.display()))?;
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "Enter Password for {}: ",
+        filename.display()
+    ))?);
 
     if require_confirmation {
-        let mut confirmation = rpassword::prompt_password("Confirm Password: ")?;
-        if password != confirmation {
-            password.zeroize();
-            confirmation.zeroize();
+        let confirmation = Zeroizing::new(rpassword::prompt_password("Confirm Password: ")?);
+        if *password != *confirmation {
             bail!("Passwords do not match");
         }
     }
@@ -116,9 +116,10 @@ pub fn get_password(filename: &Path, require_confirmation: bool) -> Result<Strin
 ///
 /// An empty entry means "skip this factor" — the caller may be able to satisfy
 /// the policy another way — and returns `None`.
-pub fn prompt_factor_password(id: &str) -> Result<Option<String>> {
-    let password =
-        rpassword::prompt_password(format!("Password for factor '{id}' (empty to skip): "))?;
+pub fn prompt_factor_password(id: &str) -> Result<Option<Zeroizing<String>>> {
+    let password = Zeroizing::new(rpassword::prompt_password(format!(
+        "Password for factor '{id}' (empty to skip): "
+    ))?);
     if password.is_empty() {
         Ok(None)
     } else {

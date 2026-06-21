@@ -49,9 +49,12 @@ impl EncryptedValue {
     pub fn decrypt(&self, cypher: &Cypher) -> Result<Zeroizing<String>> {
         match cypher.version() {
             CypherVersion::V7WithKdf => {
-                let mut decrypted_bytes = cypher.decrypt(&self.ciphertext)?;
-                let bytes = std::mem::take(&mut *decrypted_bytes);
-                Ok(Zeroizing::new(String::from_utf8(bytes)?))
+                let decrypted_bytes = cypher.decrypt(&self.ciphertext)?;
+                // Validate UTF-8 by borrowing, so the plaintext is never moved out
+                // of its zeroizing buffer (and isn't carried by a `FromUtf8Error`
+                // on the failure path); copy straight into a zeroizing `String`.
+                let text = std::str::from_utf8(&decrypted_bytes)?;
+                Ok(Zeroizing::new(text.to_owned()))
             }
         }
     }

@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 #[derive(Parser)]
 #[command(group(
@@ -194,8 +194,8 @@ fn collect_policy_secrets(
         }
         match factor.kind {
             FactorKind::Password { .. } => {
-                let password = match insecure_password {
-                    Some(pw) => Some(pw.to_string()),
+                let password: Option<Zeroizing<String>> = match insecure_password {
+                    Some(pw) => Some(Zeroizing::new(pw.to_string())),
                     None => prompt_factor_password(&factor.id)?,
                 };
                 if let Some(password) = password {
@@ -226,11 +226,15 @@ const DEFAULT_FACTOR_ID: &str = "primary";
 
 /// Returns the store password — the one supplied via `--insecure-password`
 /// (testing) or prompted from the user. `confirm` asks for a second entry.
-fn obtain_store_password(params: &CliParams, path: &Path, confirm: bool) -> Result<String> {
-    params
-        .insecure_password
-        .as_ref()
-        .map_or_else(|| get_password(path, confirm), |pw| Ok(pw.clone()))
+fn obtain_store_password(
+    params: &CliParams,
+    path: &Path,
+    confirm: bool,
+) -> Result<Zeroizing<String>> {
+    params.insecure_password.as_ref().map_or_else(
+        || get_password(path, confirm),
+        |pw| Ok(Zeroizing::new(pw.clone())),
+    )
 }
 
 /// Opens an existing store at `path`, unlocking it as a multi-factor policy vault
@@ -255,11 +259,10 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
         let cypher = vault.cypher();
         Ok(cli::Backend::Policy { vault, cypher })
     } else {
-        let mut password = obtain_store_password(params, path, false)?;
+        let password = obtain_store_password(params, path, false)?;
         let spinner = Spinner::new("Deriving encryption key", params.quiet);
         let key = EncryptionKey::for_file_with_params(&password, path, argon2);
         spinner.finish_and_clear();
-        password.zeroize();
         Ok(cli::Backend::Legacy {
             cypher: Cypher::new(key?),
         })
@@ -269,9 +272,9 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
 /// Creates a new store as a multi-factor policy vault with a single password
 /// factor, persisting an empty store so the file exists for later unlocks.
 fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
-    // A zeroizing buffer wipes the password on drop, including the early returns
-    // from the strength check below.
-    let password = Zeroizing::new(obtain_store_password(params, &params.filename, true)?);
+    // The password is held in a zeroizing buffer, wiped on drop — including the
+    // early returns from the strength check below.
+    let password = obtain_store_password(params, &params.filename, true)?;
 
     // Strength-check an interactively chosen password (skip in the test-only
     // `--insecure-password` path, which is non-interactive).
@@ -492,18 +495,16 @@ fn main() -> Result<()> {
     let argon2_params = get_argon2_params(&params);
 
     if params.encrypt {
-        let mut password = obtain_store_password(&params, &params.filename, true)?;
+        let password = obtain_store_password(&params, &params.filename, true)?;
         let key = EncryptionKey::from_password_with_params(
             CypherVersion::default(),
             &password,
             &argon2_params,
         )?;
-        password.zeroize();
         run_encrypt(&params, key)
     } else if params.decrypt {
-        let mut password = obtain_store_password(&params, &params.filename, false)?;
+        let password = obtain_store_password(&params, &params.filename, false)?;
         let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
-        password.zeroize();
         run_decrypt(&params, key)
     } else if let Some(update_file) = &params.update_with {
         // Each store is unlocked through its own backend (legacy or policy vault),

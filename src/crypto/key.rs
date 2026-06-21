@@ -8,7 +8,7 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
-use crate::constants::{KEY_LEN, KeyBytes, SaltBytes};
+use crate::constants::{KEY_LEN, KeyBytes, KeyMaterialBytes, SaltBytes};
 use crate::version::{CypherVersion, Version7Header};
 
 /// Argon2 key derivation parameters
@@ -105,15 +105,17 @@ impl EncryptionKey {
             .hash_password_into(password.as_bytes(), salt, all_key_bytes.as_mut())
             .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
 
-        let mut key = KeyBytes::default();
-        let mut hmac_key = KeyBytes::default();
+        // Copy each half into a zeroizing buffer from the start, so no plaintext
+        // key material lingers in an un-zeroized intermediate.
+        let mut key = Zeroizing::new(KeyBytes::default());
+        let mut hmac_key = Zeroizing::new(KeyBytes::default());
         key.copy_from_slice(&all_key_bytes[0..KEY_LEN]);
         hmac_key.copy_from_slice(&all_key_bytes[KEY_LEN..]);
 
         Ok(Self {
             version,
-            key: Zeroizing::new(key),
-            hmac_key: Zeroizing::new(hmac_key),
+            key,
+            hmac_key,
             salt: *salt,
         })
     }
@@ -193,17 +195,23 @@ impl EncryptionKey {
         }
     }
 
-    /// Builds a key directly from raw key material — a 32-byte cipher key and a
-    /// 32-byte HMAC key — bypassing password derivation.
+    /// Builds a key directly from 64-byte key material (a 32-byte cipher key
+    /// followed by a 32-byte HMAC key), bypassing password derivation.
     ///
     /// Used for randomly generated data-encryption keys and for wrapping keys
-    /// that come from a single high-entropy factor. The salt only feeds password
-    /// derivation, so it is left zeroed here.
-    pub fn from_key_material(key: KeyBytes, hmac_key: KeyBytes) -> Self {
+    /// that come from a single high-entropy factor. The caller's `material` should
+    /// itself live in a zeroizing buffer; the two halves are copied into zeroizing
+    /// buffers here, so no plaintext key lingers in an un-zeroized intermediate.
+    /// The salt only feeds password derivation, so it is left zeroed.
+    pub fn from_key_material(material: &KeyMaterialBytes) -> Self {
+        let mut key = Zeroizing::new(KeyBytes::default());
+        let mut hmac_key = Zeroizing::new(KeyBytes::default());
+        key.copy_from_slice(&material[..KEY_LEN]);
+        hmac_key.copy_from_slice(&material[KEY_LEN..]);
         Self {
             version: CypherVersion::default(),
-            key: Zeroizing::new(key),
-            hmac_key: Zeroizing::new(hmac_key),
+            key,
+            hmac_key,
             salt: SaltBytes::default(),
         }
     }

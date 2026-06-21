@@ -22,12 +22,14 @@ use super::format::{
 use super::keyslot::{self, KeyMaterial};
 use super::parser::{parse_policy, render_policy, validate_factors};
 use super::policy::{Leaf, PolicyNode, Share, distribute, reconstruct};
-use crate::constants::{KEY_LEN, KEY_MATERIAL_LEN, KeyBytes, KeyMaterialBytes};
+use crate::constants::{KEY_MATERIAL_LEN, KeyMaterialBytes};
 use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
 
 /// A user-supplied secret for one factor, presented at unlock or enroll time.
+/// The password is held in a zeroizing buffer so it is wiped when the secret is
+/// dropped.
 pub enum FactorSecret {
-    Password(String),
+    Password(Zeroizing<String>),
     // A YubiKey secret is obtained by interacting with the device; added by the
     // FIDO2 task.
 }
@@ -181,11 +183,7 @@ impl PolicyVault {
     /// values — the role the password-derived key played in a plain vault.
     #[must_use]
     pub fn cypher(&self) -> Cypher {
-        let mut key = KeyBytes::default();
-        let mut hmac_key = KeyBytes::default();
-        key.copy_from_slice(&self.dek[..KEY_LEN]);
-        hmac_key.copy_from_slice(&self.dek[KEY_LEN..]);
-        Cypher::new(EncryptionKey::from_key_material(key, hmac_key))
+        Cypher::new(EncryptionKey::from_key_material(&self.dek))
     }
 
     /// Reads a policy-vault file, satisfies its policy with `secrets`, and returns
@@ -324,13 +322,17 @@ fn unwrap_leaves(
 }
 
 fn to_key_material(bytes: &[u8]) -> Result<KeyMaterial> {
-    let array: KeyMaterialBytes = bytes.try_into().map_err(|_| {
-        anyhow!(
+    if bytes.len() != KEY_MATERIAL_LEN {
+        bail!(
             "expected {KEY_MATERIAL_LEN}-byte key material, got {} bytes",
             bytes.len()
-        )
-    })?;
-    Ok(Zeroizing::new(array))
+        );
+    }
+    // Copy straight into a zeroizing buffer, so the key material never lives in an
+    // un-zeroized intermediate array.
+    let mut material: KeyMaterial = Zeroizing::new([0u8; KEY_MATERIAL_LEN]);
+    material.copy_from_slice(bytes);
+    Ok(material)
 }
 
 fn validate_factor_id(id: &str) -> Result<()> {
@@ -396,7 +398,7 @@ mod tests {
     }
 
     fn pw(s: &str) -> FactorSecret {
-        FactorSecret::Password(s.to_string())
+        FactorSecret::Password(Zeroizing::new(s.to_string()))
     }
 
     fn secrets(pairs: &[(&str, &str)]) -> HashMap<String, FactorSecret> {

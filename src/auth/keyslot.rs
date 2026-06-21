@@ -9,7 +9,7 @@ use anyhow::Result;
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
-use crate::constants::{KEY_LEN, KEY_MATERIAL_LEN, KeyBytes, KeyMaterialBytes};
+use crate::constants::{KEY_MATERIAL_LEN, KeyMaterialBytes};
 use crate::crypto::{Cypher, EncryptionKey};
 
 /// Full key material: a cipher key followed by an HMAC key.
@@ -25,11 +25,7 @@ pub fn generate_dek() -> Result<KeyMaterial> {
 /// Builds a `Cypher` from key material, with the anti-debug check disabled — it is
 /// enforced once at the unlock entry point, not per wrap.
 fn cypher_from_material(material: &KeyMaterialBytes) -> Cypher {
-    let mut key = KeyBytes::default();
-    let mut hmac_key = KeyBytes::default();
-    key.copy_from_slice(&material[..KEY_LEN]);
-    hmac_key.copy_from_slice(&material[KEY_LEN..]);
-    Cypher::with_trace_detection(EncryptionKey::from_key_material(key, hmac_key), false)
+    Cypher::with_trace_detection(EncryptionKey::from_key_material(material), false)
 }
 
 /// Encrypts the vault payload under the DEK.

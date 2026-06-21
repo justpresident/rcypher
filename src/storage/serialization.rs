@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, bail};
+use zeroize::Zeroizing;
 
 use crate::crypto::Cypher;
 use crate::file_io::{load_encrypted, save_encrypted};
@@ -9,8 +10,13 @@ use crate::version::StoreVersion;
 use super::store::Storage;
 use super::value::{EncryptedValue, ValueEntry};
 
-pub fn serialize_storage(storage: &Storage) -> Result<Vec<u8>> {
-    let mut result = Vec::new();
+/// Serializes the store to the cleartext bytes later encrypted as the payload.
+///
+/// The buffer carries the (cleartext) entry keys, so it is held in a zeroizing
+/// buffer — matching [`load_encrypted`], which returns the decrypted payload
+/// zeroizing.
+pub fn serialize_storage(storage: &Storage) -> Result<Zeroizing<Vec<u8>>> {
+    let mut result = Zeroizing::new(Vec::new());
 
     // Version
     let version = StoreVersion::Version4 as u16;
