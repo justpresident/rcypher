@@ -532,7 +532,7 @@ fn test_policy_vault_put_get_roundtrip() {
 
     // The store must still be a version-8 policy vault after a save.
     let head = fs::read(&file_path).unwrap();
-    assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+    assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
 
     // Second run: re-open the rewritten vault and read the values back.
     let lines = run_commands(&file_path, b"get key1\nget key2\n".to_vec());
@@ -643,7 +643,7 @@ fn test_new_store_is_policy_vault() {
     run_commands(&file_path, b"put k v\n".to_vec());
 
     let head = fs::read(&file_path).unwrap();
-    assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+    assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
 
     let factors = run_commands_str(&file_path, "auth factor list\n");
     assert!(factors.contains("primary (password)"), "{factors}");

@@ -81,9 +81,9 @@ mod version;
 
 // Public re-exports
 pub use auth::{
-    Factor, FactorKind, FactorSecret, Leaf, POLICY_VAULT_VERSION, PolicyMetadata, PolicyNode,
-    PolicyVault, Share, UnlockSession, check_factor_password, distribute, parse_policy_vault,
-    reconstruct, serialize_policy_header,
+    Factor, FactorKind, FactorSecret, Leaf, PolicyMetadata, PolicyNode, PolicyVault, Share,
+    UnlockSession, check_factor_password, distribute, parse_policy_vault, reconstruct,
+    serialize_policy_header,
 };
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};
 pub use file_io::{load_encrypted, save_encrypted};
@@ -93,7 +93,7 @@ pub use storage::{
     EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
     serialize_storage,
 };
-pub use version::CypherVersion;
+pub use version::{ContainerFormat, CypherVersion};
 
 // Re-export for convenience
 pub use anyhow::{Result, bail};

@@ -25,13 +25,11 @@ use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use rcypher::{Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, serialize_storage};
-use rcypher::{
-    POLICY_VAULT_VERSION, PolicyMetadata, PolicyVault, UnlockSession, parse_policy_vault,
-};
+use rcypher::{ContainerFormat, PolicyMetadata, PolicyVault, UnlockSession, parse_policy_vault};
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
 use std::io;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -157,17 +155,10 @@ fn run_interactive(
     Ok(())
 }
 
-/// Whether `path` is an existing multi-factor policy vault (version 8), told
-/// apart from a plain password envelope by its leading 2-byte version tag.
+/// Whether `path` is an existing multi-factor policy vault (the current
+/// container format), as opposed to a legacy password envelope.
 fn is_policy_vault(path: &Path) -> bool {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return false;
-    };
-    let mut head = [0u8; 2];
-    if file.read_exact(&mut head).is_err() {
-        return false;
-    }
-    u16::from_be_bytes(head) == POLICY_VAULT_VERSION
+    ContainerFormat::probe_file(path).is_ok_and(|format| format == ContainerFormat::V8)
 }
 
 /// Unlocks a policy vault by collecting factor secrets until the policy is met.

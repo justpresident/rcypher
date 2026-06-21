@@ -3,13 +3,7 @@ use bincode::{Decode, Encode};
 
 use super::policy::PolicyNode;
 use crate::constants::SaltBytes;
-
-/// Outer version tag for a policy-protected (multi-factor) vault.
-///
-/// It lives in the same leading 2-byte version space as a plain `V7` password
-/// envelope (whose tag is 7), so a reader tells the two apart by probing the
-/// first two bytes.
-pub const POLICY_VAULT_VERSION: u16 = 8;
+use crate::version::ContainerFormat;
 
 /// Key-derivation parameters for one enrolled factor.
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
@@ -63,10 +57,10 @@ impl PolicyMetadata {
     }
 }
 
-/// Serializes a policy-vault header: the version tag followed by the bincoded
+/// Serializes a policy-vault header: the container tag followed by the bincoded
 /// metadata. The caller appends the DEK-encrypted payload to the returned bytes.
 pub fn serialize_policy_header(meta: &PolicyMetadata) -> Result<Vec<u8>> {
-    let mut out = POLICY_VAULT_VERSION.to_be_bytes().to_vec();
+    let mut out = ContainerFormat::V8.tag().to_vec();
     let encoded = bincode::encode_to_vec(meta, bincode::config::standard())?;
     out.extend_from_slice(&encoded);
     Ok(out)
@@ -75,12 +69,8 @@ pub fn serialize_policy_header(meta: &PolicyMetadata) -> Result<Vec<u8>> {
 /// Splits a policy-vault blob into its metadata and the trailing DEK-encrypted
 /// payload. Returns an error if `data` is not a policy vault.
 pub fn parse_policy_vault(data: &[u8]) -> Result<(PolicyMetadata, &[u8])> {
-    if data.len() < 2 {
-        bail!("data too short for a policy vault");
-    }
-    let version = u16::from_be_bytes([data[0], data[1]]);
-    if version != POLICY_VAULT_VERSION {
-        bail!("not a policy vault (version {version})");
+    if ContainerFormat::probe(data)? != ContainerFormat::V8 {
+        bail!("not a policy vault");
     }
     let (meta, consumed): (PolicyMetadata, usize) =
         bincode::decode_from_slice(&data[2..], bincode::config::standard())?;

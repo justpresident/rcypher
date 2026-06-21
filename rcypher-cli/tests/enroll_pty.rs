@@ -219,7 +219,7 @@ fn upgrade_legacy_store_to_policy_vault() {
 
     // Initially a legacy version-7 store (not a version-8 policy vault).
     let head = fs::read(&path).unwrap();
-    assert_ne!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+    assert_ne!(&head[..2], &rcypher::ContainerFormat::V8.tag());
 
     let mut p = spawn_session(&path);
 
@@ -242,7 +242,7 @@ fn upgrade_legacy_store_to_policy_vault() {
 
     // On disk it is now a version-8 policy vault, unlockable with the new password.
     let head = fs::read(&path).unwrap();
-    assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+    assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
     assert!(unlocks_with(&path, "primary", STRONG_PASSWORD));
 }
 

@@ -16,9 +16,6 @@ mod parser;
 mod policy;
 mod vault;
 
-pub use format::{
-    Factor, FactorKind, POLICY_VAULT_VERSION, PolicyMetadata, parse_policy_vault,
-    serialize_policy_header,
-};
+pub use format::{Factor, FactorKind, PolicyMetadata, parse_policy_vault, serialize_policy_header};
 pub use policy::{Leaf, PolicyNode, Share, distribute, reconstruct};
 pub use vault::{FactorSecret, PolicyVault, UnlockSession, check_factor_password};
