@@ -5,11 +5,15 @@
 //! under a real pseudo-terminal so the prompts can be answered.
 
 use std::collections::HashMap;
+use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use assert_cmd::cargo;
-use rcypher::{Argon2Params, FactorSecret, PolicyVault, Storage, serialize_storage};
+use rcypher::{
+    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, FactorSecret, PolicyVault,
+    Storage, save_storage, serialize_storage,
+};
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
@@ -24,6 +28,24 @@ fn create_policy_vault(path: &Path, factor_id: &str, password: &str) {
     let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
     let payload = serialize_storage(&Storage::new()).unwrap();
     vault.save(&payload, path).unwrap();
+}
+
+/// Writes a legacy version-7 single-password store holding `key`=`value`,
+/// encrypted with "test_password" under insecure Argon2 params.
+fn create_legacy_store_with_value(path: &Path, key: &str, value: &str) {
+    let enc_key = EncryptionKey::from_password_with_params(
+        CypherVersion::default(),
+        "test_password",
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    let cypher = Cypher::new(enc_key);
+    let mut storage = Storage::new();
+    storage.put(
+        key.to_string(),
+        EncryptedValue::encrypt(&cypher, value).unwrap(),
+    );
+    save_storage(&cypher, &storage, path).unwrap();
 }
 
 /// Spawns the binary against `path` under a PTY. `--insecure-password` unlocks
@@ -186,4 +208,53 @@ fn enroll_weak_password_accepted_after_double_confirm() {
 
     // The weak password was accepted and works as the factor's secret.
     assert!(unlocks_with(&path, "backup", "letmein99"));
+}
+
+#[test]
+fn upgrade_legacy_store_to_policy_vault() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_legacy_store_with_value(&path, "k", "v");
+
+    // Initially a legacy version-7 store (not a version-8 policy vault).
+    let head = fs::read(&path).unwrap();
+    assert_ne!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+
+    let mut p = spawn_session(&path);
+
+    p.send_line("upgrade").unwrap();
+    p.exp_string("New password for the upgraded store").unwrap();
+    p.send_line(STRONG_PASSWORD).unwrap();
+    p.exp_string("Confirm password").unwrap();
+    p.send_line(STRONG_PASSWORD).unwrap();
+    p.exp_string("Upgraded to a multi-factor policy vault")
+        .unwrap();
+
+    // Auth commands now work, and the existing value survives the re-encryption.
+    p.send_line("factors").unwrap();
+    p.exp_string("primary (password)").unwrap();
+    p.send_line("get k").unwrap();
+    p.exp_string("k: v").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+
+    // On disk it is now a version-8 policy vault, unlockable with the new password.
+    let head = fs::read(&path).unwrap();
+    assert_eq!(&head[..2], &rcypher::POLICY_VAULT_VERSION.to_be_bytes());
+    assert!(unlocks_with(&path, "primary", STRONG_PASSWORD));
+}
+
+#[test]
+fn upgrade_rejected_on_a_policy_vault() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_policy_vault(&path, "primary", "test_password");
+
+    let mut p = spawn_session(&path);
+    p.send_line("upgrade").unwrap();
+    p.exp_string("already a multi-factor policy vault").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
 }

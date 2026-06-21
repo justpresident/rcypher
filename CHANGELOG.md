@@ -14,8 +14,9 @@ minor; features and fixes bump the patch).
     factor; existing version-7 password stores keep opening through the legacy
     path unchanged.
   - In-store commands while unlocked: `factors`, `enroll password NAME`,
-    `policy show`, `policy set EXPR` (e.g. `p1 or (p2 and yk)`), and
-    `remove factor NAME`.
+    `policy show`, `policy set EXPR` (e.g. `p1 or (p2 and yk)`),
+    `remove factor NAME`, and `upgrade` (convert a legacy single-password store
+    into a policy vault, re-encrypting under a fresh key).
   - On open, rcypher prints the policy and prompts only for as many factors as
     are needed to satisfy it.
   - The payload is encrypted under a random data-encryption key (DEK) that is

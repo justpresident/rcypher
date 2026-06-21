@@ -1,5 +1,6 @@
 use crate::cli::Backend;
 use crate::cli::CLIPBOARD_TTL_MS;
+use crate::cli::DEFAULT_FACTOR_ID;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{
     confirm_if_weak_password, copy_to_clipboard, format_timestamp, prompt_new_password,
@@ -72,6 +73,13 @@ impl InteractiveCli {
 
     pub fn run(&mut self) -> Result<()> {
         let storage = Arc::new(Mutex::new(self.backend.load_store(&self.filename)?));
+
+        if self.backend.policy_vault().is_none() {
+            eprintln!(
+                "Note: this is a legacy single-password store. Run 'upgrade' to enable \
+                 multi-factor unlock (factors, policies, YubiKey)."
+            );
+        }
 
         let config = Config::builder()
             .completion_type(CompletionType::List)
@@ -184,6 +192,7 @@ impl InteractiveCli {
             "factors" => self.cmd_factors(),
             "policy" => self.cmd_policy(&parts, storage),
             "remove" => self.cmd_remove(&parts, storage),
+            "upgrade" => self.cmd_upgrade(storage),
             "help" => {
                 print_help();
                 Ok(())
@@ -335,7 +344,7 @@ impl InteractiveCli {
         let params = self.argon2_params;
         self.backend
             .policy_vault_mut()
-            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?
+            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?
             .enroll_password(id, &password, &params)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
@@ -356,7 +365,7 @@ impl InteractiveCli {
         let vault = self
             .backend
             .policy_vault()
-            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
+            .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
         for factor in vault.metadata().factors {
             let kind = match factor.kind {
                 FactorKind::Password { .. } => "password",
@@ -374,7 +383,7 @@ impl InteractiveCli {
                 let vault = self
                     .backend
                     .policy_vault()
-                    .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
+                    .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
                 secure_print(vault.policy_expr(), self.insecure_stdout)
             }
             Some("set") => {
@@ -393,7 +402,7 @@ impl InteractiveCli {
             let vault = self
                 .backend
                 .policy_vault_mut()
-                .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?;
+                .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault"))?;
             vault.set_policy(expr)?;
             (
                 vault.policy_expr(),
@@ -416,7 +425,7 @@ impl InteractiveCli {
                     .ok_or_else(|| anyhow!("syntax: remove factor NAME"))?;
                 {
                     let vault = self.backend.policy_vault_mut().ok_or_else(|| {
-                        anyhow!("this store has no multi-factor policy to manage")
+                        anyhow!("this store has no multi-factor policy to manage — run 'upgrade' to convert this legacy store to a policy vault")
                     })?;
                     vault.remove_factor(id)?;
                 }
@@ -426,6 +435,59 @@ impl InteractiveCli {
             }
             _ => bail!("syntax: remove factor NAME"),
         }
+    }
+
+    /// `upgrade` — convert a legacy single-password store into a multi-factor
+    /// policy vault. The entered password becomes the first factor, `primary`,
+    /// and every stored value is re-encrypted under the vault's fresh key.
+    fn cmd_upgrade(&mut self, storage: &mut Storage) -> Result<()> {
+        if self.backend.policy_vault().is_some() {
+            bail!("this store is already a multi-factor policy vault");
+        }
+
+        secure_print(
+            "Upgrading this legacy store to a multi-factor policy vault. The password you set \
+             next becomes the first factor, 'primary'."
+                .to_string(),
+            self.insecure_stdout,
+        )?;
+
+        let mut password = prompt_new_password("the upgraded store (factor 'primary')")?;
+        check_factor_password(DEFAULT_FACTOR_ID, &password)?;
+        if !confirm_if_weak_password(&password, &[DEFAULT_FACTOR_ID, "rcypher"])? {
+            bail!("upgrade cancelled (weak password not confirmed)");
+        }
+
+        let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, &self.argon2_params)?;
+        password.zeroize(); // wipe as soon as the vault's key material is derived
+        let new_cypher = vault.cypher();
+
+        // Re-encrypt every stored value from the legacy key to the new DEK, in the
+        // in-memory store, before swapping the backend.
+        {
+            let old_cypher = self.backend.cypher();
+            for entries in storage.data.values_mut() {
+                for entry in entries {
+                    let plaintext = entry.value.decrypt(old_cypher)?;
+                    entry.value = EncryptedValue::encrypt(&new_cypher, &plaintext)?;
+                }
+            }
+        }
+
+        self.backend = Backend::Policy {
+            vault,
+            cypher: new_cypher,
+        };
+        self.backend.save_store(storage, &self.filename)?;
+        self.refresh_completion_factors();
+
+        secure_print(
+            "Upgraded to a multi-factor policy vault. Enrolled factor 'primary'; use \
+             'enroll'/'policy' to add more."
+                .to_string(),
+            self.insecure_stdout,
+        )?;
+        Ok(())
     }
 }
 
@@ -451,6 +513,7 @@ fn print_help() {
     println!("  help            - Show this help");
     println!();
     println!("AUTH COMMANDS (multi-factor stores):");
+    println!("  upgrade             - Convert a legacy single-password store to a policy vault");
     println!("  factors             - List enrolled factors");
     println!(
         "  enroll password NAME - Enroll a new password factor (NAME is a label, not the password)"

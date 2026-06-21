@@ -34,6 +34,7 @@ USER COMMANDS:
   help            - Show this help
 
 AUTH COMMANDS (multi-factor stores):
+  upgrade             - Convert a legacy single-password store to a policy vault
   factors             - List enrolled factors
   enroll password NAME - Enroll a new password factor
   policy show         - Show the current unlock policy
@@ -171,24 +172,27 @@ $ rcypher --encrypt input.txt > input.txt.enc
 $ rcypher --decrypt input.txt.enc > input.txt
 ```
 
-## Upgrading storage format
+## Upgrading a legacy store to multi-factor
 
-When opening an encrypted storage file with an outdated encryption format, `rcypher` automatically detects this and prompts you to upgrade:
+A store created before multi-factor support is a **legacy single-password store**
+(version 7). It opens and works as always, but the auth commands above
+(`factors`, `enroll`, `policy`, …) aren't available — there's no policy to manage.
+On open, rcypher points this out, and the in-store `upgrade` command converts it
+into a policy vault in place:
 
 ```sh
-$ rcypher secrets.db
-Enter Password for secrets.db:
-File is encrypted with deprecated algorithm.
-Would you like to upgrade it now? (y/n): y
+cypher > upgrade
+Upgrading this legacy store to a multi-factor policy vault. The password you set
+next becomes the first factor, 'primary'.
+New password for the upgraded store (factor 'primary'): ********
+Confirm password: ********
+Upgraded to a multi-factor policy vault. Enrolled factor 'primary'; use
+'enroll'/'policy' to add more.
 ```
 
-The file is upgraded in place using the latest encryption format (Argon2id + AES-256 + HMAC).
-
-You can also upgrade manually without entering interactive mode:
-```sh
-$ rcypher --upgrade-storage secrets.db
-Enter Password for secrets.db:
-```
+The store is re-encrypted under a fresh data-encryption key (the password you
+enter becomes the `primary` factor), after which you can enroll more factors and
+set a policy as above. Your stored secrets are preserved.
 
 ## Merging conflicting storage files
 

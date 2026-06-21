@@ -10,7 +10,7 @@ use rustyline::validate::Validator;
 /// Top-level interactive commands, in display order.
 const COMMANDS: &[&str] = &[
     "put", "get", "copy", "history", "search", "del", "rm", "enroll", "factors", "policy",
-    "remove", "help",
+    "remove", "upgrade", "help",
 ];
 
 /// Commands whose argument is a store key (and so completes from the store).
@@ -179,7 +179,7 @@ mod tests {
         let all = complete("");
         for cmd in [
             "put", "get", "copy", "history", "search", "del", "rm", "enroll", "factors", "policy",
-            "remove", "help",
+            "remove", "upgrade", "help",
         ] {
             assert!(all.contains(&cmd.to_string()), "missing '{cmd}' in {all:?}");
         }

@@ -221,9 +221,6 @@ fn collect_policy_secrets(
     Ok(secrets)
 }
 
-/// The factor id given to the password enrolled when a new store is created.
-const DEFAULT_FACTOR_ID: &str = "primary";
-
 /// Returns the store password — the one supplied via `--insecure-password`
 /// (testing) or prompted from the user. `confirm` asks for a second entry.
 fn obtain_store_password(
@@ -280,13 +277,13 @@ fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Back
     // Strength-check an interactively chosen password (skip in the test-only
     // `--insecure-password` path, which is non-interactive).
     if params.insecure_password.is_none()
-        && !confirm_if_weak_password(&password, &[DEFAULT_FACTOR_ID, "rcypher"])?
+        && !confirm_if_weak_password(&password, &[cli::DEFAULT_FACTOR_ID, "rcypher"])?
     {
         bail!("store creation cancelled (weak password not confirmed)");
     }
 
     let spinner = Spinner::new("Deriving encryption key", params.quiet);
-    let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, argon2);
+    let vault = PolicyVault::create(cli::DEFAULT_FACTOR_ID, &password, argon2);
     password.zeroize(); // wipe as soon as the key material is derived
     spinner.finish_and_clear();
     let vault = vault?;
