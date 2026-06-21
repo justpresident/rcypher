@@ -302,8 +302,8 @@ impl InteractiveCli {
             self.insecure_stdout,
         )?;
         // The password is held in a zeroizing buffer, so every early return below
-        // wipes it on drop.
-        let password = prompt_new_password(&format!("factor '{id}'"))?;
+        // wipes it on drop; it is also wiped eagerly once the factor is enrolled.
+        let mut password = prompt_new_password(&format!("factor '{id}'"))?;
 
         // Reject a password that resembles the (cleartext) name first, so that
         // mix-up gets its specific message rather than a generic strength warning.
@@ -317,6 +317,7 @@ impl InteractiveCli {
             .policy_vault_mut()
             .ok_or_else(|| anyhow!("this store has no multi-factor policy to manage"))?
             .enroll_password(id, &password, &params)?;
+        password.zeroize(); // wipe as soon as the factor's key material is derived
 
         self.backend.save_store(storage, &self.filename)?;
         secure_print(

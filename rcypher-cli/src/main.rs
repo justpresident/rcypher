@@ -40,7 +40,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
 #[command(group(
@@ -259,9 +259,10 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
         let cypher = vault.cypher();
         Ok(cli::Backend::Policy { vault, cypher })
     } else {
-        let password = obtain_store_password(params, path, false)?;
+        let mut password = obtain_store_password(params, path, false)?;
         let spinner = Spinner::new("Deriving encryption key", params.quiet);
         let key = EncryptionKey::for_file_with_params(&password, path, argon2);
+        password.zeroize(); // wipe as soon as the key is derived
         spinner.finish_and_clear();
         Ok(cli::Backend::Legacy {
             cypher: Cypher::new(key?),
@@ -274,7 +275,7 @@ fn open_backend(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Resul
 fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Backend> {
     // The password is held in a zeroizing buffer, wiped on drop — including the
     // early returns from the strength check below.
-    let password = obtain_store_password(params, &params.filename, true)?;
+    let mut password = obtain_store_password(params, &params.filename, true)?;
 
     // Strength-check an interactively chosen password (skip in the test-only
     // `--insecure-password` path, which is non-interactive).
@@ -286,6 +287,7 @@ fn create_backend(params: &CliParams, argon2: &Argon2Params) -> Result<cli::Back
 
     let spinner = Spinner::new("Deriving encryption key", params.quiet);
     let vault = PolicyVault::create(DEFAULT_FACTOR_ID, &password, argon2);
+    password.zeroize(); // wipe as soon as the key material is derived
     spinner.finish_and_clear();
     let vault = vault?;
 
@@ -495,16 +497,18 @@ fn main() -> Result<()> {
     let argon2_params = get_argon2_params(&params);
 
     if params.encrypt {
-        let password = obtain_store_password(&params, &params.filename, true)?;
+        let mut password = obtain_store_password(&params, &params.filename, true)?;
         let key = EncryptionKey::from_password_with_params(
             CypherVersion::default(),
             &password,
             &argon2_params,
         )?;
+        password.zeroize(); // wipe eagerly, before the (slower) encryption runs
         run_encrypt(&params, key)
     } else if params.decrypt {
-        let password = obtain_store_password(&params, &params.filename, false)?;
+        let mut password = obtain_store_password(&params, &params.filename, false)?;
         let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
+        password.zeroize(); // wipe eagerly, before the (slower) decryption runs
         run_decrypt(&params, key)
     } else if let Some(update_file) = &params.update_with {
         // Each store is unlocked through its own backend (legacy or policy vault),
