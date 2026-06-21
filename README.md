@@ -63,8 +63,15 @@ A new store starts with one password factor named `primary` and the policy
 `primary`. For example, add a **recovery password** as a second way in, so a
 forgotten primary password doesn't lock you out:
 
+In `enroll password NAME`, **`NAME` is a label** (shown by `factors`, stored
+unencrypted) — *not* the password; you are prompted for the password separately.
+rcypher refuses to enrol a factor whose name equals its password, to catch the
+mix-up of typing a password where the name belongs.
+
 ```sh
-cypher > enroll password recovery   # a long passphrase kept in another manager
+cypher > enroll password recovery   # 'recovery' is the label; the passphrase is prompted
+Enrolling factor 'recovery'. The name is a public label (shown by 'factors',
+stored unencrypted) — not the password; you'll enter the password next.
 New password for factor 'recovery': ********
 Confirm password: ********
 Factor 'recovery' enrolled. It is not yet used by the policy — run

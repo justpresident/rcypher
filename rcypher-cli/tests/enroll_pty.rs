@@ -73,3 +73,44 @@ fn enroll_password_via_pty_persists_a_working_factor() {
     let (vault, _payload) = PolicyVault::open(&path, &secrets).expect("unlock via enrolled factor");
     assert!(vault.factor_ids().contains(&"backup".to_string()));
 }
+
+#[test]
+fn enroll_rejects_password_typed_as_factor_name() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_policy_vault(&path, "primary", "test_password");
+
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    cmd.args([
+        "--quiet",
+        "--insecure-stdout",
+        "--insecure-password",
+        "test_password",
+        "--insecure-allow-debugging",
+    ]);
+    cmd.arg(&path);
+    cmd.env("TERM", "xterm");
+
+    let mut p = spawn_command(cmd, Some(30_000)).expect("spawn under PTY");
+
+    // The footgun: a password typed where the factor NAME belongs, then repeated
+    // at the prompt. The store must refuse rather than persist it as a label.
+    p.send_line("enroll password hunter2").unwrap();
+    p.exp_string("New password for factor 'hunter2'").unwrap();
+    p.send_line("hunter2").unwrap();
+    p.exp_string("Confirm password").unwrap();
+    p.send_line("hunter2").unwrap();
+    p.exp_string("must differ").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+
+    // Nothing named 'hunter2' was enrolled.
+    let secrets: HashMap<String, FactorSecret> = [(
+        "hunter2".to_string(),
+        FactorSecret::Password("hunter2".to_string()),
+    )]
+    .into_iter()
+    .collect();
+    assert!(PolicyVault::open(&path, &secrets).is_err());
+}

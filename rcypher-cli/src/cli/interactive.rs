@@ -272,7 +272,8 @@ impl InteractiveCli {
     }
 
     /// `enroll password NAME` — add a new password factor (prompted, with
-    /// confirmation). The new factor is not used by the policy until a
+    /// confirmation). `NAME` is a label, not the password; the password is
+    /// prompted separately. The new factor is not used by the policy until a
     /// `policy set` references it.
     fn cmd_enroll(&mut self, parts: &[&str], storage: &Storage) -> Result<()> {
         match parts.get(1).copied() {
@@ -280,15 +281,24 @@ impl InteractiveCli {
                 let id = parts
                     .get(2)
                     .filter(|s| !s.is_empty())
-                    .ok_or_else(|| anyhow!("syntax: enroll password NAME"))?;
+                    .ok_or_else(|| anyhow!("syntax: enroll password NAME (NAME is a label)"))?;
                 self.enroll_password(id, storage)
             }
             Some("yubikey") => bail!("YubiKey enrollment is not yet supported"),
-            _ => bail!("syntax: enroll password NAME"),
+            _ => bail!("syntax: enroll password NAME (NAME is a label, not the password)"),
         }
     }
 
     fn enroll_password(&mut self, id: &str, storage: &Storage) -> Result<()> {
+        // Make the role of NAME explicit: it is a public label, not the secret.
+        // Catches the mix-up of typing a password where the factor name belongs.
+        secure_print(
+            format!(
+                "Enrolling factor '{id}'. The name is a public label (shown by 'factors', \
+                 stored unencrypted) — not the password; you'll enter the password next."
+            ),
+            self.insecure_stdout,
+        )?;
         let mut password = prompt_new_password(&format!("factor '{id}'"))?;
         let params = self.argon2_params;
         let result = self
@@ -410,7 +420,9 @@ fn print_help() {
     println!();
     println!("AUTH COMMANDS (multi-factor stores):");
     println!("  factors             - List enrolled factors");
-    println!("  enroll password NAME - Enroll a new password factor");
+    println!(
+        "  enroll password NAME - Enroll a new password factor (NAME is a label, not the password)"
+    );
     println!("  policy show         - Show the current unlock policy");
     println!("  policy set EXPR     - Set the unlock policy, e.g. p1 or (p2 and yk)");
     println!("  remove factor NAME  - Remove a factor (not used by the policy)");
