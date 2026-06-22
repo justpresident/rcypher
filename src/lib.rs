@@ -39,7 +39,7 @@
 //! # Features
 //!
 //! - `storage` *(default)* — rcypher's bundled key-value storage format
-//!   ([`Storage`] and friends). Disable with `default-features = false` to depend
+//!   ([`DataContainer`] and friends). Disable with `default-features = false` to depend
 //!   on only the crypto envelope.
 //!
 //! # Anti-debug detection
@@ -89,10 +89,7 @@ pub use crypto::{Argon2Params, Cypher, EncryptionKey};
 pub use file_io::{load_encrypted, save_encrypted};
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 #[cfg(feature = "storage")]
-pub use storage::{
-    EncryptedValue, Storage, ValueEntry, deserialize_storage, load_storage, save_storage,
-    serialize_storage,
-};
+pub use storage::{DataContainer, EncryptedValue, ValueEntry};
 pub use version::{ContainerFormat, CypherVersion};
 
 // Re-export for convenience

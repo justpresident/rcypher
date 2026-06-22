@@ -39,13 +39,13 @@ fn temp_test_file() -> (TempDir, PathBuf) {
 
 #[test]
 fn test_storage_new() {
-    let storage = Storage::new();
-    assert_eq!(storage.data.len(), 0);
+    let storage = DataContainer::new();
+    assert_eq!(storage.len(), 0);
 }
 
 #[test]
 fn test_storage_put_get() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
 
@@ -57,7 +57,7 @@ fn test_storage_put_get() {
 
 #[test]
 fn test_storage_put_multiple_values() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key1".to_string(), enc("value2"));
     storage.put("key1".to_string(), enc("value3"));
@@ -68,7 +68,7 @@ fn test_storage_put_multiple_values() {
     assert_eq!(results[0].1.as_bytes(), "value3".as_bytes());
 
     // history should return all values
-    let history: Vec<_> = storage.history("key1").unwrap().collect();
+    let history = storage.history("key1").unwrap();
     assert_eq!(history.len(), 3);
     assert_eq!(history[0].value.as_bytes(), "value1".as_bytes());
     assert_eq!(history[1].value.as_bytes(), "value2".as_bytes());
@@ -77,7 +77,7 @@ fn test_storage_put_multiple_values() {
 
 #[test]
 fn test_storage_get_with_regex() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("test1".to_string(), enc("value1"));
     storage.put("test2".to_string(), enc("value2"));
     storage.put("prod1".to_string(), enc("value3"));
@@ -94,7 +94,7 @@ fn test_storage_get_with_regex() {
 
 #[test]
 fn test_storage_get_no_match() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
 
     let results: Vec<_> = storage.get("nonexistent").unwrap().collect();
@@ -103,7 +103,7 @@ fn test_storage_get_no_match() {
 
 #[test]
 fn test_storage_search() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("user_alice".to_string(), enc("value1"));
     storage.put("user_bob".to_string(), enc("value2"));
     storage.put("admin_charlie".to_string(), enc("value3"));
@@ -119,12 +119,12 @@ fn test_storage_search() {
 
 #[test]
 fn test_storage_delete() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
 
     assert!(storage.delete("key1"));
-    assert_eq!(storage.data.len(), 1);
+    assert_eq!(storage.len(), 1);
 
     assert!(!storage.delete("key1")); // Already deleted
     assert!(!storage.delete("nonexistent"));
@@ -133,7 +133,7 @@ fn test_storage_delete() {
 #[test]
 fn test_storage_history() {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("v1"));
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -142,7 +142,7 @@ fn test_storage_history() {
     storage.put_ts("key1".to_string(), enc("v2"), timestamp.add(1));
     storage.put_ts("key1".to_string(), enc("v3"), timestamp.add(2));
 
-    let history: Vec<_> = storage.history("key1").unwrap().collect();
+    let history = storage.history("key1").unwrap();
     assert_eq!(history.len(), 3);
 
     // Timestamps should be in ascending order
@@ -157,73 +157,76 @@ fn test_storage_history() {
 
 #[test]
 fn test_serialize_deserialize_empty() {
-    let storage = Storage::new();
-    let serialized = serialize_storage(&storage).unwrap();
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let storage = DataContainer::new();
+    let serialized = storage.safe_serialize().unwrap();
+    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
 
-    assert_eq!(deserialized.data.len(), 0);
+    assert_eq!(deserialized.len(), 0);
 }
 
 #[test]
 fn test_serialize_deserialize_single_entry() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
 
-    let serialized = serialize_storage(&storage).unwrap();
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = storage.safe_serialize().unwrap();
+    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
 
-    assert_eq!(deserialized.data.len(), 1);
-    let entry = &deserialized.data["key1"][0];
+    assert_eq!(deserialized.len(), 1);
+    let entry = &deserialized.history("key1").unwrap()[0];
     assert_eq!(entry.value.as_bytes(), "value1".as_bytes());
 }
 
 #[test]
 fn test_serialize_deserialize_multiple_entries() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
     storage.put("key1".to_string(), enc("value1_updated"));
 
-    let serialized = serialize_storage(&storage).unwrap();
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = storage.safe_serialize().unwrap();
+    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
 
-    assert_eq!(deserialized.data.len(), 2);
-    assert_eq!(deserialized.data["key1"].len(), 2);
-    assert_eq!(deserialized.data["key2"].len(), 1);
+    assert_eq!(deserialized.len(), 2);
+    assert_eq!(deserialized.history("key1").unwrap().len(), 2);
+    assert_eq!(deserialized.history("key2").unwrap().len(), 1);
 }
 
 #[test]
 fn test_serialize_deserialize_unicode() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("ключ".to_string(), enc("значение"));
     storage.put("🔑".to_string(), enc("🎁"));
 
-    let serialized = serialize_storage(&storage).unwrap();
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = storage.safe_serialize().unwrap();
+    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
 
-    assert_eq!(deserialized.data.len(), 2);
+    assert_eq!(deserialized.len(), 2);
     assert_eq!(
-        deserialized.data["ключ"][0].value.as_bytes(),
+        deserialized.history("ключ").unwrap()[0].value.as_bytes(),
         "значение".as_bytes()
     );
-    assert_eq!(deserialized.data["🔑"][0].value.as_bytes(), "🎁".as_bytes());
+    assert_eq!(
+        deserialized.history("🔑").unwrap()[0].value.as_bytes(),
+        "🎁".as_bytes()
+    );
 }
 
 #[test]
 fn test_deserialize_corrupted_data() {
     // Too short
-    let result = deserialize_storage(&[0, 1, 2]);
+    let result = DataContainer::safe_deserialize(&[0, 1, 2]);
     assert!(result.is_err());
 
     // Invalid version
     let mut data = vec![0, 99]; // version 99
     data.extend_from_slice(&[0, 0, 0, 1]); // count = 1
-    let result = deserialize_storage(&data);
+    let result = DataContainer::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
 #[test]
-fn test_load_save_storage() {
+fn test_save_load_roundtrip() {
     let (_dir, path) = temp_test_file();
 
     let cypher = Cypher::new(
@@ -231,17 +234,23 @@ fn test_load_save_storage() {
             .unwrap(),
     );
 
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
 
-    save_storage(&cypher, &storage, &path).unwrap();
+    storage.save(&cypher, &path).unwrap();
     assert!(path.exists());
 
-    let loaded = load_storage(&cypher, &path).unwrap();
-    assert_eq!(loaded.data.len(), 2);
-    assert_eq!(loaded.data["key1"][0].value.as_bytes(), "value1".as_bytes());
-    assert_eq!(loaded.data["key2"][0].value.as_bytes(), "value2".as_bytes());
+    let loaded = DataContainer::load(&cypher, &path).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(
+        loaded.history("key1").unwrap()[0].value.as_bytes(),
+        "value1".as_bytes()
+    );
+    assert_eq!(
+        loaded.history("key2").unwrap()[0].value.as_bytes(),
+        "value2".as_bytes()
+    );
 }
 
 #[test]
@@ -253,8 +262,8 @@ fn test_load_nonexistent_file() {
             .unwrap(),
     );
 
-    let storage = load_storage(&cypher, &path).unwrap();
-    assert_eq!(storage.data.len(), 0);
+    let storage = DataContainer::load(&cypher, &path).unwrap();
+    assert_eq!(storage.len(), 0);
 }
 
 #[test]
@@ -269,14 +278,14 @@ fn test_load_with_wrong_password() {
             .unwrap(),
     );
 
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key1".to_string(), enc("value1"));
 
-    save_storage(&cypher1, &storage, &path).unwrap();
+    storage.save(&cypher1, &path).unwrap();
 
     // Should fail or return garbage
-    let result = load_storage(&cypher2, &path);
-    assert!(result.is_err() || result.unwrap().data.is_empty());
+    let result = DataContainer::load(&cypher2, &path);
+    assert!(result.is_err() || result.unwrap().is_empty());
 }
 
 #[test]
@@ -294,7 +303,7 @@ fn test_reencrypt_rekeys_all_values_and_history() {
     let old = make("old_password");
     let new = make("new_password");
 
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     // A key with two historical versions, plus a second key.
     storage.put_ts(
         "k".to_string(),
@@ -317,6 +326,7 @@ fn test_reencrypt_rekeys_all_values_and_history() {
     let history: Vec<String> = storage
         .history("k")
         .unwrap()
+        .iter()
         .map(|e| e.value.decrypt(&new).unwrap().to_string())
         .collect();
     assert_eq!(history, vec!["v1".to_string(), "v2".to_string()]);
@@ -331,7 +341,7 @@ fn test_reencrypt_rekeys_all_values_and_history() {
 
 #[test]
 fn test_storage_ordering() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
 
     // Add keys in random order
     storage.put("zebra".to_string(), enc("z"));
@@ -347,13 +357,13 @@ fn test_storage_ordering() {
 
 #[test]
 fn test_special_characters_in_keys() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("key-with-dash".to_string(), enc("value1"));
     storage.put("key_with_underscore".to_string(), enc("value2"));
     storage.put("key.with.dots".to_string(), enc("value3"));
     storage.put("key@with@at".to_string(), enc("value4"));
 
-    assert_eq!(storage.data.len(), 4);
+    assert_eq!(storage.len(), 4);
 
     let result: Vec<_> = storage.get("key-with-dash").unwrap().collect();
     assert_eq!(result[0].1.as_bytes(), "value1".as_bytes());
@@ -374,7 +384,7 @@ fn test_concurrent_operations() {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    let storage = Arc::new(Mutex::new(Storage::new()));
+    let storage = Arc::new(Mutex::new(DataContainer::new()));
     let mut handles = vec![];
 
     for i in 0..10 {
@@ -391,7 +401,7 @@ fn test_concurrent_operations() {
     }
 
     let final_storage = storage.lock().unwrap();
-    assert_eq!(final_storage.data.len(), 10);
+    assert_eq!(final_storage.len(), 10);
 }
 
 #[test]
@@ -404,70 +414,73 @@ fn test_storage_persistence_across_sessions() {
 
     // Session 1: Create and save
     {
-        let mut storage = Storage::new();
+        let mut storage = DataContainer::new();
         storage.put("session1_key".to_string(), enc("session1_value"));
-        save_storage(&cypher, &storage, &path).unwrap();
+        storage.save(&cypher, &path).unwrap();
     }
 
     // Session 2: Load and add
     {
-        let mut storage = load_storage(&cypher, &path).unwrap();
-        assert_eq!(storage.data.len(), 1);
+        let mut storage = DataContainer::load(&cypher, &path).unwrap();
+        assert_eq!(storage.len(), 1);
         storage.put("session2_key".to_string(), enc("session2_value"));
-        save_storage(&cypher, &storage, &path).unwrap();
+        storage.save(&cypher, &path).unwrap();
     }
 
     // Session 3: Verify both keys exist
     {
-        let storage = load_storage(&cypher, &path).unwrap();
-        assert_eq!(storage.data.len(), 2);
-        assert!(storage.data.contains_key("session1_key"));
-        assert!(storage.data.contains_key("session2_key"));
+        let storage = DataContainer::load(&cypher, &path).unwrap();
+        assert_eq!(storage.len(), 2);
+        assert!(storage.contains_key("session1_key"));
+        assert!(storage.contains_key("session2_key"));
     }
 }
 
 #[test]
 fn test_empty_key_value() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put("".to_string(), enc("value"));
     storage.put("key".to_string(), enc(""));
 
-    assert_eq!(storage.data.len(), 2);
+    assert_eq!(storage.len(), 2);
 
-    let serialized = serialize_storage(&storage).unwrap();
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = storage.safe_serialize().unwrap();
+    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
 
-    assert_eq!(deserialized.data.len(), 2);
+    assert_eq!(deserialized.len(), 2);
     assert_eq!(
-        deserialized.data[""][0].value.as_bytes(),
+        deserialized.history("").unwrap()[0].value.as_bytes(),
         "value".as_bytes()
     );
-    assert_eq!(deserialized.data["key"][0].value.as_bytes(), "".as_bytes());
+    assert_eq!(
+        deserialized.history("key").unwrap()[0].value.as_bytes(),
+        "".as_bytes()
+    );
 }
 
 #[test]
 fn test_very_long_key_value() {
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     let long_key = "k".repeat(10000);
     let long_value = "v".repeat(50000);
 
     storage.put(long_key.clone(), enc(long_value.clone()));
 
-    let serialized = serialize_storage(&storage).unwrap();
-    let deserialized = deserialize_storage(&serialized).unwrap();
+    let serialized = storage.safe_serialize().unwrap();
+    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(
-        deserialized.data[&long_key][0].value.as_bytes(),
+        deserialized.history(&long_key).unwrap()[0].value.as_bytes(),
         long_value.as_bytes()
     );
 }
 
-// --- deserialize_storage_v4 error path tests ---
+// --- safe_deserialize (v4 parsing) error path tests ---
 
 #[test]
 fn test_deserialize_too_short_for_version() {
-    // Fewer than 2 bytes — StoreVersion::probe_data fails
-    let result = deserialize_storage(&[0x00]);
+    // Fewer than 2 bytes — DataContainerVersion::probe_data fails
+    let result = DataContainer::safe_deserialize(&[0x00]);
     assert!(result.is_err());
 }
 
@@ -477,7 +490,7 @@ fn test_deserialize_truncated_no_key_len() {
     let mut data = vec![0x00u8, 0x04]; // version 4
     data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
     // no key_len bytes follow
-    let result = deserialize_storage(&data);
+    let result = DataContainer::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -488,7 +501,7 @@ fn test_deserialize_truncated_key_overflow() {
     data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
     data.extend_from_slice(&50u16.to_be_bytes()); // key_len = 50
     data.extend_from_slice(b"abc"); // only 3 bytes of key
-    let result = deserialize_storage(&data);
+    let result = DataContainer::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -500,7 +513,7 @@ fn test_deserialize_truncated_value_len_missing() {
     data.extend_from_slice(&3u16.to_be_bytes()); // key_len = 3
     data.extend_from_slice(b"key"); // key
     data.extend_from_slice(&[0x00, 0x00]); // only 2 of 4 val_len bytes
-    let result = deserialize_storage(&data);
+    let result = DataContainer::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -513,7 +526,7 @@ fn test_deserialize_truncated_value_overflow() {
     data.push(b'k'); // key
     data.extend_from_slice(&100u32.to_be_bytes()); // val_len = 100
     // no value bytes
-    let result = deserialize_storage(&data);
+    let result = DataContainer::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -527,7 +540,7 @@ fn test_deserialize_truncated_timestamp_missing() {
     data.extend_from_slice(&1u32.to_be_bytes()); // val_len = 1
     data.push(b'v'); // value
     data.extend_from_slice(&[0x00, 0x00]); // only 2 of 4 timestamp bytes
-    let result = deserialize_storage(&data);
+    let result = DataContainer::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -535,9 +548,12 @@ fn test_deserialize_truncated_timestamp_missing() {
 fn test_deserialize_round_trip_via_builder() {
     // Verify the build_v4_entry helper produces parseable data
     let data = build_v4_entry(b"hello", b"world");
-    let storage = deserialize_storage(&data).unwrap();
-    assert_eq!(storage.data.len(), 1);
-    assert_eq!(storage.data["hello"][0].value.as_bytes(), b"world");
+    let storage = DataContainer::safe_deserialize(&data).unwrap();
+    assert_eq!(storage.len(), 1);
+    assert_eq!(
+        storage.history("hello").unwrap()[0].value.as_bytes(),
+        b"world"
+    );
 }
 
 #[test]
@@ -551,6 +567,6 @@ fn test_encrypted_value_display() {
 
 #[test]
 fn test_storage_history_nonexistent() {
-    let storage = Storage::new();
+    let storage = DataContainer::new();
     assert!(storage.history("does_not_exist").is_none());
 }

@@ -1,6 +1,6 @@
 use crate::cli::utils::{format_timestamp, secure_print};
 use anyhow::Result;
-use rcypher::{Cypher, EncryptedValue, Storage};
+use rcypher::{Cypher, DataContainer, EncryptedValue};
 use std::io;
 use std::io::Write;
 use zeroize::Zeroize;
@@ -22,19 +22,15 @@ impl UpdateEntry {
 
 /// Find entries that need updating by comparing latest values from both storages
 fn find_updates(
-    main_storage: &Storage,
-    update_storage: &Storage,
+    main_storage: &DataContainer,
+    update_storage: &DataContainer,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
 ) -> Vec<UpdateEntry> {
     let mut updates = Vec::new();
 
-    for (key, update_entries) in &update_storage.data {
-        let update_latest = update_entries.last().expect("entries should not be empty");
-        let main_latest = main_storage
-            .data
-            .get(key)
-            .and_then(|entries| entries.last());
+    for (key, update_latest) in update_storage.iter_latest() {
+        let main_latest = main_storage.latest(key);
 
         let should_update = main_latest.is_none_or(|main_entry| {
             // Key exists - decrypt and compare values
@@ -53,7 +49,7 @@ fn find_updates(
 
         if should_update {
             updates.push(UpdateEntry {
-                key: key.clone(),
+                key: key.to_string(),
                 new_value: update_latest.value.clone(),
                 new_timestamp: update_latest.timestamp,
                 old_value: main_latest.map(|e| e.value.clone()),
@@ -149,10 +145,10 @@ fn display_update_summary(
 /// Apply all updates at once
 fn apply_all_updates(
     updates: Vec<UpdateEntry>,
-    main_storage: &mut Storage,
+    main_storage: &mut DataContainer,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
-    mut save: impl FnMut(&Storage) -> Result<()>,
+    mut save: impl FnMut(&DataContainer) -> Result<()>,
 ) -> Result<()> {
     for update in updates {
         let mut decrypted = update.new_value.decrypt(update_cypher)?;
@@ -169,11 +165,11 @@ fn apply_all_updates(
 /// Apply updates interactively, prompting for each one
 fn apply_updates_interactive(
     updates: Vec<UpdateEntry>,
-    main_storage: &mut Storage,
+    main_storage: &mut DataContainer,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
     insecure_stdout: bool,
-    mut save: impl FnMut(&Storage) -> Result<()>,
+    mut save: impl FnMut(&DataContainer) -> Result<()>,
 ) -> Result<()> {
     let mut applied = 0;
     let mut skipped = 0;
@@ -242,10 +238,10 @@ fn prompt_merge_mode() -> Result<String> {
 pub fn run_update_with(
     main_cypher: &Cypher,
     update_cypher: &Cypher,
-    main_storage: &mut Storage,
-    update_storage: &Storage,
+    main_storage: &mut DataContainer,
+    update_storage: &DataContainer,
     insecure_stdout: bool,
-    save: impl FnMut(&Storage) -> Result<()>,
+    save: impl FnMut(&DataContainer) -> Result<()>,
 ) -> Result<()> {
     // Find what needs updating
     let updates = find_updates(main_storage, update_storage, main_cypher, update_cypher);
@@ -287,7 +283,7 @@ pub fn run_update_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcypher::{CypherVersion, EncryptionKey, Storage};
+    use rcypher::{CypherVersion, DataContainer, EncryptionKey};
 
     fn create_test_cypher() -> Cypher {
         let key = EncryptionKey::from_password(CypherVersion::default(), "test_password")
@@ -324,8 +320,8 @@ mod tests {
     #[test]
     fn test_find_updates_new_keys() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = DataContainer::new();
+        let mut update_storage = DataContainer::new();
 
         // Main has key1, update has key1 and key2
         main_storage.put(
@@ -351,8 +347,8 @@ mod tests {
     #[test]
     fn test_find_updates_conflicts() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = DataContainer::new();
+        let mut update_storage = DataContainer::new();
 
         // Both have key1 but with different values
         main_storage.put_ts(
@@ -376,8 +372,8 @@ mod tests {
     #[test]
     fn test_find_updates_no_changes() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = DataContainer::new();
+        let mut update_storage = DataContainer::new();
 
         // Both have same key with same value
         main_storage.put(
@@ -397,8 +393,8 @@ mod tests {
     #[test]
     fn test_find_updates_ignores_older_timestamp() {
         let cypher = create_test_cypher();
-        let mut main_storage = Storage::new();
-        let mut update_storage = Storage::new();
+        let mut main_storage = DataContainer::new();
+        let mut update_storage = DataContainer::new();
 
         // Update has older value
         update_storage.put_ts(

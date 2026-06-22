@@ -7,8 +7,7 @@ use crate::cli::utils::{
 };
 use anyhow::{Result, anyhow, bail};
 use rcypher::{
-    Argon2Params, Cypher, EncryptedValue, FactorKind, PolicyVault, Storage, check_factor_password,
-    is_debugger_attached,
+    Argon2Params, EncryptedValue, FactorKind, check_factor_password, is_debugger_attached,
 };
 use rustyline::CompletionType;
 use rustyline::Config;
@@ -23,19 +22,14 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    /// The unlocked store's auth keyslots and access policy. Every store carries
-    /// one in memory (legacy files are converted on open).
-    vault: PolicyVault,
-    /// A `Cypher` keyed by the vault's (stable) DEK, for per-value crypto.
-    cypher: Cypher,
-    /// True while the store was opened from a legacy file and hasn't yet been
-    /// rewritten in the current format; the first save backs up the original.
-    pending_legacy_backup: bool,
+    /// The opened store — the auth keyslots/policy (`PolicyVault`) plus the
+    /// decrypted key-value data — behind one lock shared with the Tab completer,
+    /// which reads keys and factor names from it live. Its `from_legacy` flag is
+    /// the "backup still owed" bit, cleared once the first save rewrites the file
+    /// in the current format.
+    store: Arc<Mutex<crate::Store>>,
     argon2_params: Argon2Params,
     filename: PathBuf,
-    /// Enrolled factor ids, shared with the completer so Tab completion of
-    /// `auth factor remove` / `auth policy set` reflects add/remove.
-    factors: Arc<Mutex<Vec<String>>>,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
 }
@@ -44,49 +38,32 @@ impl InteractiveCli {
     pub fn new(
         prompt: String,
         insecure_stdout: bool,
-        vault: PolicyVault,
-        from_legacy: bool,
+        store: crate::Store,
         argon2_params: Argon2Params,
         filename: PathBuf,
         clock: crate::SecurityClock,
     ) -> Self {
-        let factors = vault.factor_ids();
-        let cypher = vault.cypher();
         Self {
             prompt,
             insecure_stdout,
-            vault,
-            cypher,
-            pending_legacy_backup: from_legacy,
+            store: Arc::new(Mutex::new(store)),
             argon2_params,
             filename,
-            factors: Arc::new(Mutex::new(factors)),
             last_activity: clock.last_activity,
             last_security_check: clock.last_security_check,
         }
     }
 
-    /// Re-reads the enrolled factor ids into the shared completion list, so Tab
-    /// completion stays in sync after `auth factor add` / `remove`.
-    fn refresh_completion_factors(&self) {
-        *self.factors.lock().expect("able to lock factors") = self.vault.factor_ids();
-    }
-
     /// Writes the store, backing up the original legacy file on the first save.
-    fn save(&mut self, storage: &Storage) -> Result<()> {
-        persist_store(
-            &self.vault,
-            storage,
-            &self.filename,
-            self.pending_legacy_backup,
-        )?;
-        self.pending_legacy_backup = false;
+    /// The store's `from_legacy` flag is the "backup still owed" bit; it is
+    /// cleared once the file has been rewritten in the current format.
+    fn save(&self, store: &mut crate::Store) -> Result<()> {
+        persist_store(&store.vault, &store.data, &self.filename, store.from_legacy)?;
+        store.from_legacy = false;
         Ok(())
     }
 
-    pub fn run(mut self, storage: Storage) -> Result<()> {
-        let storage = Arc::new(Mutex::new(storage));
-
+    pub fn run(self) -> Result<()> {
         let config = Config::builder()
             .completion_type(CompletionType::List)
             .auto_add_history(true)
@@ -95,7 +72,9 @@ impl InteractiveCli {
             .max_history_size(5)?
             .build();
 
-        let completer = CypherCompleter::new(storage.clone(), self.factors.clone());
+        // The completer shares the same locked store, so Tab completion reads the
+        // current keys and factor names directly.
+        let completer = CypherCompleter::new(Arc::clone(&self.store));
         let mut rl = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
 
@@ -130,8 +109,7 @@ impl InteractiveCli {
 
                     rl.clear_screen()?;
 
-                    let mut storage_guard = storage.lock().expect("able to lock");
-                    if let Err(err) = self.process_cmd(line, &mut storage_guard) {
+                    if let Err(err) = self.process_cmd(line) {
                         println!("{err}");
                     } else {
                         self.last_activity
@@ -156,45 +134,46 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn process_cmd(&mut self, line: &str, storage: &mut Storage) -> Result<()> {
+    fn process_cmd(&self, line: &str) -> Result<()> {
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
         let cmd = parts[0];
+        let mut store = self.store.lock().expect("able to lock store");
         match cmd {
             "put" => {
                 if parts.len() < 3 {
                     bail!("syntax: put KEY VAL");
                 }
-                self.cmd_put(parts[1], parts[2], storage)
+                self.cmd_put(parts[1], parts[2], &mut store)
             }
             "get" => {
                 if parts.len() < 2 {
                     bail!("syntax: get REGEXP");
                 }
-                self.cmd_get(parts[1], storage)
+                self.cmd_get(parts[1], &store)
             }
             "copy" => {
                 if parts.len() < 2 {
                     bail!("syntax: copy KEY");
                 }
-                self.cmd_copy(parts[1], storage)
+                self.cmd_copy(parts[1], &store)
             }
             "history" => {
                 if parts.len() < 2 {
                     bail!("syntax: history KEY");
                 }
-                self.cmd_history(parts[1], storage)
+                self.cmd_history(parts[1], &store)
             }
             "search" => {
                 let pattern = if parts.len() > 1 { parts[1] } else { "" };
-                self.cmd_search(pattern, storage)
+                self.cmd_search(pattern, &store)
             }
             "del" | "rm" => {
                 if parts.len() < 2 {
                     bail!("syntax: del KEY");
                 }
-                self.cmd_delete(parts[1], storage)
+                self.cmd_delete(parts[1], &mut store)
             }
-            "auth" => self.cmd_auth(line, storage),
+            "auth" => self.cmd_auth(line, &mut store),
             "help" => {
                 print_help();
                 Ok(())
@@ -205,23 +184,24 @@ impl InteractiveCli {
         }
     }
 
-    fn cmd_put(&mut self, key: &str, value: &str, storage: &mut Storage) -> Result<()> {
-        let encrypted_value = EncryptedValue::encrypt(&self.cypher, value)?;
-        storage.put(key.to_string(), encrypted_value);
+    fn cmd_put(&self, key: &str, value: &str, store: &mut crate::Store) -> Result<()> {
+        let encrypted_value = EncryptedValue::encrypt(&store.vault.cypher(), value)?;
+        store.data.put(key.to_string(), encrypted_value);
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
-        self.save(storage)?;
+        self.save(store)?;
         Ok(())
     }
 
-    fn cmd_get(&self, pattern: &str, storage: &Storage) -> Result<()> {
-        match storage.get(pattern) {
+    fn cmd_get(&self, pattern: &str, store: &crate::Store) -> Result<()> {
+        let cypher = store.vault.cypher();
+        match store.data.get(pattern) {
             Ok(results) => {
                 let mut found = false;
                 for (key, val) in results {
                     found = true;
-                    let mut secret = val.decrypt(&self.cypher)?;
+                    let mut secret = val.decrypt(&cypher)?;
                     let output = format!("{}: {}", key, &*secret);
                     secret.zeroize();
                     secure_print(output, self.insecure_stdout)?;
@@ -235,8 +215,8 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_copy(&self, key: &str, storage: &Storage) -> Result<()> {
-        match storage.get(key) {
+    fn cmd_copy(&self, key: &str, store: &crate::Store) -> Result<()> {
+        match store.data.get(key) {
             Ok(mut results) => {
                 let first = results.next();
                 let second = results.next();
@@ -254,7 +234,7 @@ impl InteractiveCli {
                     }
                     (Some((_, val)), None) => {
                         // Exactly one result - copy to clipboard
-                        let mut secret = val.decrypt(&self.cypher)?;
+                        let mut secret = val.decrypt(&store.vault.cypher())?;
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
@@ -268,10 +248,11 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_history(&self, key: &str, storage: &Storage) -> Result<()> {
-        if let Some(entries) = storage.history(key) {
+    fn cmd_history(&self, key: &str, store: &crate::Store) -> Result<()> {
+        let cypher = store.vault.cypher();
+        if let Some(entries) = store.data.history(key) {
             for entry in entries {
-                let mut secret = entry.value.decrypt(&self.cypher)?;
+                let mut secret = entry.value.decrypt(&cypher)?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
                 secure_print(output, self.insecure_stdout)?;
@@ -282,8 +263,8 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_search(&self, pattern: &str, storage: &Storage) -> Result<()> {
-        match storage.search(pattern) {
+    fn cmd_search(&self, pattern: &str, store: &crate::Store) -> Result<()> {
+        match store.data.search(pattern) {
             Ok(keys) => {
                 for key in keys {
                     secure_print(key.to_string(), self.insecure_stdout)?;
@@ -294,10 +275,10 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn cmd_delete(&mut self, key: &str, storage: &mut Storage) -> Result<()> {
-        if storage.delete(key) {
+    fn cmd_delete(&self, key: &str, store: &mut crate::Store) -> Result<()> {
+        if store.data.delete(key) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
-            self.save(storage)?;
+            self.save(store)?;
         } else {
             bail!("No such key '{key}' found");
         }
@@ -307,12 +288,12 @@ impl InteractiveCli {
     /// `auth …` — multi-factor management. Subcommands: `auth policy {show|set
     /// EXPR}` and `auth factor {list|add password NAME|add yubikey NAME|remove
     /// NAME}`.
-    fn cmd_auth(&mut self, line: &str, storage: &Storage) -> Result<()> {
+    fn cmd_auth(&self, line: &str, store: &mut crate::Store) -> Result<()> {
         let args = line.strip_prefix("auth").unwrap_or("").trim_start();
         let (sub, rest) = split_first_word(args);
         match sub {
-            "policy" => self.cmd_auth_policy(rest, storage),
-            "factor" => self.cmd_auth_factor(rest, storage),
+            "policy" => self.cmd_auth_policy(rest, store),
+            "factor" => self.cmd_auth_factor(rest, store),
             "" => {
                 print_auth_help();
                 Ok(())
@@ -321,32 +302,32 @@ impl InteractiveCli {
         }
     }
 
-    fn cmd_auth_policy(&mut self, args: &str, storage: &Storage) -> Result<()> {
+    fn cmd_auth_policy(&self, args: &str, store: &mut crate::Store) -> Result<()> {
         let (verb, rest) = split_first_word(args);
         match verb {
             "" | "show" => {
-                let expr = self.vault.policy_expr();
+                let expr = store.vault.policy_expr();
                 secure_print(expr, self.insecure_stdout)
             }
             "set" => {
                 if rest.is_empty() {
                     bail!("syntax: auth policy set EXPR");
                 }
-                self.set_policy(rest, storage)
+                self.set_policy(rest, store)
             }
             other => bail!("unknown 'auth policy' subcommand '{other}' (try: show | set EXPR)"),
         }
     }
 
-    fn cmd_auth_factor(&mut self, args: &str, storage: &Storage) -> Result<()> {
+    fn cmd_auth_factor(&self, args: &str, store: &mut crate::Store) -> Result<()> {
         let (verb, rest) = split_first_word(args);
         match verb {
-            "list" => self.list_factors(),
-            "add" => self.cmd_auth_factor_add(rest, storage),
+            "list" => self.list_factors(store),
+            "add" => self.cmd_auth_factor_add(rest, store),
             "remove" => {
                 let id =
                     first_word(rest).ok_or_else(|| anyhow!("syntax: auth factor remove NAME"))?;
-                self.remove_factor(id, storage)
+                self.remove_factor(id, store)
             }
             "" => bail!("syntax: auth factor list|add|remove …"),
             other => {
@@ -355,14 +336,14 @@ impl InteractiveCli {
         }
     }
 
-    fn cmd_auth_factor_add(&mut self, args: &str, storage: &Storage) -> Result<()> {
+    fn cmd_auth_factor_add(&self, args: &str, store: &mut crate::Store) -> Result<()> {
         let (kind, rest) = split_first_word(args);
         match kind {
             "password" => {
                 let id = first_word(rest).ok_or_else(|| {
                     anyhow!("syntax: auth factor add password NAME (NAME is a label)")
                 })?;
-                self.enroll_password(id, storage)
+                self.enroll_password(id, store)
             }
             "yubikey" => bail!("YubiKey enrollment is not yet supported"),
             _ => bail!("syntax: auth factor add password|yubikey NAME"),
@@ -370,8 +351,8 @@ impl InteractiveCli {
     }
 
     /// Lists the enrolled factors and their kinds.
-    fn list_factors(&self) -> Result<()> {
-        for factor in self.vault.metadata().factors {
+    fn list_factors(&self, store: &crate::Store) -> Result<()> {
+        for factor in store.vault.metadata().factors {
             let kind = match factor.kind {
                 FactorKind::Password { .. } => "password",
                 FactorKind::Yubikey { .. } => "yubikey",
@@ -384,7 +365,7 @@ impl InteractiveCli {
     /// Adds a new password factor. `id` is a public label, not the password; the
     /// password is prompted separately. The factor is unused by the policy until
     /// an `auth policy set` references it.
-    fn enroll_password(&mut self, id: &str, storage: &Storage) -> Result<()> {
+    fn enroll_password(&self, id: &str, store: &mut crate::Store) -> Result<()> {
         // Make the role of NAME explicit: it is a public label, not the secret.
         // Catches the mix-up of typing a password where the factor name belongs.
         secure_print(
@@ -406,11 +387,10 @@ impl InteractiveCli {
         }
 
         let params = self.argon2_params;
-        self.vault.enroll_password(id, &password, &params)?;
+        store.vault.enroll_password(id, &password, &params)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
-        self.save(storage)?;
-        self.refresh_completion_factors();
+        self.save(store)?;
         secure_print(
             format!(
                 "Factor '{id}' enrolled. It is not yet used by the policy — run \
@@ -421,25 +401,18 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn set_policy(&mut self, expr: &str, storage: &Storage) -> Result<()> {
-        let new_expr = {
-            let vault = &mut self.vault;
-            vault.set_policy(expr)?;
-            vault.policy_expr()
-        };
-        self.save(storage)?;
+    fn set_policy(&self, expr: &str, store: &mut crate::Store) -> Result<()> {
+        store.vault.set_policy(expr)?;
+        let new_expr = store.vault.policy_expr();
+        self.save(store)?;
         secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
         Ok(())
     }
 
     /// Drops a factor (must not be referenced by the policy).
-    fn remove_factor(&mut self, id: &str, storage: &Storage) -> Result<()> {
-        {
-            let vault = &mut self.vault;
-            vault.remove_factor(id)?;
-        }
-        self.save(storage)?;
-        self.refresh_completion_factors();
+    fn remove_factor(&self, id: &str, store: &mut crate::Store) -> Result<()> {
+        store.vault.remove_factor(id)?;
+        self.save(store)?;
         secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
     }
 }

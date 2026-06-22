@@ -6,7 +6,7 @@ pub mod utils;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rcypher::{PolicyVault, Storage, serialize_storage};
+use rcypher::{DataContainer, PolicyVault};
 
 pub const STANDBY_TIMEOUT: u64 = 300;
 pub const SECURITY_WATCHDOG_TIMEOUT_SECS: u64 = 2; // 2× the 1-second timer interval
@@ -26,12 +26,12 @@ pub fn backup_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Writes `storage` to `path` in the current store format. When `backup_first`
-/// (the legacy-upgrade case), the original file is first copied to `<path>.bak`
-/// and the user is told.
+/// Writes the store's `data` to `path` in the current store format. When
+/// `backup_first` (the legacy-upgrade case), the original file is first copied to
+/// `<path>.bak` and the user is told.
 pub fn persist_store(
     vault: &PolicyVault,
-    storage: &Storage,
+    data: &DataContainer,
     path: &Path,
     backup_first: bool,
 ) -> Result<()> {
@@ -44,6 +44,6 @@ pub fn persist_store(
             bak.display()
         );
     }
-    let payload = serialize_storage(storage)?;
+    let payload = data.safe_serialize()?;
     vault.save(&payload, path)
 }

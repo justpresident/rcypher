@@ -7,18 +7,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{BLOCK_SIZE, BlockBytes, SaltBytes};
 
-/// Version tag for the bundled key-value storage payload (the `storage` feature).
+/// Version tag for the serialized [`DataContainer`](crate::DataContainer) payload
+/// (the `storage` feature) — the leading two bytes of the decrypted bytes.
 /// Distinct from [`CypherVersion`], which versions the encryption envelope.
 #[cfg(feature = "storage")]
 #[derive(Debug, TryFromPrimitive)]
 #[repr(u16)]
-pub enum StoreVersion {
+pub enum DataContainerVersion {
     Version4 = 4u16,
 }
 
 #[cfg(feature = "storage")]
-impl StoreVersion {
-    /// Probes data to determine its storage-format version
+impl DataContainerVersion {
+    /// Probes the leading two bytes to determine the data-container version.
     pub fn probe_data(data: &[u8]) -> Result<Self> {
         if data.len() < 2 {
             bail!("Data too short to determine version");
@@ -34,7 +35,7 @@ impl StoreVersion {
 ///
 /// The single source of truth for "what kind of store file is this". Distinct
 /// from [`CypherVersion`] (the AEAD envelope used *inside* a container) and
-/// [`StoreVersion`] (the serialized key-value payload).
+/// [`DataContainerVersion`] (the serialized key-value payload).
 #[derive(Clone, Copy, Debug, TryFromPrimitive, Default, PartialEq, Eq)]
 #[repr(u16)]
 pub enum ContainerFormat {

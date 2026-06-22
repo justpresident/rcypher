@@ -24,10 +24,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-use rcypher::{
-    Argon2Params, Cypher, CypherVersion, EncryptionKey, Storage, deserialize_storage, load_storage,
-    serialize_storage,
-};
+use rcypher::{Argon2Params, Cypher, CypherVersion, DataContainer, EncryptionKey};
 use rcypher::{ContainerFormat, PolicyMetadata, PolicyVault, UnlockSession, parse_policy_vault};
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -139,21 +136,16 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
     Ok(())
 }
 
-fn run_interactive(
-    params: &CliParams,
-    container: StoreContainer,
-    clock: SecurityClock,
-) -> Result<()> {
+fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Result<()> {
     let interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout,
-        container.vault,
-        container.from_legacy,
+        store,
         get_argon2_params(params),
         params.filename.clone(),
         clock,
     );
-    interactive_cli.run(container.storage)?;
+    interactive_cli.run()?;
     Ok(())
 }
 
@@ -215,12 +207,12 @@ fn obtain_store_password(
 }
 
 /// A store opened into memory: the auth keyslots and access policy (a
-/// [`PolicyVault`]) together with the decrypted key-value [`Storage`] they
-/// protect. `from_legacy` is true when this was converted from a legacy (v7) file
-/// and is not yet persisted in the current format.
-struct StoreContainer {
+/// [`PolicyVault`]) together with the decrypted key-value data
+/// ([`DataContainer`]) they protect. `from_legacy` is true when this was converted
+/// from a legacy (v7) file and is not yet persisted in the current format.
+struct Store {
     vault: PolicyVault,
-    storage: Storage,
+    data: DataContainer,
     from_legacy: bool,
 }
 
@@ -229,15 +221,11 @@ struct StoreContainer {
 /// converted (its password becomes the `primary` factor and values are
 /// re-encrypted under a fresh key) — the file itself is rewritten in the current
 /// format on the next save.
-fn open_existing_store(
-    params: &CliParams,
-    path: &Path,
-    argon2: &Argon2Params,
-) -> Result<StoreContainer> {
+fn open_existing_store(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Result<Store> {
     match ContainerFormat::probe_file(path)? {
         ContainerFormat::V8 => {
-            let data = std::fs::read(path)?;
-            let (meta, _payload) = parse_policy_vault(&data)?;
+            let bytes = std::fs::read(path)?;
+            let (meta, _payload) = parse_policy_vault(&bytes)?;
             eprintln!(
                 "Unlock policy for {}: {}",
                 path.display(),
@@ -245,22 +233,22 @@ fn open_existing_store(
             );
             let vault = unlock_interactively(meta, params)?;
             let payload = vault.load_payload(path)?;
-            let storage = deserialize_storage(&payload)?;
-            Ok(StoreContainer {
+            let data = DataContainer::safe_deserialize(&payload)?;
+            Ok(Store {
                 vault,
-                storage,
+                data,
                 from_legacy: false,
             })
         }
         ContainerFormat::V7 => {
-            let container = open_and_convert_legacy(params, path, argon2)?;
+            let store = open_and_convert_legacy(params, path, argon2)?;
             eprintln!(
                 "Note: '{}' is a legacy store; it will be upgraded to the current format on the \
                  next write (the original is backed up to {} first).",
                 path.display(),
                 cli::backup_path(path).display()
             );
-            Ok(container)
+            Ok(store)
         }
     }
 }
@@ -272,17 +260,17 @@ fn open_and_convert_legacy(
     params: &CliParams,
     path: &Path,
     argon2: &Argon2Params,
-) -> Result<StoreContainer> {
+) -> Result<Store> {
     let mut password = obtain_store_password(params, path, false)?;
     let spinner = Spinner::new("Unlocking store", params.quiet);
     let result = EncryptionKey::for_file_with_params(&password, path, argon2).and_then(|key| {
         let legacy = Cypher::new(key);
-        let mut storage = load_storage(&legacy, path)?;
+        let mut data = DataContainer::load(&legacy, path)?;
         let vault = PolicyVault::create(cli::DEFAULT_FACTOR_ID, &password, argon2)?;
-        storage.reencrypt(&legacy, &vault.cypher())?;
-        Ok(StoreContainer {
+        data.reencrypt(&legacy, &vault.cypher())?;
+        Ok(Store {
             vault,
-            storage,
+            data,
             from_legacy: true,
         })
     });
@@ -293,7 +281,7 @@ fn open_and_convert_legacy(
 
 /// Creates a new store with a single password factor, persisting it empty so the
 /// file exists for later unlocks.
-fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<StoreContainer> {
+fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
     // The password is held in a zeroizing buffer, wiped on drop — including the
     // early returns from the strength check below.
     let mut password = obtain_store_password(params, &params.filename, true)?;
@@ -313,17 +301,18 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<StoreContai
     let vault = vault?;
 
     // Persist an empty store so the file exists for later unlocks.
-    vault.save(&serialize_storage(&Storage::new())?, &params.filename)?;
-    Ok(StoreContainer {
+    let empty = DataContainer::new().safe_serialize()?;
+    vault.save(&empty, &params.filename)?;
+    Ok(Store {
         vault,
-        storage: Storage::new(),
+        data: DataContainer::new(),
         from_legacy: false,
     })
 }
 
 /// Acquires the store for the interactive session: opens an existing one, or
 /// creates a new store when the file does not yet exist.
-fn acquire_store(params: &CliParams, argon2: &Argon2Params) -> Result<StoreContainer> {
+fn acquire_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
     if params.filename.exists() {
         open_existing_store(params, &params.filename, argon2)
     } else {
@@ -555,24 +544,24 @@ fn main() -> Result<()> {
         let main_cypher = main.vault.cypher();
         let update_cypher = update.vault.cypher();
         let main_vault = main.vault;
-        let mut main_storage = main.storage;
+        let mut main_data = main.data;
         let path = params.filename.clone();
         let mut backup_pending = main.from_legacy;
 
         cli::update::run_update_with(
             &main_cypher,
             &update_cypher,
-            &mut main_storage,
-            &update.storage,
+            &mut main_data,
+            &update.data,
             params.insecure_stdout,
-            |storage| {
-                cli::persist_store(&main_vault, storage, &path, backup_pending)?;
+            |data| {
+                cli::persist_store(&main_vault, data, &path, backup_pending)?;
                 backup_pending = false;
                 Ok(())
             },
         )
     } else {
-        let container = acquire_store(&params, &argon2_params)?;
-        run_interactive(&params, container, clock)
+        let store = acquire_store(&params, &argon2_params)?;
+        run_interactive(&params, store, clock)
     }
 }

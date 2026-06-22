@@ -12,8 +12,8 @@ use std::process::Command;
 
 use assert_cmd::cargo;
 use rcypher::{
-    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, FactorSecret, PolicyVault,
-    Storage, save_storage, serialize_storage,
+    Argon2Params, Cypher, CypherVersion, DataContainer, EncryptedValue, EncryptionKey,
+    FactorSecret, PolicyVault,
 };
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
@@ -22,12 +22,12 @@ use zeroize::Zeroizing;
 // A passphrase zxcvbn rates as strong, so the weak-password prompt is skipped.
 const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
 
-/// Writes a version-8 single-password policy vault holding an empty store, with
-/// insecure Argon2 params so the binary's `--insecure-password` path unlocks it
-/// quickly and a newly enrolled factor derives fast.
-fn create_policy_vault(path: &Path, factor_id: &str, password: &str) {
+/// Writes a version-8 single-password store with no entries, with insecure Argon2
+/// params so the binary's `--insecure-password` path unlocks it quickly and a
+/// newly enrolled factor derives fast.
+fn create_store(path: &Path, factor_id: &str, password: &str) {
     let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
-    let payload = serialize_storage(&Storage::new()).unwrap();
+    let payload = DataContainer::new().safe_serialize().unwrap();
     vault.save(&payload, path).unwrap();
 }
 
@@ -41,12 +41,12 @@ fn create_legacy_store_with_value(path: &Path, key: &str, value: &str) {
     )
     .unwrap();
     let cypher = Cypher::new(enc_key);
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put(
         key.to_string(),
         EncryptedValue::encrypt(&cypher, value).unwrap(),
     );
-    save_storage(&cypher, &storage, path).unwrap();
+    storage.save(&cypher, path).unwrap();
 }
 
 /// Spawns the binary against `path` under a PTY. `--insecure-password` unlocks
@@ -80,7 +80,7 @@ fn unlocks_with(path: &Path, id: &str, password: &str) -> bool {
 fn enroll_password_via_pty_persists_a_working_factor() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
-    create_policy_vault(&path, "primary", "test_password");
+    create_store(&path, "primary", "test_password");
 
     let mut p = spawn_session(&path);
 
@@ -110,7 +110,7 @@ fn enroll_password_via_pty_persists_a_working_factor() {
 fn enroll_rejects_password_typed_as_factor_name() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
-    create_policy_vault(&path, "primary", "test_password");
+    create_store(&path, "primary", "test_password");
 
     let mut p = spawn_session(&path);
 
@@ -133,7 +133,7 @@ fn enroll_rejects_password_typed_as_factor_name() {
 fn enroll_trivially_weak_password_is_hard_rejected() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
-    create_policy_vault(&path, "primary", "test_password");
+    create_store(&path, "primary", "test_password");
 
     let mut p = spawn_session(&path);
 
@@ -156,7 +156,7 @@ fn enroll_trivially_weak_password_is_hard_rejected() {
 fn enroll_weak_password_warns_and_can_be_declined() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
-    create_policy_vault(&path, "primary", "test_password");
+    create_store(&path, "primary", "test_password");
 
     let mut p = spawn_session(&path);
 
@@ -182,7 +182,7 @@ fn enroll_weak_password_warns_and_can_be_declined() {
 fn enroll_weak_password_accepted_after_double_confirm() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("vault");
-    create_policy_vault(&path, "primary", "test_password");
+    create_store(&path, "primary", "test_password");
 
     let mut p = spawn_session(&path);
 
@@ -217,7 +217,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
     let path = dir.path().join("vault");
     create_legacy_store_with_value(&path, "k", "v");
 
-    // Initially a legacy version-7 store (not a version-8 policy vault).
+    // Initially a legacy version-7 store (not yet in the version-8 format).
     let head = fs::read(&path).unwrap();
     assert_eq!(&head[..2], &rcypher::ContainerFormat::V7.tag());
 
@@ -228,7 +228,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
 
     // The first write triggers the upgrade: rewrites the file as v8 and backs up
     // the original. The pre-existing value survives the re-encryption, and auth
-    // commands work because the store is a real policy vault in memory.
+    // commands work because the converted store carries a real multi-factor policy in memory.
     p.send_line("put x y").unwrap();
     p.exp_string("x stored").unwrap();
     p.send_line("auth factor list").unwrap();
@@ -239,7 +239,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
     p.send_control('d').unwrap();
     p.exp_eof().unwrap();
 
-    // On disk it is now a version-8 policy vault, unlockable with the original
+    // On disk it is now in the version-8 format, unlockable with the original
     // password (now the 'primary' factor)...
     let head = fs::read(&path).unwrap();
     assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
@@ -268,7 +268,7 @@ fn create_and_vault(path: &Path) {
         .enroll_password("p2", P2_PASSWORD, &Argon2Params::insecure())
         .unwrap();
     vault.set_policy("p1 and p2").unwrap();
-    let payload = serialize_storage(&Storage::new()).unwrap();
+    let payload = DataContainer::new().safe_serialize().unwrap();
     vault.save(&payload, path).unwrap();
 }
 

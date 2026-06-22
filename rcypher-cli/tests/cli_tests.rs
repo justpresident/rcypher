@@ -509,28 +509,28 @@ fn test_encrypt_decrypt_with_output_file() {
     assert_eq!(result, test_data);
 }
 
-// --- Multi-factor policy vault (version 8) -------------------------------
+// --- Multi-factor store (version 8) --------------------------------------
 
-/// Creates a version-8 single-password policy vault at `path`, holding an empty
+/// Creates a version-8 single-password store at `path`, holding an empty
 /// store, derived with insecure Argon2 params so the binary's `--insecure-password`
 /// path unlocks it quickly.
-fn create_policy_vault(path: &Path, factor_id: &str, password: &str) {
-    use rcypher::{Argon2Params, PolicyVault, Storage, serialize_storage};
+fn create_store(path: &Path, factor_id: &str, password: &str) {
+    use rcypher::{Argon2Params, DataContainer, PolicyVault};
 
     let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
-    let payload = serialize_storage(&Storage::new()).unwrap();
+    let payload = DataContainer::new().safe_serialize().unwrap();
     vault.save(&payload, path).unwrap();
 }
 
 #[test]
-fn test_policy_vault_put_get_roundtrip() {
+fn test_store_put_get_roundtrip() {
     let (_dir, file_path) = temp_test_file();
-    create_policy_vault(&file_path, "main", "test_password");
+    create_store(&file_path, "main", "test_password");
 
     // First run: unlock via the password factor, store two keys, save back.
     run_commands(&file_path, b"put key1 val1\nput key2 val2\n".to_vec());
 
-    // The store must still be a version-8 policy vault after a save.
+    // The store must still be in the version-8 format after a save.
     let head = fs::read(&file_path).unwrap();
     assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
 
@@ -541,9 +541,9 @@ fn test_policy_vault_put_get_roundtrip() {
 }
 
 #[test]
-fn test_policy_vault_wrong_password_fails() {
+fn test_store_wrong_password_fails() {
     let (_dir, file_path) = temp_test_file();
-    create_policy_vault(&file_path, "main", "correct_password");
+    create_store(&file_path, "main", "correct_password");
 
     let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
     let output = cmd
@@ -568,8 +568,8 @@ fn test_policy_vault_wrong_password_fails() {
 /// Creates a version-8 vault with two password factors ("main"/"backup") and an
 /// `main or backup` policy, so the `--insecure-password test_password` path
 /// unlocks it via the "main" factor.
-fn create_multifactor_vault(path: &Path) {
-    use rcypher::{Argon2Params, PolicyVault, Storage, serialize_storage};
+fn create_multifactor_store(path: &Path) {
+    use rcypher::{Argon2Params, DataContainer, PolicyVault};
 
     let mut vault =
         PolicyVault::create("main", "test_password", &Argon2Params::insecure()).unwrap();
@@ -577,14 +577,14 @@ fn create_multifactor_vault(path: &Path) {
         .enroll_password("backup", "recovery-secret-9", &Argon2Params::insecure())
         .unwrap();
     vault.set_policy("main or backup").unwrap();
-    let payload = serialize_storage(&Storage::new()).unwrap();
+    let payload = DataContainer::new().safe_serialize().unwrap();
     vault.save(&payload, path).unwrap();
 }
 
 #[test]
-fn test_policy_vault_factors_and_policy_show() {
+fn test_store_factors_and_policy_show() {
     let (_dir, file_path) = temp_test_file();
-    create_multifactor_vault(&file_path);
+    create_multifactor_store(&file_path);
 
     let lines = run_commands(&file_path, b"auth factor list\nauth policy show\n".to_vec());
     assert!(lines.iter().any(|l| l == "main (password)"), "{lines:?}");
@@ -593,9 +593,9 @@ fn test_policy_vault_factors_and_policy_show() {
 }
 
 #[test]
-fn test_policy_vault_set_policy_and_remove_factor() {
+fn test_store_set_policy_and_remove_factor() {
     let (_dir, file_path) = temp_test_file();
-    create_multifactor_vault(&file_path);
+    create_multifactor_store(&file_path);
 
     // A factor still referenced by the policy cannot be removed.
     let out = run_commands_str(&file_path, "auth factor remove backup\n");
@@ -626,7 +626,7 @@ fn test_policy_vault_set_policy_and_remove_factor() {
 /// `legacy_key -> legacy_val` entry so conversion can be checked to preserve values.
 fn create_legacy_store(path: &Path) {
     use rcypher::{
-        Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, Storage, save_storage,
+        Argon2Params, Cypher, CypherVersion, DataContainer, EncryptedValue, EncryptionKey,
     };
 
     let key = EncryptionKey::from_password_with_params(
@@ -636,18 +636,18 @@ fn create_legacy_store(path: &Path) {
     )
     .unwrap();
     let cypher = Cypher::new(key);
-    let mut storage = Storage::new();
+    let mut storage = DataContainer::new();
     storage.put(
         "legacy_key".to_string(),
         EncryptedValue::encrypt(&cypher, "legacy_val").unwrap(),
     );
-    save_storage(&cypher, &storage, path).unwrap();
+    storage.save(&cypher, path).unwrap();
 }
 
 #[test]
-fn test_new_store_is_policy_vault() {
+fn test_new_store_is_v8() {
     let (_dir, file_path) = temp_test_file();
-    // A store created through the normal flow is now a version-8 policy vault with
+    // A store created through the normal flow now uses the version-8 format with
     // a single "password" factor.
     run_commands(&file_path, b"put k v\n".to_vec());
 
@@ -659,7 +659,7 @@ fn test_new_store_is_policy_vault() {
 }
 
 #[test]
-fn test_legacy_store_auto_converts_to_policy_vault() {
+fn test_legacy_store_auto_converts() {
     let (_dir, file_path) = temp_test_file();
     create_legacy_store(&file_path);
 
@@ -687,7 +687,7 @@ fn test_legacy_store_auto_converts_to_policy_vault() {
     assert_eq!(
         &fs::read(&file_path).unwrap()[..2],
         &rcypher::ContainerFormat::V8.tag(),
-        "the upgraded file must be a v8 policy vault"
+        "the upgraded file must be in the v8 format"
     );
 
     // The pre-existing value survived the conversion, and the new value is stored.
@@ -695,7 +695,7 @@ fn test_legacy_store_auto_converts_to_policy_vault() {
     assert!(got.contains("legacy_key: legacy_val"), "{got}");
     assert!(got.contains("k: v"), "{got}");
 
-    // The converted store is a real policy vault: the unlock password became the
+    // The converted store is a real multi-factor store: the unlock password became the
     // 'primary' factor, so auth commands now work.
     let factors = run_commands_str(&file_path, "auth factor list\n");
     assert!(factors.contains("primary (password)"), "{factors}");

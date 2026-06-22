@@ -1,6 +1,5 @@
 use std::sync::{Arc, Mutex};
 
-use rcypher::Storage;
 use rustyline::Helper;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
@@ -39,21 +38,26 @@ fn matching(options: &[&str], prefix: &str) -> Vec<String> {
         .collect()
 }
 
-fn matching_sorted(options: &[String], prefix: &str) -> Vec<String> {
+fn matching_sorted<'a>(options: impl Iterator<Item = &'a str>, prefix: &str) -> Vec<String> {
     let mut matches: Vec<String> = options
-        .iter()
         .filter(|opt| opt.starts_with(prefix))
-        .cloned()
+        .map(String::from)
         .collect();
     matches.sort();
     matches
 }
 
-/// Pure completion logic: given the input up to the cursor, the known store
-/// keys, and the enrolled factor ids, returns the replacement start position and
-/// the candidate strings. Kept free of rustyline's `Context` (which the completer
-/// ignores) so it is unit testable.
-fn candidates(line: &str, pos: usize, keys: &[String], factors: &[String]) -> (usize, Vec<String>) {
+/// Pure completion logic: given the input up to the cursor, the store keys (as a
+/// lazy iterator, so only the matching ones are copied), and the enrolled factor
+/// ids, returns the replacement start position and the candidate strings. Kept
+/// free of rustyline's `Context` (which the completer ignores) so it is unit
+/// testable.
+fn candidates<'a>(
+    line: &str,
+    pos: usize,
+    keys: impl Iterator<Item = &'a str>,
+    factors: &[String],
+) -> (usize, Vec<String>) {
     let line = &line[..pos];
     let words: Vec<&str> = line.split_whitespace().collect();
     let ends_with_space = line.ends_with(' ');
@@ -79,7 +83,7 @@ fn candidates(line: &str, pos: usize, keys: &[String], factors: &[String]) -> (u
         && idx >= 3
     {
         let ident = trailing_ident(line);
-        let mut matches = matching_sorted(factors, ident);
+        let mut matches = matching_sorted(factors.iter().map(String::as_str), ident);
         matches.extend(matching(OPERATORS, ident));
         return (pos - ident.len(), matches);
     }
@@ -90,9 +94,10 @@ fn candidates(line: &str, pos: usize, keys: &[String], factors: &[String]) -> (u
             (2, Some("policy"), _) => fixed(&["show", "set"]),
             (2, Some("factor"), _) => fixed(&["list", "add", "remove"]),
             (3, Some("factor"), Some("add")) => fixed(&["password", "yubikey"]),
-            (3, Some("factor"), Some("remove")) => {
-                (pos - prefix.len(), matching_sorted(factors, prefix))
-            }
+            (3, Some("factor"), Some("remove")) => (
+                pos - prefix.len(),
+                matching_sorted(factors.iter().map(String::as_str), prefix),
+            ),
             _ => (pos, vec![]),
         },
         Some(cmd) if KEY_COMMANDS.contains(&cmd) && idx == 1 => {
@@ -103,15 +108,15 @@ fn candidates(line: &str, pos: usize, keys: &[String], factors: &[String]) -> (u
 }
 
 pub struct CypherCompleter {
-    storage: Arc<Mutex<Storage>>,
-    /// The currently enrolled factor ids, shared with the interactive session so
-    /// `auth factor add`/`remove` keep completion in sync.
-    factors: Arc<Mutex<Vec<String>>>,
+    /// The same locked store the session holds; the completer reads the current
+    /// keys (from the store) and factor names (from the vault) live, so add/remove
+    /// is reflected without any separate bookkeeping.
+    store: Arc<Mutex<crate::Store>>,
 }
 
 impl CypherCompleter {
-    pub const fn new(storage: Arc<Mutex<Storage>>, factors: Arc<Mutex<Vec<String>>>) -> Self {
-        Self { storage, factors }
+    pub const fn new(store: Arc<Mutex<crate::Store>>) -> Self {
+        Self { store }
     }
 }
 
@@ -124,13 +129,14 @@ impl Completer for CypherCompleter {
         pos: usize,
         _ctx: &rustyline::Context<'_>,
     ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let keys: Vec<String> = {
-            let storage = self.storage.lock().expect("able to take a lock");
-            storage.data.keys().cloned().collect()
+        // Hold the store lock just long enough to find the candidates, matching
+        // against the live keys and factor names — only the matches are copied,
+        // not the whole keyset.
+        let (start, cands) = {
+            let store = self.store.lock().expect("able to take a lock");
+            let factors = store.vault.factor_ids();
+            candidates(line, pos, store.data.keys(), &factors)
         };
-        let factors = self.factors.lock().expect("able to take a lock").clone();
-
-        let (start, cands) = candidates(line, pos, &keys, &factors);
         let pairs = cands
             .into_iter()
             .map(|c| Pair {
@@ -161,7 +167,7 @@ mod tests {
     fn complete(line: &str) -> Vec<String> {
         let keys = ["alpha".to_string(), "beta".to_string()];
         let factors = ["primary".to_string(), "backup".to_string()];
-        candidates(line, line.len(), &keys, &factors).1
+        candidates(line, line.len(), keys.iter().map(String::as_str), &factors).1
     }
 
     #[test]
