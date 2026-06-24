@@ -2,36 +2,33 @@
 //! vault, and the unlock / management operations over it.
 //!
 //! A random data-encryption key (DEK) encrypts the payload and is secret-shared
-//! down the policy tree; each leaf's share is wrapped under its factor's auth-key.
-//! Each factor also stores its auth-key wrapped under the DEK, so a holder of the
+//! down the policy tree; each leaf's share is wrapped under its factor's auth-KEK.
+//! Each factor also stores its auth-KEK wrapped under the DEK, so a holder of the
 //! unlocked DEK can re-distribute the policy without re-presenting every factor.
 
 use std::collections::{HashMap, HashSet};
-use std::fs;
-use std::io::Write;
-use std::path::Path;
 
 use anyhow::{Result, anyhow, bail};
-use tempfile::NamedTempFile;
 use zeroize::Zeroizing;
 
-use super::factor::{new_password_kind, password_kek};
-use super::format::{
-    Factor, FactorKind, PolicyMetadata, parse_policy_vault, serialize_policy_header,
+use super::factor::{Factor, FactorKind, new_password_kind, password_kek};
+use super::header::VaultHeader;
+use super::policy::{
+    Leaf, PolicyNode, Share, distribute, parse_policy, reconstruct, render_policy, validate_factors,
 };
-use super::keyslot::{self, KeyMaterial};
-use super::parser::{parse_policy, render_policy, validate_factors};
-use super::policy::{Leaf, PolicyNode, Share, distribute, reconstruct};
 use crate::constants::{KEY_MATERIAL_LEN, KeyMaterialBytes};
-use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
+use crate::crypto::{
+    Argon2Params, Cypher, EncryptionKey, KeyMaterial, cypher_from_material, generate_key_material,
+};
+use crate::version::CypherVersion;
 
 /// A user-supplied secret for one factor, presented at unlock or enroll time.
 /// The password is held in a zeroizing buffer so it is wiped when the secret is
 /// dropped.
 pub enum FactorSecret {
     Password(Zeroizing<String>),
-    // A YubiKey secret is obtained by interacting with the device; added by the
-    // FIDO2 task.
+    // A YubiKey secret is obtained by interacting with the device (not yet
+    // implemented).
 }
 
 /// An unlocked policy vault: the enrolled factors, the access policy (leaves
@@ -48,14 +45,15 @@ impl PolicyVault {
     /// [`PolicyVault::enroll_password`] and [`PolicyVault::set_policy`].
     pub fn create(id: &str, password: &str, params: &Argon2Params) -> Result<Self> {
         check_factor_password(id, password)?;
-        let dek = keyslot::generate_dek()?;
+        let dek = generate_key_material()?;
 
         let kind = new_password_kind(params)?;
         let authkek = password_kek(password, &kind)?;
         let factor = Factor {
             id: id.to_string(),
             kind,
-            authkek_under_dek: keyslot::wrap_share(&dek, authkek.as_slice())?,
+            authkek_under_dek: cypher_from_material(&dek, CypherVersion::default())
+                .encrypt_with_aad(authkek.as_slice(), &[])?,
         };
 
         let template = PolicyNode::Leaf(Leaf {
@@ -74,24 +72,24 @@ impl PolicyVault {
 
     /// Opens a vault by satisfying its policy with the provided factor secrets.
     /// Returns an error if the provided factors do not satisfy the unlock policy.
-    pub fn unlock(meta: PolicyMetadata, secrets: &HashMap<String, FactorSecret>) -> Result<Self> {
+    pub fn unlock(header: VaultHeader, secrets: &HashMap<String, FactorSecret>) -> Result<Self> {
         let mut authkeks = HashMap::new();
-        for factor in &meta.factors {
+        for factor in &header.factors {
             if let Some(secret) = secrets.get(&factor.id) {
                 authkeks.insert(factor.id.clone(), derive_authkek(&factor.kind, secret)?);
             }
         }
 
         let mut provided = Vec::new();
-        unwrap_leaves(&meta.policy, &authkeks, &mut provided);
+        unwrap_leaves(&header.policy, &authkeks, &mut provided);
 
-        let dek_bytes = reconstruct(&meta.policy, &provided)
+        let dek_bytes = reconstruct(&header.policy, &provided)
             .ok_or_else(|| anyhow!("the provided factors do not satisfy the unlock policy"))?;
         let dek = to_key_material(&dek_bytes)?;
 
         Ok(Self {
-            factors: meta.factors,
-            policy: meta.policy,
+            factors: header.factors,
+            policy: header.policy,
             dek,
         })
     }
@@ -119,14 +117,15 @@ impl PolicyVault {
         self.factors.push(Factor {
             id: id.to_string(),
             kind,
-            authkek_under_dek: keyslot::wrap_share(&self.dek, authkek.as_slice())?,
+            authkek_under_dek: cypher_from_material(&self.dek, CypherVersion::default())
+                .encrypt_with_aad(authkek.as_slice(), &[])?,
         });
         Ok(())
     }
 
     /// The id of an enrolled password factor whose password equals `password`, if
-    /// any — re-derives each factor's auth-key from `password` (with that factor's
-    /// salt) and compares it to the factor's actual auth-key recovered from the
+    /// any — re-derives each factor's auth-KEK from `password` (with that factor's
+    /// salt) and compares it to the factor's actual auth-KEK recovered from the
     /// DEK. Lets enrollment refuse a password already used by another factor.
     fn factor_matching_password(&self, password: &str) -> Result<Option<String>> {
         for factor in &self.factors {
@@ -134,7 +133,9 @@ impl PolicyVault {
                 continue;
             }
             let candidate = password_kek(password, &factor.kind)?;
-            let Some(actual) = keyslot::unwrap_share(&self.dek, &factor.authkek_under_dek) else {
+            let Ok(actual) = cypher_from_material(&self.dek, CypherVersion::default())
+                .decrypt_with_aad(&factor.authkek_under_dek, &[])
+            else {
                 continue;
             };
             if candidate.as_slice() == actual.as_slice() {
@@ -164,7 +165,7 @@ impl PolicyVault {
 
     /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and yk)`),
     /// re-distributing the DEK across the new tree. Recovers every factor's
-    /// wrapping key from the DEK, so only an unlocked vault is required.
+    /// auth-KEK from the DEK, so only an unlocked vault is required.
     pub fn set_policy(&mut self, expr: &str) -> Result<()> {
         let template = parse_policy(expr)?;
         let known: HashSet<String> = self.factors.iter().map(|f| f.id.clone()).collect();
@@ -186,77 +187,60 @@ impl PolicyVault {
         self.factors.iter().map(|f| f.id.clone()).collect()
     }
 
-    /// The keyslot metadata to write ahead of the encrypted payload.
+    /// The vault header (factors + policy) — the locked, serializable projection
+    /// of this vault, written ahead of the encrypted payload.
     #[must_use]
-    pub fn metadata(&self) -> PolicyMetadata {
-        PolicyMetadata {
+    pub fn header(&self) -> VaultHeader {
+        VaultHeader {
             factors: self.factors.clone(),
             policy: self.policy.clone(),
         }
     }
 
-    /// Encrypts the vault payload under the DEK.
-    pub fn encrypt_payload(&self, plaintext: &[u8]) -> Result<Vec<u8>> {
-        keyslot::encrypt_payload(&self.dek, plaintext)
+    /// Encrypts the vault payload under the DEK with the envelope `version`,
+    /// binding `aad` (the serialized keyslot header, or `&[]`) into the
+    /// authentication tag. The container layer resolves `version` from the file
+    /// format and passes the header here so the policy/factor table is bound to
+    /// the ciphertext — see [`FileContainerV8`](crate::container::FileContainerV8).
+    pub fn encrypt_payload(
+        &self,
+        plaintext: &[u8],
+        aad: &[u8],
+        version: CypherVersion,
+    ) -> Result<Vec<u8>> {
+        cypher_from_material(&self.dek, version).encrypt_with_aad(plaintext, aad)
     }
 
-    /// Decrypts the vault payload under the DEK.
-    pub fn decrypt_payload(&self, ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        keyslot::decrypt_payload(&self.dek, ciphertext)
+    /// Decrypts the vault payload under the DEK with the envelope `version`,
+    /// requiring `aad` to match the associated data bound at encryption — so a
+    /// tampered or downgraded keyslot header fails here rather than yielding the
+    /// payload.
+    pub fn decrypt_payload(
+        &self,
+        ciphertext: &[u8],
+        aad: &[u8],
+        version: CypherVersion,
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        cypher_from_material(&self.dek, version).decrypt_with_aad(ciphertext, aad)
     }
 
     /// A `Cypher` keyed by the DEK, for encrypting/decrypting individual stored
     /// values — the role the password-derived key played in a plain vault.
     #[must_use]
     pub fn cypher(&self) -> Cypher {
-        Cypher::new(EncryptionKey::from_key_material(&self.dek))
+        Cypher::new(EncryptionKey::from_key_material(
+            &self.dek,
+            CypherVersion::default(),
+        ))
     }
 
-    /// Reads a policy-vault file, satisfies its policy with `secrets`, and returns
-    /// the unlocked vault together with the decrypted payload.
-    pub fn open(
-        path: &Path,
-        secrets: &HashMap<String, FactorSecret>,
-    ) -> Result<(Self, Zeroizing<Vec<u8>>)> {
-        let data = fs::read(path)?;
-        let (meta, payload) = parse_policy_vault(&data)?;
-        let payload = payload.to_vec();
-        let vault = Self::unlock(meta, secrets)?;
-        let plaintext = vault.decrypt_payload(&payload)?;
-        Ok((vault, plaintext))
-    }
-
-    /// Reads `path` and decrypts its payload with this (already unlocked) vault's
-    /// DEK — no secrets needed. The on-disk keyslot metadata is ignored; the held
-    /// DEK is the source of truth (the DEK never changes across saves).
-    pub fn load_payload(&self, path: &Path) -> Result<Zeroizing<Vec<u8>>> {
-        let data = fs::read(path)?;
-        let (_meta, payload) = parse_policy_vault(&data)?;
-        self.decrypt_payload(payload)
-    }
-
-    /// Writes the vault — keyslot metadata followed by `payload` encrypted under
-    /// the DEK — to `path`, atomically (temp file then rename).
-    pub fn save(&self, payload: &[u8], path: &Path) -> Result<()> {
-        let mut bytes = serialize_policy_header(&self.metadata())?;
-        bytes.extend_from_slice(&self.encrypt_payload(payload)?);
-
-        let dir = match path.parent() {
-            Some(p) if !p.as_os_str().is_empty() => p,
-            _ => Path::new("."),
-        };
-        let mut temp = NamedTempFile::new_in(dir)?;
-        temp.write_all(&bytes)?;
-        temp.persist(path)?;
-        Ok(())
-    }
-
-    /// Recovers every factor's auth-key from the DEK (for re-distribution).
+    /// Recovers every factor's auth-KEK from the DEK (for re-distribution).
     fn recover_all_authkeks(&self) -> Result<HashMap<String, KeyMaterial>> {
         let mut authkeks = HashMap::new();
         for factor in &self.factors {
-            let bytes = keyslot::unwrap_share(&self.dek, &factor.authkek_under_dek)
-                .ok_or_else(|| anyhow!("corrupt keyslot for factor '{}'", factor.id))?;
+            let bytes = cypher_from_material(&self.dek, CypherVersion::default())
+                .decrypt_with_aad(&factor.authkek_under_dek, &[])
+                .map_err(|_| anyhow!("corrupt keyslot for factor '{}'", factor.id))?;
             authkeks.insert(factor.id.clone(), to_key_material(&bytes)?);
         }
         Ok(authkeks)
@@ -267,7 +251,7 @@ impl PolicyVault {
 ///
 /// Present factor secrets one at a time — without saying which factor each
 /// belongs to — until the policy is satisfied, then reconstruct the vault. Built
-/// from on-disk [`PolicyMetadata`]; a caller drives it from a prompt loop.
+/// from on-disk [`VaultHeader`]; a caller drives it from a prompt loop.
 pub struct UnlockSession {
     factors: Vec<Factor>,
     policy: PolicyNode,
@@ -276,10 +260,10 @@ pub struct UnlockSession {
 
 impl UnlockSession {
     #[must_use]
-    pub fn new(meta: PolicyMetadata) -> Self {
+    pub fn new(header: VaultHeader) -> Self {
         Self {
-            factors: meta.factors,
-            policy: meta.policy,
+            factors: header.factors,
+            policy: header.policy,
             authkeks: HashMap::new(),
         }
     }
@@ -308,7 +292,7 @@ impl UnlockSession {
     }
 
     /// Tries `password` against the not-yet-satisfied password factors and, on the
-    /// first match, records its auth-key and returns the factor id. Each factor
+    /// first match, records its auth-KEK and returns the factor id. Each factor
     /// has a distinct password (enforced at enroll), so one match is conclusive —
     /// no need to try the rest.
     pub fn try_password(&mut self, password: &str) -> Result<Option<String>> {
@@ -323,8 +307,11 @@ impl UnlockSession {
 
         for (id, kind) in candidates {
             let authkek = password_kek(password, &kind)?;
-            let verified = leaf_wrapped_share(&self.policy, &id)
-                .is_some_and(|wrapped| keyslot::unwrap_share(&authkek, wrapped).is_some());
+            let verified = leaf_wrapped_share(&self.policy, &id).is_some_and(|wrapped| {
+                cypher_from_material(&authkek, CypherVersion::default())
+                    .decrypt_with_aad(wrapped, &[])
+                    .is_ok()
+            });
             if verified {
                 self.authkeks.insert(id.clone(), authkek);
                 return Ok(Some(id));
@@ -370,7 +357,7 @@ fn derive_authkek(kind: &FactorKind, secret: &FactorSecret) -> Result<KeyMateria
 }
 
 /// Distributes `dek` across `template` and wraps each leaf's share under its
-/// factor's auth-key, returning the policy tree with shares filled in.
+/// factor's auth-KEK, returning the policy tree with shares filled in.
 fn distribute_and_wrap(
     template: &PolicyNode,
     dek: &KeyMaterialBytes,
@@ -398,7 +385,8 @@ fn wrap_leaves(
                 .ok_or_else(|| anyhow!("no key material for factor '{}'", leaf.factor))?;
             Ok(PolicyNode::Leaf(Leaf {
                 factor: leaf.factor.clone(),
-                wrapped_share: keyslot::wrap_share(kek, share)?,
+                wrapped_share: cypher_from_material(kek, CypherVersion::default())
+                    .encrypt_with_aad(share, &[])?,
             }))
         }
         PolicyNode::And(children) => Ok(PolicyNode::And(wrap_children(
@@ -423,7 +411,7 @@ fn wrap_children(
 }
 
 /// Builds the per-leaf `provided` shares: for each leaf in DFS order, unwrap its
-/// share if we hold its factor's auth-key (and it authenticates), else `None`.
+/// share if we hold its factor's auth-KEK (and it authenticates), else `None`.
 fn unwrap_leaves(
     node: &PolicyNode,
     authkeks: &HashMap<String, KeyMaterial>,
@@ -431,9 +419,11 @@ fn unwrap_leaves(
 ) {
     match node {
         PolicyNode::Leaf(leaf) => {
-            let share = authkeks
-                .get(&leaf.factor)
-                .and_then(|kek| keyslot::unwrap_share(kek, &leaf.wrapped_share));
+            let share = authkeks.get(&leaf.factor).and_then(|kek| {
+                cypher_from_material(kek, CypherVersion::default())
+                    .decrypt_with_aad(&leaf.wrapped_share, &[])
+                    .ok()
+            });
             out.push(share);
         }
         PolicyNode::And(children) | PolicyNode::Or(children) => {
@@ -533,17 +523,22 @@ mod tests {
 
     /// Round-trips a vault through its serialized metadata, then unlocks.
     fn reopen(vault: &PolicyVault, provided: &[(&str, &str)]) -> Result<PolicyVault> {
-        PolicyVault::unlock(vault.metadata(), &secrets(provided))
+        PolicyVault::unlock(vault.header(), &secrets(provided))
     }
 
     #[test]
     fn single_password_unlock_and_payload() {
         let vault = PolicyVault::create("p1", "hunter2", &params()).unwrap();
-        let blob = vault.encrypt_payload(b"top secret").unwrap();
+        let blob = vault
+            .encrypt_payload(b"top secret", &[], CypherVersion::default())
+            .unwrap();
 
         let reopened = reopen(&vault, &[("p1", "hunter2")]).unwrap();
         assert_eq!(
-            reopened.decrypt_payload(&blob).unwrap().as_slice(),
+            reopened
+                .decrypt_payload(&blob, &[], CypherVersion::default())
+                .unwrap()
+                .as_slice(),
             b"top secret"
         );
 
@@ -571,12 +566,26 @@ mod tests {
         let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
         vault.enroll_password("yk", "two", &params()).unwrap();
         vault.set_policy("p1 or yk").unwrap();
-        let blob = vault.encrypt_payload(b"data").unwrap();
+        let blob = vault
+            .encrypt_payload(b"data", &[], CypherVersion::default())
+            .unwrap();
 
         let via_p1 = reopen(&vault, &[("p1", "one")]).unwrap();
         let via_yk = reopen(&vault, &[("yk", "two")]).unwrap();
-        assert_eq!(via_p1.decrypt_payload(&blob).unwrap().as_slice(), b"data");
-        assert_eq!(via_yk.decrypt_payload(&blob).unwrap().as_slice(), b"data");
+        assert_eq!(
+            via_p1
+                .decrypt_payload(&blob, &[], CypherVersion::default())
+                .unwrap()
+                .as_slice(),
+            b"data"
+        );
+        assert_eq!(
+            via_yk
+                .decrypt_payload(&blob, &[], CypherVersion::default())
+                .unwrap()
+                .as_slice(),
+            b"data"
+        );
     }
 
     #[test]
@@ -658,43 +667,5 @@ mod tests {
                 .enroll_password("backup", "s3cret-xyz", &params())
                 .is_ok()
         );
-    }
-
-    #[test]
-    fn file_roundtrip_single_password() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault");
-
-        let vault = PolicyVault::create("p1", "pw", &params()).unwrap();
-        vault.save(b"payload-bytes", &path).unwrap();
-
-        let (reopened, payload) = PolicyVault::open(&path, &secrets(&[("p1", "pw")])).unwrap();
-        assert_eq!(payload.as_slice(), b"payload-bytes");
-        assert_eq!(reopened.policy_expr(), "p1");
-
-        assert!(PolicyVault::open(&path, &secrets(&[("p1", "wrong")])).is_err());
-    }
-
-    #[test]
-    fn file_multifactor_and_value_cypher_survives_reopen() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("vault");
-
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
-        vault.enroll_password("p2", "two", &params()).unwrap();
-        vault.enroll_password("p3", "three", &params()).unwrap();
-        vault.set_policy("p1 or (p2 and p3)").unwrap();
-
-        // A stored value is encrypted under the DEK-cypher and saved as the payload.
-        let value_ct = vault.cypher().encrypt(b"a stored secret").unwrap();
-        vault.save(&value_ct, &path).unwrap();
-
-        // Reopen via the AND branch; the reopened DEK-cypher decrypts the value.
-        let (reopened, payload) =
-            PolicyVault::open(&path, &secrets(&[("p2", "two"), ("p3", "three")])).unwrap();
-        let plain = reopened.cypher().decrypt(&payload).unwrap();
-        assert_eq!(plain.as_slice(), b"a stored secret");
-
-        assert!(PolicyVault::open(&path, &secrets(&[("p2", "two")])).is_err()); // p2 alone
     }
 }

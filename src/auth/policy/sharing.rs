@@ -1,56 +1,16 @@
-use std::collections::HashSet;
+//! Secret sharing over the [`PolicyNode`] tree (Benaloh–Leichter for monotone
+//! access structures): [`distribute`] splits a secret across the policy and
+//! [`reconstruct`] recovers it exactly when the satisfied leaves satisfy the
+//! policy. `Or` replicates its secret to each child; `And` XOR-splits it.
 
 use anyhow::{Result, bail};
-use bincode::{Decode, Encode};
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
+use super::tree::PolicyNode;
+
 /// A secret-share or reconstructed secret, kept in a buffer wiped on drop.
 pub type Share = Zeroizing<Vec<u8>>;
-
-/// A monotone boolean access policy over named factors.
-///
-/// The data-encryption key is distributed down this tree: [`PolicyNode::Or`]
-/// replicates its secret to each child, [`PolicyNode::And`] XOR-splits it, and
-/// each [`PolicyNode::Leaf`] holds its share wrapped under the referenced factor's
-/// key. (The distribute/reconstruct algorithms live in the policy-engine task.)
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub enum PolicyNode {
-    /// Satisfied only when **all** children are satisfied.
-    And(Vec<Self>),
-    /// Satisfied when **any** child is satisfied.
-    Or(Vec<Self>),
-    /// A factor leaf.
-    Leaf(Leaf),
-}
-
-/// A factor leaf: the id of the factor that satisfies it, plus this leaf's
-/// secret-share wrapped under that factor's key (empty until the DEK is
-/// distributed across the policy).
-#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
-pub struct Leaf {
-    /// Id of the enrolled factor (into [`super::PolicyMetadata::factors`]) that
-    /// unlocks this leaf.
-    pub factor: String,
-    /// This leaf's secret-share, encrypted under the factor's key.
-    pub wrapped_share: Vec<u8>,
-}
-
-impl PolicyNode {
-    /// Whether the set of `available` factor ids satisfies this policy.
-    ///
-    /// A pure boolean evaluation — `And` needs every child, `Or` needs any — used
-    /// to drive the unlock UX (which factors to prompt for, and when enough have
-    /// been collected) before doing any expensive key derivation.
-    #[must_use]
-    pub fn is_satisfied_by(&self, available: &HashSet<String>) -> bool {
-        match self {
-            Self::Leaf(leaf) => available.contains(&leaf.factor),
-            Self::And(children) => children.iter().all(|c| c.is_satisfied_by(available)),
-            Self::Or(children) => children.iter().any(|c| c.is_satisfied_by(available)),
-        }
-    }
-}
 
 /// XORs `other` into `acc` byte-wise (over the common length).
 fn xor_into(acc: &mut [u8], other: &[u8]) {
@@ -160,7 +120,8 @@ fn reconstruct_at(node: &PolicyNode, provided: &[Option<Share>], idx: &mut usize
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{Share, distribute, reconstruct};
+    use crate::auth::{Leaf, PolicyNode};
 
     fn leaf(name: &str) -> PolicyNode {
         PolicyNode::Leaf(Leaf {
@@ -276,19 +237,5 @@ mod tests {
     fn empty_node_rejected() {
         assert!(distribute(&[0u8; 64], &PolicyNode::And(vec![])).is_err());
         assert!(distribute(&[0u8; 64], &PolicyNode::Or(vec![])).is_err());
-    }
-
-    #[test]
-    fn is_satisfied_by_matches_boolean_logic() {
-        // a OR (b AND c)
-        let policy = PolicyNode::Or(vec![leaf("a"), PolicyNode::And(vec![leaf("b"), leaf("c")])]);
-        let have = |ids: &[&str]| ids.iter().map(|s| (*s).to_string()).collect::<HashSet<_>>();
-
-        assert!(policy.is_satisfied_by(&have(&["a"])));
-        assert!(policy.is_satisfied_by(&have(&["b", "c"])));
-        assert!(policy.is_satisfied_by(&have(&["a", "b"])));
-        assert!(!policy.is_satisfied_by(&have(&["b"])));
-        assert!(!policy.is_satisfied_by(&have(&["c"])));
-        assert!(!policy.is_satisfied_by(&have(&[])));
     }
 }

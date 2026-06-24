@@ -162,8 +162,7 @@ impl DataContainer {
         let mut result = Zeroizing::new(Vec::new());
 
         // Version
-        let version = DataContainerVersion::Version4 as u16;
-        result.extend_from_slice(&version.to_be_bytes());
+        result.extend_from_slice(&DataContainerVersion::Version4.tag());
 
         // Count elements
         let count: u32 = u32::try_from(self.data.values().map(Vec::len).sum::<usize>())
@@ -205,7 +204,7 @@ impl DataContainer {
     /// Parses the version-4 on-disk body (the leading two bytes are its tag).
     fn from_v4_bytes(data: &[u8]) -> Result<Self> {
         if data.len() < 6 {
-            bail!("Data too short");
+            bail!("data too short");
         }
 
         let count = u32::from_be_bytes([data[2], data[3], data[4], data[5]]);

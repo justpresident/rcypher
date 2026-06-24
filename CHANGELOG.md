@@ -34,7 +34,26 @@ minor; features and fixes bump the patch).
   with an estimated crack time and requires a double confirmation; a trivially
   guessable one — including the factor name itself — is refused outright.
 
+### Changed
+- **Store-file formats are handled by a new `container` module (library API).**
+  Each on-disk format implements a `ContainerCodec` (its wire layout, unlock, and
+  payload decryption); `FileContainer` is the registry that probes the leading tag
+  and dispatches (`FileContainerV7` legacy, `FileContainerV8` policy vault). The
+  AEAD envelope is shared across formats and only the keyslot scheme is per-format,
+  so a future format is a new submodule plus a dispatch arm. `ContainerFormat` is
+  renamed `FileContainerFormat`; the keyslot vault (`PolicyVault`) no longer does
+  file I/O (reading/writing a vault file goes through the container layer).
+  Removed `parse_policy_vault`, `serialize_policy_header`, and `ParsedVault`.
+
 ### Security
+- **The version-8 keyslot header is now authenticated.** The cleartext metadata
+  (policy tree, factor table, KDF params, and wrapped shares) is bound to the
+  encrypted payload as associated data, so its integrity tag also covers the
+  policy. This prevents an attacker who can modify the at-rest file from
+  downgrading the unlock policy — e.g. stripping `p1 OR (p2 AND yk)` down to `p1`
+  alone (OR replicates the data key to each branch), which previously unlocked
+  with a single factor and silently persisted the weakened policy on the next
+  save. The on-disk layout is unchanged.
 - A factor's password may not be too similar to its (cleartext) name — it must be
   at least twice as long as any shared prefix — preventing a password from being
   exposed as a label, including the mix-up of typing a password where the factor

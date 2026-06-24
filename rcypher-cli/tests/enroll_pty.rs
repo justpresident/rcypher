@@ -12,8 +12,8 @@ use std::process::Command;
 
 use assert_cmd::cargo;
 use rcypher::{
-    Argon2Params, Cypher, CypherVersion, DataContainer, EncryptedValue, EncryptionKey,
-    FactorSecret, PolicyVault,
+    Argon2Params, ContainerCodec, Cypher, CypherVersion, DataContainer, EncryptedValue,
+    EncryptionKey, FactorSecret, FileContainer, FileContainerV8, PolicyVault, Secrets,
 };
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
@@ -28,7 +28,7 @@ const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
 fn create_store(path: &Path, factor_id: &str, password: &str) {
     let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
     let payload = DataContainer::new().safe_serialize().unwrap();
-    vault.save(&payload, path).unwrap();
+    FileContainerV8::write(path, &vault, &payload).unwrap();
 }
 
 /// Writes a legacy version-7 single-password store holding `key`=`value`,
@@ -73,7 +73,14 @@ fn unlocks_with(path: &Path, id: &str, password: &str) -> bool {
     )]
     .into_iter()
     .collect();
-    PolicyVault::open(path, &secrets).is_ok()
+    let data = std::fs::read(path).unwrap();
+    let Ok(FileContainer::V8(container)) = FileContainer::parse(&data) else {
+        return false;
+    };
+    let Ok(vault) = container.unlock(&Secrets::Factors(secrets), &Argon2Params::insecure()) else {
+        return false;
+    };
+    container.decrypt_payload(&vault).is_ok()
 }
 
 #[test]
@@ -219,7 +226,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
 
     // Initially a legacy version-7 store (not yet in the version-8 format).
     let head = fs::read(&path).unwrap();
-    assert_eq!(&head[..2], &rcypher::ContainerFormat::V7.tag());
+    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V7.tag());
 
     let mut p = spawn_session(&path);
 
@@ -242,7 +249,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
     // On disk it is now in the version-8 format, unlockable with the original
     // password (now the 'primary' factor)...
     let head = fs::read(&path).unwrap();
-    assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V8.tag());
     assert!(unlocks_with(&path, "primary", "test_password"));
 
     // ...and the untouched original is preserved as a <path>.bak (still v7).
@@ -254,7 +261,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
     assert!(bak.exists(), "expected a .bak backup of the original");
     assert_eq!(
         &fs::read(&bak).unwrap()[..2],
-        &rcypher::ContainerFormat::V7.tag()
+        &rcypher::FileContainerFormat::V7.tag()
     );
 }
 
@@ -269,7 +276,7 @@ fn create_and_vault(path: &Path) {
         .unwrap();
     vault.set_policy("p1 and p2").unwrap();
     let payload = DataContainer::new().safe_serialize().unwrap();
-    vault.save(&payload, path).unwrap();
+    FileContainerV8::write(path, &vault, &payload).unwrap();
 }
 
 /// Spawns the binary under a PTY without `--insecure-password`, so the multi-

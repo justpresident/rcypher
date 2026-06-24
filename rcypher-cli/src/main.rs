@@ -25,7 +25,10 @@ use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use rcypher::{Argon2Params, Cypher, CypherVersion, DataContainer, EncryptionKey};
-use rcypher::{ContainerFormat, PolicyMetadata, PolicyVault, UnlockSession, parse_policy_vault};
+use rcypher::{
+    ContainerCodec, FileContainer, FileContainerFormat, FileContainerV7, FileContainerV8,
+    PolicyVault, Secrets, UnlockSession, VaultHeader,
+};
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
 use std::io;
@@ -85,12 +88,12 @@ struct CliParams {
     #[arg(long, default_value = "cypher > ")]
     prompt: String,
 
-    /// Update storage with entries from another encrypted storage file (e.g., Dropbox conflict copy).
+    /// Update the store with entries from another encrypted store file (e.g., Dropbox conflict copy).
     /// Entries with newer timestamps will be merged into the main file
     #[arg(long)]
     update_with: Option<PathBuf>,
 
-    /// File to encrypt/decrypt or use as storage
+    /// File to encrypt/decrypt or use as a store
     filename: PathBuf,
 }
 
@@ -155,8 +158,8 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
 /// against every still-unsatisfied factor, satisfied factors are reported, and
 /// the loop continues until the policy is satisfied. When `--insecure-password`
 /// is set (testing only), that one password is tried once instead of prompting.
-fn unlock_interactively(meta: PolicyMetadata, params: &CliParams) -> Result<PolicyVault> {
-    let mut session = UnlockSession::new(meta);
+fn unlock_interactively(header: VaultHeader, params: &CliParams) -> Result<PolicyVault> {
+    let mut session = UnlockSession::new(header);
     if !session.satisfiable_by_passwords() {
         bail!("this store's policy requires a YubiKey factor, which is not yet supported");
     }
@@ -222,26 +225,29 @@ struct Store {
 /// re-encrypted under a fresh key) — the file itself is rewritten in the current
 /// format on the next save.
 fn open_existing_store(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Result<Store> {
-    match ContainerFormat::probe_file(path)? {
-        ContainerFormat::V8 => {
-            let bytes = std::fs::read(path)?;
-            let (meta, _payload) = parse_policy_vault(&bytes)?;
+    let bytes = std::fs::read(path)?;
+    let container = FileContainer::parse(&bytes)?;
+    // A file whose format isn't the current default is a legacy store: it still
+    // opens, but is upgraded to the default format on the next save.
+    let outdated = container.format() != FileContainerFormat::default();
+    match container {
+        FileContainer::V8(container) => {
             eprintln!(
                 "Unlock policy for {}: {}",
                 path.display(),
-                meta.policy_expr()
+                container.describe()
             );
-            let vault = unlock_interactively(meta, params)?;
-            let payload = vault.load_payload(path)?;
+            let vault = unlock_interactively(container.header().clone(), params)?;
+            let payload = container.decrypt_payload(&vault)?;
             let data = DataContainer::safe_deserialize(&payload)?;
             Ok(Store {
                 vault,
                 data,
-                from_legacy: false,
+                from_legacy: outdated,
             })
         }
-        ContainerFormat::V7 => {
-            let store = open_and_convert_legacy(params, path, argon2)?;
+        FileContainer::V7(container) => {
+            let store = open_and_convert_legacy(params, path, &container, argon2)?;
             eprintln!(
                 "Note: '{}' is a legacy store; it will be upgraded to the current format on the \
                  next write (the original is backed up to {} first).",
@@ -259,13 +265,16 @@ fn open_existing_store(params: &CliParams, path: &Path, argon2: &Argon2Params) -
 fn open_and_convert_legacy(
     params: &CliParams,
     path: &Path,
+    container: &FileContainerV7,
     argon2: &Argon2Params,
 ) -> Result<Store> {
     let mut password = obtain_store_password(params, path, false)?;
     let spinner = Spinner::new("Unlocking store", params.quiet);
-    let result = EncryptionKey::for_file_with_params(&password, path, argon2).and_then(|key| {
+    let result = (|| -> Result<Store> {
+        let key = container.unlock(&Secrets::Password(password.clone()), argon2)?;
+        let payload = container.decrypt_payload(&key)?;
+        let mut data = DataContainer::safe_deserialize(&payload)?;
         let legacy = Cypher::new(key);
-        let mut data = DataContainer::load(&legacy, path)?;
         let vault = PolicyVault::create(cli::DEFAULT_FACTOR_ID, &password, argon2)?;
         data.reencrypt(&legacy, &vault.cypher())?;
         Ok(Store {
@@ -273,7 +282,7 @@ fn open_and_convert_legacy(
             data,
             from_legacy: true,
         })
-    });
+    })();
     spinner.finish_and_clear();
     password.zeroize();
     result
@@ -302,7 +311,7 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
 
     // Persist an empty store so the file exists for later unlocks.
     let empty = DataContainer::new().safe_serialize()?;
-    vault.save(&empty, &params.filename)?;
+    FileContainerV8::write(&params.filename, &vault, &empty)?;
     Ok(Store {
         vault,
         data: DataContainer::new(),

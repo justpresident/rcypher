@@ -247,7 +247,7 @@ pub fn run_update_with(
     let updates = find_updates(main_storage, update_storage, main_cypher, update_cypher);
 
     if updates.is_empty() {
-        println!("No updates found. Storage files are in sync.");
+        println!("No updates found. Store files are in sync.");
         return Ok(());
     }
 

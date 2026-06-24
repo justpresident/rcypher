@@ -1,4 +1,4 @@
-//! Multi-factor unlock: access policies, factors, and the keyslot vault format.
+//! Multi-factor unlock: factors, the access policy, and the vault they protect.
 //!
 //! A policy vault is encrypted with a random data-encryption key (DEK). The DEK
 //! is secret-shared down a boolean [`PolicyNode`] access tree — an `Or` replicates
@@ -6,16 +6,17 @@
 //! share wrapped under the referenced factor's key. Recovering the DEK therefore
 //! requires satisfying the policy (e.g. `pass1 OR (pass2 AND yubikey)`).
 //!
-//! This module owns the data model and on-disk format; the sharing algorithms and
-//! factor key derivation land in sibling tasks.
+//! Layers: [`factor`] (a credential), [`policy`] (the boolean rule over factor
+//! names + its sharing), [`header`] ([`VaultHeader`] = factors + policy, the
+//! serialized projection of a vault), and [`vault`] ([`PolicyVault`], the unlocked
+//! vault + unlock session).
 
 mod factor;
-mod format;
-mod keyslot;
-mod parser;
+mod header;
 mod policy;
 mod vault;
 
-pub use format::{Factor, FactorKind, PolicyMetadata, parse_policy_vault, serialize_policy_header};
+pub use factor::{Factor, FactorKind};
+pub use header::VaultHeader;
 pub use policy::{Leaf, PolicyNode, Share, distribute, reconstruct};
 pub use vault::{FactorSecret, PolicyVault, UnlockSession, check_factor_password};

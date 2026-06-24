@@ -8,8 +8,45 @@ use argon2::{Algorithm, Argon2, Params, Version};
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
-use crate::constants::{KEY_LEN, KeyBytes, KeyMaterialBytes, SaltBytes};
+use crate::constants::{KEY_LEN, KEY_MATERIAL_LEN, KeyBytes, KeyMaterialBytes, SaltBytes};
 use crate::version::{CypherVersion, Version7Header};
+
+/// Full key material in a zeroizing buffer: a 32-byte cipher key followed by a
+/// 32-byte HMAC key (see [`EncryptionKey::from_key_material`]).
+pub type KeyMaterial = Zeroizing<KeyMaterialBytes>;
+
+/// Generates fresh random [`KeyMaterial`] from the OS CSPRNG — e.g. a vault's
+/// data-encryption key, or a factor's wrapping key.
+pub fn generate_key_material() -> Result<KeyMaterial> {
+    let mut material = Zeroizing::new([0u8; KEY_MATERIAL_LEN]);
+    rand::rngs::OsRng.try_fill_bytes(material.as_mut())?;
+    Ok(material)
+}
+
+/// Derives 64-byte [`KeyMaterial`] (cipher key ‖ HMAC key) from a `password` and
+/// `salt` via Argon2id with the given cost `params`. The memory-hard KDF used for
+/// every password-derived key in rcypher — the store key and each password
+/// factor's wrapping key.
+pub fn derive_key_material(
+    password: &str,
+    salt: &SaltBytes,
+    params: &Argon2Params,
+) -> Result<KeyMaterial> {
+    let params = Params::new(
+        params.memory_cost,
+        params.time_cost,
+        params.parallelism,
+        Some(KEY_MATERIAL_LEN),
+    )
+    .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+
+    let mut material = Zeroizing::new([0u8; KEY_MATERIAL_LEN]);
+    argon2
+        .hash_password_into(password.as_bytes(), salt, material.as_mut())
+        .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+    Ok(material)
+}
 
 /// Argon2 key derivation parameters
 #[derive(Clone, Copy, Debug)]
@@ -51,7 +88,7 @@ impl Argon2Params {
 
 #[derive(Clone)]
 pub struct EncryptionKey {
-    pub version: CypherVersion,
+    version: CypherVersion,
     key: Zeroizing<KeyBytes>,
     salt: SaltBytes,
     hmac_key: Zeroizing<KeyBytes>,
@@ -90,27 +127,14 @@ impl EncryptionKey {
         salt: &SaltBytes,
         argon2_params: &Argon2Params,
     ) -> Result<Self> {
-        let params = Params::new(
-            argon2_params.memory_cost,
-            argon2_params.time_cost,
-            argon2_params.parallelism,
-            Some(2 * size_of::<KeyBytes>()),
-        )
-        .map_err(|e| anyhow::anyhow!("Invalid Argon2 params: {e}"))?;
-
-        let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-
-        let mut all_key_bytes = Zeroizing::new([0u8; 2 * size_of::<KeyBytes>()]);
-        argon2
-            .hash_password_into(password.as_bytes(), salt, all_key_bytes.as_mut())
-            .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+        let material = derive_key_material(password, salt, argon2_params)?;
 
         // Copy each half into a zeroizing buffer from the start, so no plaintext
         // key material lingers in an un-zeroized intermediate.
         let mut key = Zeroizing::new(KeyBytes::default());
         let mut hmac_key = Zeroizing::new(KeyBytes::default());
-        key.copy_from_slice(&all_key_bytes[0..KEY_LEN]);
-        hmac_key.copy_from_slice(&all_key_bytes[KEY_LEN..]);
+        key.copy_from_slice(&material[0..KEY_LEN]);
+        hmac_key.copy_from_slice(&material[KEY_LEN..]);
 
         Ok(Self {
             version,
@@ -145,7 +169,7 @@ impl EncryptionKey {
                 }
                 let mut file = fs::File::open(path)?;
                 if file.metadata()?.len() < u64::try_from(size_of::<Version7Header>())? {
-                    bail!("file size is too small");
+                    bail!("file is too small");
                 }
                 let header: Version7Header =
                     bincode::decode_from_std_read(&mut file, bincode::config::standard())?;
@@ -196,20 +220,21 @@ impl EncryptionKey {
     }
 
     /// Builds a key directly from 64-byte key material (a 32-byte cipher key
-    /// followed by a 32-byte HMAC key), bypassing password derivation.
+    /// followed by a 32-byte HMAC key), bypassing password derivation, tagged with
+    /// the envelope `version` it will encrypt under.
     ///
     /// Used for randomly generated data-encryption keys and for wrapping keys
     /// that come from a single high-entropy factor. The caller's `material` should
     /// itself live in a zeroizing buffer; the two halves are copied into zeroizing
     /// buffers here, so no plaintext key lingers in an un-zeroized intermediate.
     /// The salt only feeds password derivation, so it is left zeroed.
-    pub fn from_key_material(material: &KeyMaterialBytes) -> Self {
+    pub fn from_key_material(material: &KeyMaterialBytes, version: CypherVersion) -> Self {
         let mut key = Zeroizing::new(KeyBytes::default());
         let mut hmac_key = Zeroizing::new(KeyBytes::default());
         key.copy_from_slice(&material[..KEY_LEN]);
         hmac_key.copy_from_slice(&material[KEY_LEN..]);
         Self {
-            version: CypherVersion::default(),
+            version,
             key,
             hmac_key,
             salt: SaltBytes::default(),
@@ -225,7 +250,19 @@ impl EncryptionKey {
     pub const fn salt(&self) -> &SaltBytes {
         &self.salt
     }
-    pub const fn version(&self) -> &CypherVersion {
-        &self.version
+    pub const fn version(&self) -> CypherVersion {
+        self.version
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generated_key_material_differs() {
+        let a = generate_key_material().unwrap();
+        let b = generate_key_material().unwrap();
+        assert_ne!(a.as_slice(), b.as_slice());
     }
 }

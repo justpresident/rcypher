@@ -225,7 +225,7 @@ impl InteractiveCli {
                     (None, _) => bail!("No key '{key}' found!"),
                     (Some((first_key, _)), Some((second_key, _))) => {
                         // Multiple results - print all
-                        println!("Multiple keys found! Plese specify exact key name:");
+                        println!("Multiple keys found! Please specify exact key name:");
                         secure_print(first_key.to_string(), self.insecure_stdout)?;
                         secure_print(second_key.to_string(), self.insecure_stdout)?;
                         for (key, _) in results {
@@ -352,7 +352,7 @@ impl InteractiveCli {
 
     /// Lists the enrolled factors and their kinds.
     fn list_factors(&self, store: &crate::Store) -> Result<()> {
-        for factor in store.vault.metadata().factors {
+        for factor in store.vault.header().factors {
             let kind = match factor.kind {
                 FactorKind::Password { .. } => "password",
                 FactorKind::Yubikey { .. } => "yubikey",

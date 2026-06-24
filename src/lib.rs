@@ -72,6 +72,7 @@
 // Module declarations
 mod auth;
 mod constants;
+mod container;
 mod crypto;
 mod file_io;
 mod security;
@@ -81,16 +82,18 @@ mod version;
 
 // Public re-exports
 pub use auth::{
-    Factor, FactorKind, FactorSecret, Leaf, PolicyMetadata, PolicyNode, PolicyVault, Share,
-    UnlockSession, check_factor_password, distribute, parse_policy_vault, reconstruct,
-    serialize_policy_header,
+    Factor, FactorKind, FactorSecret, Leaf, PolicyNode, PolicyVault, Share, UnlockSession,
+    VaultHeader, check_factor_password, distribute, reconstruct,
+};
+pub use container::{
+    ContainerCodec, FileContainer, FileContainerFormat, FileContainerV7, FileContainerV8, Secrets,
 };
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};
 pub use file_io::{load_encrypted, save_encrypted};
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 #[cfg(feature = "storage")]
 pub use storage::{DataContainer, EncryptedValue, ValueEntry};
-pub use version::{ContainerFormat, CypherVersion};
+pub use version::CypherVersion;
 
 // Re-export for convenience
 pub use anyhow::{Result, bail};

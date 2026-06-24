@@ -21,10 +21,14 @@ password envelope.
 ## Notation and primitives
 
 - `‖` — byte concatenation. `⊕` — XOR. `⊥` — failure/absent.
-- **`wrap(K, m)`** — authenticated encryption of message `m` under 64-byte key
-  material `K`, producing a self-contained blob with a fresh random IV.
-- **`unwrap(K, c)`** — the inverse; returns `m`, or **`⊥` when authentication
-  fails**. This failure is the protocol's "wrong key / factor not satisfied"
+- **`wrap(K, m [, aad])`** — authenticated encryption of message `m` under 64-byte
+  key material `K`, producing a self-contained blob with a fresh random IV. The
+  optional **associated data** `aad` is authenticated but not encrypted: it is
+  folded into the HMAC, so `unwrap` fails unless the same `aad` is supplied. An
+  absent/empty `aad` is byte-for-byte the plain envelope.
+- **`unwrap(K, c [, aad])`** — the inverse; returns `m`, or **`⊥` when
+  authentication fails** (wrong key, tampered ciphertext, **or mismatched
+  `aad`**). This failure is the protocol's "wrong key / factor not satisfied"
   signal — there is no separate check and no padding/decryption oracle, because
   the MAC is verified (in constant time) before any plaintext is produced.
 
@@ -83,13 +87,21 @@ PolicyNode =
 ### On-disk layout
 
 ```
-file = u16(8)  ‖  bincode(PolicyMetadata)  ‖  wrap(DEK, serialize(store))
-                                              └── the encrypted payload
+file = u16(8)  ‖  bincode(PolicyMetadata)  ‖  wrap(DEK, serialize(store), aad = header)
+       └────────────── header ─────────────┘  └── the encrypted payload ──┘
 ```
 
 The leading `u16(8)` distinguishes a policy vault from a plain version-7 envelope
 (tag `7`) by probing the first two bytes. The `PolicyMetadata` bytes are stable
 across saves; only the payload carries a fresh IV per save (see *Save*).
+
+**The header is authenticated.** The whole leading `header` (`u16(8) ‖
+bincode(PolicyMetadata)` — the policy tree, factor table, KDF params, and every
+wrapped share) is passed as the payload's **associated data**, so the payload's
+HMAC also covers it. The metadata stays cleartext (so the policy can be displayed
+before unlock), but it cannot be altered, downgraded, or spliced onto a different
+payload without the DEK — which only a party that satisfies the policy can
+recover. This adds no bytes to the file; only the tag's input grows.
 
 ## The auth-KEK bridge
 
@@ -148,20 +160,25 @@ Each operation below names the corresponding `PolicyVault` method.
 5. The vault holds the DEK in memory (unlocked).
 
 ### SAVE — `encrypt_payload` + serialize
-Write `u16(8) ‖ bincode(metadata) ‖ wrap(DEK, serialize(store))`. The payload's
-`wrap` uses a fresh IV, so each save is fresh, unlinkable ciphertext under the
-**same** DEK. The metadata (keyslots + policy) is unchanged from the last
-management operation and is re-serialized byte-for-byte.
+Serialize `header = u16(8) ‖ bincode(metadata)`, then write `header ‖ wrap(DEK,
+serialize(store), aad = header)`. The payload's `wrap` uses a fresh IV, so each
+save is fresh, unlinkable ciphertext under the **same** DEK, and binds that save's
+exact `header` as associated data. The metadata (keyslots + policy) is unchanged
+from the last management operation and is re-serialized byte-for-byte.
 
-### UNLOCK(secrets) — `unlock`
-1. Parse the file → `metadata` + encrypted payload.
+### UNLOCK(secrets) — `unlock` + `decrypt_payload`
+1. Parse the file → `header` + `metadata` + encrypted payload.
 2. For each provided factor: `auth-KEKᵢ ← Argon2id(passwordᵢ, factor.saltᵢ)`.
 3. For each policy leaf (DFS order): if its factor's auth-KEK is held,
    `unwrap(auth-KEKᵢ, wrapped_share)` → `Some(share)` (MAC ok) or `None`
    (wrong password, or factor not provided).
 4. `reconstruct(policy, shares)` → `Some(DEK)` iff the policy is satisfied, else
    the unlock fails.
-5. With the DEK, `decrypt_payload(DEK, payload)` yields the store.
+5. With the DEK, `unwrap(DEK, payload, aad = header)` yields the store — **and
+   re-verifies the header**: if the policy/factor table was tampered with or a
+   stale header spliced in, the associated data no longer matches and decryption
+   fails here, even though step 4 may have reconstructed a DEK. So a downgraded
+   file is rejected, not opened (and therefore never re-saved in its weaker form).
 
 A wrong password produces a wrong `auth-KEK`, so `unwrap` fails the MAC and the
 leaf is treated as unsatisfied — no oracle distinguishes "wrong password" from
@@ -247,6 +264,16 @@ Unlock outcomes:
 - **`authkek_under_dek` is safe to store.** Without the DEK it is opaque
   authenticated ciphertext; with the DEK the holder already has full access, and
   it never reveals a password (Argon2id is one-way).
+- **The keyslot header is authenticated and bound to the payload.** The cleartext
+  metadata (policy tree, factor table, KDF params, wrapped shares) is the
+  payload's associated data, so the payload's HMAC covers it. Forging an
+  acceptable modification requires the DEK, and recovering the DEK requires
+  satisfying the *original* policy — so an attacker who merely holds or can
+  rewrite the file cannot tamper with it. This closes a policy-**downgrade**
+  attack: e.g. in `p1 OR (p2 AND yk)`, OR replicates the full DEK to the `p1`
+  branch, so without this binding an attacker could strip the policy down to the
+  original `p1` leaf, get the victim to unlock with `p1` alone, and have the
+  weakened policy persist on the next save.
 - **No rekeying on password change** (LUKS-style, intentional): changing or
   removing a factor re-wraps keyslots but does not rotate the DEK or re-encrypt
   the data. True rekeying (new DEK + re-encrypt) is deliberately *not* performed,

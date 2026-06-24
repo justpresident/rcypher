@@ -515,11 +515,11 @@ fn test_encrypt_decrypt_with_output_file() {
 /// store, derived with insecure Argon2 params so the binary's `--insecure-password`
 /// path unlocks it quickly.
 fn create_store(path: &Path, factor_id: &str, password: &str) {
-    use rcypher::{Argon2Params, DataContainer, PolicyVault};
+    use rcypher::{Argon2Params, DataContainer, FileContainerV8, PolicyVault};
 
     let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
     let payload = DataContainer::new().safe_serialize().unwrap();
-    vault.save(&payload, path).unwrap();
+    FileContainerV8::write(path, &vault, &payload).unwrap();
 }
 
 #[test]
@@ -532,7 +532,7 @@ fn test_store_put_get_roundtrip() {
 
     // The store must still be in the version-8 format after a save.
     let head = fs::read(&file_path).unwrap();
-    assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V8.tag());
 
     // Second run: re-open the rewritten vault and read the values back.
     let lines = run_commands(&file_path, b"get key1\nget key2\n".to_vec());
@@ -569,7 +569,7 @@ fn test_store_wrong_password_fails() {
 /// `main or backup` policy, so the `--insecure-password test_password` path
 /// unlocks it via the "main" factor.
 fn create_multifactor_store(path: &Path) {
-    use rcypher::{Argon2Params, DataContainer, PolicyVault};
+    use rcypher::{Argon2Params, DataContainer, FileContainerV8, PolicyVault};
 
     let mut vault =
         PolicyVault::create("main", "test_password", &Argon2Params::insecure()).unwrap();
@@ -578,7 +578,7 @@ fn create_multifactor_store(path: &Path) {
         .unwrap();
     vault.set_policy("main or backup").unwrap();
     let payload = DataContainer::new().safe_serialize().unwrap();
-    vault.save(&payload, path).unwrap();
+    FileContainerV8::write(path, &vault, &payload).unwrap();
 }
 
 #[test]
@@ -652,7 +652,7 @@ fn test_new_store_is_v8() {
     run_commands(&file_path, b"put k v\n".to_vec());
 
     let head = fs::read(&file_path).unwrap();
-    assert_eq!(&head[..2], &rcypher::ContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V8.tag());
 
     let factors = run_commands_str(&file_path, "auth factor list\n");
     assert!(factors.contains("primary (password)"), "{factors}");
@@ -666,7 +666,7 @@ fn test_legacy_store_auto_converts() {
     // Sanity: the seeded file really is a legacy (v7) container.
     assert_eq!(
         &fs::read(&file_path).unwrap()[..2],
-        &rcypher::ContainerFormat::V7.tag()
+        &rcypher::FileContainerFormat::V7.tag()
     );
 
     // Opening it and writing triggers the transparent upgrade: the original is
@@ -681,12 +681,12 @@ fn test_legacy_store_auto_converts() {
     assert!(bak.exists(), "expected a .bak backup of the original");
     assert_eq!(
         &fs::read(&bak).unwrap()[..2],
-        &rcypher::ContainerFormat::V7.tag(),
+        &rcypher::FileContainerFormat::V7.tag(),
         "the backup must be the untouched legacy file"
     );
     assert_eq!(
         &fs::read(&file_path).unwrap()[..2],
-        &rcypher::ContainerFormat::V8.tag(),
+        &rcypher::FileContainerFormat::V8.tag(),
         "the upgraded file must be in the v8 format"
     );
 

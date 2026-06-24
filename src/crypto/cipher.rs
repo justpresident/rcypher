@@ -14,10 +14,23 @@ use super::LimitedReader;
 use super::key::EncryptionKey;
 use super::stream_ops::{decrypt_blocks_v7, encrypt_blocks_v7};
 use crate::constants::{
-    Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacSha256, READ_BUF_SIZE,
+    Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacSha256, KeyMaterialBytes,
+    READ_BUF_SIZE,
 };
 use crate::security::is_debugger_attached;
 use crate::version::{CypherVersion, Version7Header};
+
+/// Builds a [`Cypher`] from raw 64-byte key material with the per-call anti-debug
+/// check **disabled**.
+///
+/// For internal key-wrapping — the DEK over the payload, a factor KEK over a
+/// share — where the trace check is enforced once at a higher entry point rather
+/// than on every operation. For password-derived keys, use [`Cypher::new`]
+/// (anti-debug check on) instead.
+#[must_use]
+pub fn cypher_from_material(material: &KeyMaterialBytes, version: CypherVersion) -> Cypher {
+    Cypher::with_trace_detection(EncryptionKey::from_key_material(material, version), false)
+}
 
 pub struct Cypher {
     pub(super) key: EncryptionKey,
@@ -35,7 +48,7 @@ const fn encrypted_size_v7(plaintext_len: usize) -> usize {
 
 /// Calculates padding length for given data size
 #[allow(clippy::cast_possible_truncation)]
-pub const fn calculate_padding(data_len: usize) -> u8 {
+const fn calculate_padding(data_len: usize) -> u8 {
     (BLOCK_SIZE - (data_len % BLOCK_SIZE)) as u8
 }
 
@@ -71,8 +84,8 @@ impl Cypher {
         Ok(())
     }
 
-    pub fn version(&self) -> CypherVersion {
-        self.key.version.clone()
+    pub const fn version(&self) -> CypherVersion {
+        self.key.version()
     }
 
     // Initializes HMAC from a separate key derived from master key
@@ -105,10 +118,20 @@ impl Cypher {
     }
 
     pub fn encrypt(&self, data: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_with_aad(data, &[])
+    }
+
+    /// Like [`Cypher::encrypt`], but also authenticates `aad` (associated data):
+    /// bytes that are not encrypted but are bound into the integrity tag, so any
+    /// tampering with them makes [`Cypher::decrypt_with_aad`] fail. The same `aad`
+    /// must be supplied when decrypting. An empty `aad` produces a byte-for-byte
+    /// identical result to [`Cypher::encrypt`], so existing ciphertexts and the
+    /// plain file-encryption path are unaffected.
+    pub fn encrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         self.check_tracing()?;
 
         match self.key.version() {
-            CypherVersion::V7WithKdf => self.encrypt_v7(data),
+            CypherVersion::V7WithKdf => self.encrypt_v7(data, aad),
         }
     }
 
@@ -118,6 +141,7 @@ impl Cypher {
         reader: &mut R,
         writer: &mut W,
         pad_len: u8,
+        aad: &[u8],
     ) -> Result<()> {
         // Generate random IV
         let mut iv = BlockBytes::default();
@@ -125,7 +149,7 @@ impl Cypher {
 
         // Prepare and write header
         let header = Version7Header {
-            version: (CypherVersion::V7WithKdf as u16).to_be_bytes(),
+            version: self.key.version().tag(),
             salt: *self.key.salt(),
             pad_len,
             _reserved: 0,
@@ -143,6 +167,11 @@ impl Cypher {
         // Encrypt blocks
         encrypt_blocks_v7(reader, writer, &mut cipher, &mut mac, pad_len)?;
 
+        // Bind any associated data (e.g. a policy vault's keyslot metadata) into
+        // the tag, in the same order decryption re-derives it. An empty `aad`
+        // leaves the MAC unchanged.
+        Mac::update(&mut mac, aad);
+
         // Write HMAC
         let computed_hmac = mac.finalize();
         writer.write_all(&computed_hmac.into_bytes())?;
@@ -150,7 +179,7 @@ impl Cypher {
         Ok(())
     }
 
-    fn encrypt_v7(&self, data: &[u8]) -> Result<Vec<u8>> {
+    fn encrypt_v7(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         // Pre-allocate output buffer with exact size needed
         let output_size = encrypted_size_v7(data.len());
         let mut result = Vec::with_capacity(output_size);
@@ -158,7 +187,7 @@ impl Cypher {
         let pad_len = calculate_padding(data.len());
         let mut reader = Cursor::new(data);
 
-        self.encrypt_helper_v7(&mut reader, &mut result, pad_len)?;
+        self.encrypt_helper_v7(&mut reader, &mut result, pad_len, aad)?;
 
         Ok(result)
     }
@@ -176,16 +205,23 @@ impl Cypher {
 
         let pad_len = calculate_padding(usize::try_from(file_len)?);
 
-        self.encrypt_helper_v7(&mut file, out, pad_len)?;
+        self.encrypt_helper_v7(&mut file, out, pad_len, &[])?;
 
         Ok(())
     }
 
     pub fn decrypt(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        self.decrypt_with_aad(data, &[])
+    }
+
+    /// Like [`Cypher::decrypt`], but also authenticates `aad` — which must equal
+    /// the associated data passed to [`Cypher::encrypt_with_aad`]. Decryption
+    /// fails if `aad` does not match, even when the ciphertext itself is intact.
+    pub fn decrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         self.check_tracing()?;
 
         match self.key.version() {
-            CypherVersion::V7WithKdf => self.decrypt_v7(data),
+            CypherVersion::V7WithKdf => self.decrypt_v7(data, aad),
         }
     }
 
@@ -221,9 +257,9 @@ impl Cypher {
         Ok(())
     }
 
-    fn decrypt_v7(&self, data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    fn decrypt_v7(&self, data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         if data.len() < size_of::<Version7Header>() + BLOCK_SIZE + HMAC_SIZE {
-            bail!("File is too small");
+            bail!("file is too small");
         }
 
         // First thing we do is to verify HMAC to make sure the file is correct and hasn't
@@ -237,6 +273,9 @@ impl Cypher {
         let mut mac = self.hmac_start();
         Mac::update(&mut mac, header_bytes);
         Mac::update(&mut mac, encrypted_data);
+        // Associated data (a policy vault's keyslot metadata) is bound into the
+        // tag in the same order encryption appended it. Empty for plain envelopes.
+        Mac::update(&mut mac, aad);
         if mac.verify_slice(hmac).is_err() {
             bail!("Decryption failed");
         }
@@ -265,7 +304,7 @@ impl Cypher {
             anyhow::anyhow!("Can't process files larger than 4Gb on a 32-bit platform")
         })?;
         if file_size < size_of::<Version7Header>() + BLOCK_SIZE + HMAC_SIZE {
-            bail!("File is too small");
+            bail!("file is too small");
         }
 
         // First thing we do is to verify HMAC to make sure the file is correct and hasn't
@@ -289,5 +328,36 @@ impl Cypher {
         self.decrypt_helper_v7(file, data_len, out)?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::KEY_MATERIAL_LEN;
+
+    #[test]
+    fn material_keyed_roundtrip_and_aad_binding() {
+        let key = [7u8; KEY_MATERIAL_LEN];
+        let cypher = cypher_from_material(&key, CypherVersion::default());
+
+        // Round-trips with matching associated data.
+        let ct = cypher.encrypt_with_aad(b"payload", b"header-v1").unwrap();
+        assert_eq!(
+            cypher
+                .decrypt_with_aad(&ct, b"header-v1")
+                .unwrap()
+                .as_slice(),
+            b"payload"
+        );
+
+        // A different associated value fails authentication.
+        assert!(cypher.decrypt_with_aad(&ct, b"header-v2").is_err());
+        // The wrong key fails too.
+        assert!(
+            cypher_from_material(&[8u8; KEY_MATERIAL_LEN], CypherVersion::default())
+                .decrypt_with_aad(&ct, b"header-v1")
+                .is_err()
+        );
     }
 }

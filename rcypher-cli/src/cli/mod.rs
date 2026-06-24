@@ -6,7 +6,7 @@ pub mod utils;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use rcypher::{DataContainer, PolicyVault};
+use rcypher::{DataContainer, FileContainerV8, PolicyVault};
 
 pub const STANDBY_TIMEOUT: u64 = 300;
 pub const SECURITY_WATCHDOG_TIMEOUT_SECS: u64 = 2; // 2× the 1-second timer interval
@@ -45,5 +45,5 @@ pub fn persist_store(
         );
     }
     let payload = data.safe_serialize()?;
-    vault.save(&payload, path)
+    FileContainerV8::write(path, vault, &payload)
 }

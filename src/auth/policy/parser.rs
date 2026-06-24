@@ -13,7 +13,7 @@ use std::collections::HashSet;
 
 use anyhow::{Result, bail};
 
-use super::policy::{Leaf, PolicyNode};
+use super::tree::{Leaf, PolicyNode};
 
 #[derive(Debug, PartialEq, Eq)]
 enum Token {
