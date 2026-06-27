@@ -229,8 +229,8 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
 
     let mut p = spawn_session(&path);
 
-    // Opening a legacy store notifies the user it will be upgraded on next write.
-    p.exp_string("legacy store").unwrap();
+    // Opening a legacy store announces the in-memory conversion to the current format.
+    p.exp_string("Legacy store format detected").unwrap();
 
     // The first write triggers the upgrade: rewrites the file as v8 and backs up
     // the original. The pre-existing value survives the re-encryption, and auth
@@ -297,7 +297,8 @@ fn interactive_unlock_prompts_generically_and_loops() {
     let mut p = spawn_interactive_unlock(&path);
 
     // One generic prompt (not per-factor); a wrong password is reported and retried.
-    p.exp_string("Password (empty to cancel)").unwrap();
+    // (The exact tail varies with the `fido2` feature, so match the stable prefix.)
+    p.exp_string("Password (empty").unwrap();
     p.send_line("totally-wrong-password").unwrap();
     p.exp_string("did not match any factor").unwrap();
 

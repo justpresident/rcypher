@@ -36,9 +36,10 @@ USER COMMANDS:
 AUTH COMMANDS (multi-factor stores):
   auth factor list           - List enrolled factors
   auth factor add password NAME - Add a password factor (NAME is a label, not the password)
+  auth factor add fido2 NAME    - Add a FIDO2 security-key factor (a hardware security key)
   auth factor remove NAME    - Remove a factor (not used by the policy)
   auth policy show           - Show the current unlock policy
-  auth policy set EXPR       - Set the unlock policy, e.g. p1 or (p2 and yk)
+  auth policy set EXPR       - Set the unlock policy, e.g. p1 or (p2 and fido2)
 ```
 ![demo](demo.gif)
 Secrets are:
@@ -56,9 +57,9 @@ automatically (see [Upgrading a legacy store](#upgrading-a-legacy-store-to-multi
 ## Multi-factor unlock
 
 A store can require more than one secret to unlock. Each secret is a named
-**factor** (today: a password; FIDO2 security keys are on the way), and an
-**access policy** — a boolean expression over factor names — decides which
-combinations open the store.
+**factor** (a password, or a FIDO2 security key — built into the CLI by default),
+and an **access policy** — a boolean expression over factor names —
+decides which combinations open the store.
 
 A new store starts with one password factor named `primary` and the policy
 `primary`. For example, add a **recovery password** as a second way in, so a
@@ -93,13 +94,15 @@ than `or`):
 |----------------------------|------------------------------------------------|----------|
 | `primary`                  | the `primary` password is given                | the default single-secret store |
 | `primary or recovery`      | **either** password is given                   | a backup/recovery password (note: only as strong as the weaker one) |
-| `primary and yubikey`      | **both** the password and the security key     | real two-factor — *(YubiKey factor coming)* |
-| `primary or (recovery and yubikey)` | `primary` alone, **or** `recovery` + the key | day-to-day password, plus a 2-of-2 recovery path |
+| `primary and fido2`        | **both** the password and the security key     | real two-factor |
+| `primary or (recovery and fido2)` | `primary` alone, **or** `recovery` + the key | day-to-day password, plus a 2-of-2 recovery path |
 
 `and` of two passwords *is* allowed (e.g. two custodians who must both be
 present), but for one person it just means typing two secrets every time for
-little gain — the combination pays off when one factor is a hardware key, which
-is the upcoming FIDO2/YubiKey factor.
+little gain — the combination pays off when one factor is a hardware key. The
+FIDO2 security-key factor (any `hmac-secret`-capable authenticator) is built into
+the CLI by default; enrol one with `auth factor add fido2 NAME`. (A
+`--no-default-features` build omits it, for hosts without the USB-HID build deps.)
 
 On open, rcypher prints the policy and asks for a password in a loop — you don't
 pick a factor. Each password you enter is matched against the factors, the ones
@@ -139,8 +142,8 @@ IVs change on each save. The full construction is specified in
 ### Recovery and backup
 
 * Keep at least one **strong recovery branch** — e.g. a long, unique recovery
-  password stored in another password manager — so losing a security key (once
-  supported) doesn't lock you out permanently.
+  password stored in another password manager — so losing a security key doesn't
+  lock you out permanently.
 * Enroll a **backup factor** before tightening the policy, and confirm it
   unlocks the store on its own branch.
 * A lost factor's secret cannot be recovered; only another satisfying branch of
@@ -149,7 +152,7 @@ IVs change on each save. The full construction is specified in
 ### A note on `or` branches
 
 An `or` is only as strong as its **weakest** satisfying set. A policy like
-`primary or (recovery and yubikey)` can be opened by `primary` alone, so the
+`primary or (recovery and fido2)` can be opened by `primary` alone, so the
 extra security key adds nothing against an attacker who has that one password.
 That's a fine trade-off when each branch is itself strong (e.g. a recovery
 password you keep in another manager) — just choose each branch deliberately.
@@ -561,7 +564,8 @@ If clipboard retention is unacceptable, use terminal output instead.
 - [ ] Add a command to change master password
 - [x] Multi-factor unlock with boolean access policies (password factors) — see
   "Multi-factor unlock" above
-- [ ] Add a YubiKey factor (FIDO2 `hmac-secret`) to the multi-factor policy model
+- [x] Add a FIDO2 security-key factor (`hmac-secret`) to the multi-factor policy model
+  — `fido2` feature (on by default in the CLI; opt-in for the library)
 - [ ] Add a user notification at start to perform regular backups in multiple places
 - [ ] Add memory locking to prevent from swapping
 - [ ] Enable MIRI in CI

@@ -276,7 +276,7 @@ impl InteractiveCli {
     }
 
     /// `auth …` — multi-factor management. Subcommands: `auth policy {show|set
-    /// EXPR}` and `auth factor {list|add password NAME|add yubikey NAME|remove
+    /// EXPR}` and `auth factor {list|add password NAME|add fido2 NAME|remove
     /// NAME}`.
     fn cmd_auth(&self, line: &str, store: &mut crate::Store) -> Result<()> {
         let args = line.strip_prefix("auth").unwrap_or("").trim_start();
@@ -335,9 +335,70 @@ impl InteractiveCli {
                 })?;
                 self.enroll_password(id, store)
             }
-            "yubikey" => bail!("YubiKey enrollment is not yet supported"),
-            _ => bail!("syntax: auth factor add password|yubikey NAME"),
+            "fido2" => {
+                let id = first_word(rest).ok_or_else(|| {
+                    anyhow!("syntax: auth factor add fido2 NAME (NAME is a label)")
+                })?;
+                self.enroll_fido2(id, store)
+            }
+            _ => bail!("syntax: auth factor add password|fido2 NAME"),
         }
+    }
+
+    /// Enrols a FIDO2 security key as a new factor: registers an `hmac-secret`
+    /// credential on the connected authenticator (touch, and a PIN if requested) and
+    /// stores it. Like a password factor, it is unused until an `auth policy set`
+    /// references it.
+    #[cfg(feature = "fido2")]
+    fn enroll_fido2(&self, id: &str, store: &mut crate::Store) -> Result<()> {
+        secure_print(
+            format!(
+                "Enrolling FIDO2 factor '{id}'. The name is a public label (shown by 'auth factor \
+                 list', stored unencrypted) — not a secret."
+            ),
+            self.insecure_stdout,
+        )?;
+        // A PIN is usable only if one is set on the key — detect it rather than
+        // asking, so we don't try (and fail) to use a PIN that isn't configured.
+        let has_pin = rcypher::fido2::device_has_pin()?;
+        let pin = if has_pin {
+            Some(crate::cli::utils::prompt_password("Security key PIN")?)
+        } else {
+            secure_print(
+                "This key has no PIN set — the factor will unlock with a touch only. Set a PIN on \
+                 the key (with your vendor's tool) if you want PIN protection."
+                    .to_string(),
+                self.insecure_stdout,
+            )?;
+            None
+        };
+        secure_print(
+            "Touch your FIDO2 security key to enrol it…".to_string(),
+            self.insecure_stdout,
+        )?;
+        let cred =
+            rcypher::fido2::enroll(crate::cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
+        store.enroll_fido2(
+            id,
+            cred.credential_id,
+            crate::cli::FIDO2_RP_ID.to_string(),
+            cred.salt,
+            has_pin,
+            &cred.raw_hmac_secret,
+        )?;
+        self.save(store)?;
+        secure_print(
+            format!("Factor '{id}' enrolled. Reference it in 'auth policy set' to require it."),
+            self.insecure_stdout,
+        )?;
+        Ok(())
+    }
+
+    /// Without FIDO2 support compiled in, enrollment is unavailable.
+    #[cfg(not(feature = "fido2"))]
+    #[allow(clippy::unused_self)]
+    fn enroll_fido2(&self, _id: &str, _store: &mut crate::Store) -> Result<()> {
+        bail!("this build has no FIDO2 support; rebuild rcypher-cli with --features fido2")
     }
 
     /// Lists the enrolled factors and their kinds.
@@ -345,7 +406,7 @@ impl InteractiveCli {
         for (id, kind) in store.factor_kinds() {
             let kind = match kind {
                 FactorKind::Password { .. } => "password",
-                FactorKind::Yubikey { .. } => "yubikey",
+                FactorKind::Fido2 { .. } => "fido2",
             };
             secure_print(format!("{id} ({kind})"), self.insecure_stdout)?;
         }
@@ -449,7 +510,10 @@ fn print_auth_help() {
     println!(
         "  auth factor add password NAME - Add a password factor (NAME is a label, not the password)"
     );
+    println!(
+        "  auth factor add fido2 NAME    - Add a FIDO2 security-key factor (a hardware security key)"
+    );
     println!("  auth factor remove NAME    - Remove a factor (not used by the policy)");
     println!("  auth policy show           - Show the current unlock policy");
-    println!("  auth policy set EXPR       - Set the unlock policy, e.g. p1 or (p2 and yk)");
+    println!("  auth policy set EXPR       - Set the unlock policy, e.g. p1 or (p2 and fido2)");
 }

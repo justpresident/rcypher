@@ -11,4 +11,9 @@ const CLIPBOARD_TTL_MS: u64 = 10000;
 /// when a legacy store is converted on open.
 pub const DEFAULT_FACTOR_ID: &str = "primary";
 
+/// The FIDO2 relying-party id bound into enrolled credentials. Stored in each
+/// factor and replayed at unlock, so it must stay stable across versions.
+#[cfg(feature = "fido2")]
+pub const FIDO2_RP_ID: &str = "rcypher";
+
 pub use interactive::InteractiveCli;

@@ -93,7 +93,7 @@ fn candidates<'a>(
             (1, _, _) => fixed(&["policy", "factor"]),
             (2, Some("policy"), _) => fixed(&["show", "set"]),
             (2, Some("factor"), _) => fixed(&["list", "add", "remove"]),
-            (3, Some("factor"), Some("add")) => fixed(&["password", "yubikey"]),
+            (3, Some("factor"), Some("add")) => fixed(&["password", "fido2"]),
             (3, Some("factor"), Some("remove")) => (
                 pos - prefix.len(),
                 matching_sorted(factors.iter().map(String::as_str), prefix),
@@ -214,7 +214,7 @@ mod tests {
         );
         assert_eq!(
             complete("auth factor add "),
-            vec!["password".to_string(), "yubikey".to_string()]
+            vec!["password".to_string(), "fido2".to_string()]
         );
     }
 

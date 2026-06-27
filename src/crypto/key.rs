@@ -5,7 +5,9 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 use argon2::{Algorithm, Argon2, Params, Version};
+use hkdf::Hkdf;
 use rand::TryRngCore;
+use sha2::Sha256;
 use zeroize::Zeroizing;
 
 use crate::constants::{KEY_LEN, KEY_MATERIAL_LEN, KeyBytes, KeyMaterialBytes, SaltBytes};
@@ -45,6 +47,22 @@ pub fn derive_key_material(
     argon2
         .hash_password_into(password.as_bytes(), salt, material.as_mut())
         .map_err(|e| anyhow::anyhow!("Key derivation failed: {e}"))?;
+    Ok(material)
+}
+
+/// Expands high-entropy input keying material into 64-byte [`KeyMaterial`] (cipher
+/// key ‖ HMAC key) with HKDF-SHA256 and a domain-separation `info`.
+///
+/// For IKM that is *already* a uniform pseudorandom value — e.g. a FIDO2
+/// `hmac-secret` output, which is itself an HMAC — so, unlike the password KDF
+/// [`derive_key_material`], no memory-hard work and no extract salt are required
+/// (RFC 5869 §3.3: the salt's only role is to extract uniformity from a non-uniform
+/// secret). `info` binds the output to its specific use.
+pub fn expand_key_material(ikm: &[u8], info: &[u8]) -> Result<KeyMaterial> {
+    let mut material = Zeroizing::new([0u8; KEY_MATERIAL_LEN]);
+    Hkdf::<Sha256>::new(None, ikm)
+        .expand(info, material.as_mut())
+        .map_err(|e| anyhow::anyhow!("HKDF expand failed: {e}"))?;
     Ok(material)
 }
 

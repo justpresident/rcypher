@@ -152,15 +152,11 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
 
 /// Collects passwords against a locked store until its policy is satisfied.
 ///
-/// Asks for a password in a loop (not per named factor): each entry is tried
-/// against every still-unsatisfied factor, satisfied factors are reported, and
-/// the loop continues until the policy is satisfied. When `--insecure-password`
-/// is set (testing only), that one password is tried once instead of prompting.
+/// Drives the interactive unlock loop, prompting only for the factor *types* still
+/// needed: a password while an unsatisfied password factor remains, and/or a FIDO2
+/// security key while an unsatisfied one remains (when support is built in). When
+/// `--insecure-password` is set (testing only), that one password is tried once.
 fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result<()> {
-    if !locked.satisfiable_by_password() {
-        bail!("this store's policy requires a YubiKey factor, which is not yet supported");
-    }
-
     // Non-interactive testing path: one password, which must satisfy on its own.
     if let Some(pw) = params.insecure_password.as_deref() {
         locked.try_password(pw)?;
@@ -170,27 +166,122 @@ fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result
         return Ok(());
     }
 
+    // Without FIDO2 support compiled in, a policy that needs a security key cannot be
+    // satisfied here — say so up front rather than looping.
+    #[cfg(not(feature = "fido2"))]
+    if !locked.satisfiable_by_password() {
+        bail!(
+            "this store's policy requires a FIDO2 security key; rebuild rcypher-cli with \
+             --features fido2"
+        );
+    }
+
     while !locked.can_unlock() {
-        let password = prompt_password("Password (empty to cancel)")?;
-        if password.is_empty() {
-            bail!("unlock cancelled");
+        let needs_password = locked.needs_password();
+        let needs_fido2 = pending_fido2(locked);
+
+        if !needs_password && !needs_fido2 {
+            bail!(
+                "cannot satisfy the unlock policy with the available factors (a required \
+                 security key may need a build with --features fido2)"
+            );
         }
 
-        let spinner = Spinner::new("Checking", params.quiet);
-        let matched = locked.try_password(&password)?;
-        spinner.finish_and_clear();
+        // Prompt for a password only while one is still needed.
+        if needs_password {
+            let prompt = if needs_fido2 {
+                "Password (empty to use a security key, or to cancel)"
+            } else {
+                "Password (empty to cancel)"
+            };
+            let password = prompt_password(prompt)?;
+            if !password.is_empty() {
+                let spinner = Spinner::new("Checking", params.quiet);
+                let matched = locked.try_password(&password)?;
+                spinner.finish_and_clear();
+                report_unlocked(matched.as_deref(), locked);
+                continue;
+            }
+            // Empty entry: use a key if one applies, else cancel.
+            if !needs_fido2 {
+                bail!("unlock cancelled");
+            }
+        }
 
-        match matched {
-            None => eprintln!("That password did not match any factor — try again."),
-            Some(id) => {
-                eprintln!("Factor '{id}' unlocked.");
-                if !locked.can_unlock() {
-                    eprintln!("More factors are required to satisfy the policy.");
-                }
+        // A security key is the (or an) option — present it.
+        #[cfg(feature = "fido2")]
+        if !present_fido2_factor(locked)? && !needs_password {
+            // Only a key can unlock and it satisfied nothing; offer a retry or cancel.
+            if !crate::cli::utils::read_tty_confirmation("Try the security key again? [Y/n]: ")? {
+                bail!("unlock cancelled");
             }
         }
     }
     Ok(())
+}
+
+/// Reports a factor attempt and whether more factors are still needed.
+fn report_unlocked(matched: Option<&str>, locked: &LockedContainer) {
+    match matched {
+        None => eprintln!("That did not match any factor — try again."),
+        Some(id) => {
+            eprintln!("Factor '{id}' unlocked.");
+            if !locked.can_unlock() {
+                eprintln!("More factors are required to satisfy the policy.");
+            }
+        }
+    }
+}
+
+/// Whether the lock still needs a FIDO2 security key this build can use.
+#[cfg(feature = "fido2")]
+fn pending_fido2(locked: &LockedContainer) -> bool {
+    locked
+        .pending_factor_kinds()
+        .iter()
+        .any(|(_, kind)| matches!(kind, rcypher::FactorKind::Fido2 { .. }))
+}
+#[cfg(not(feature = "fido2"))]
+const fn pending_fido2(_locked: &LockedContainer) -> bool {
+    false
+}
+
+/// Presents each still-pending FIDO2 factor: prompts for a touch (and a PIN if the
+/// factor needs one), reads its `hmac-secret`, and tries it. Returns `true` once a
+/// factor is satisfied.
+#[cfg(feature = "fido2")]
+fn present_fido2_factor(locked: &mut LockedContainer) -> Result<bool> {
+    // `pending_factor_kinds()` is owned, so we can iterate it while mutably trying.
+    for (id, kind) in locked.pending_factor_kinds() {
+        let rcypher::FactorKind::Fido2 {
+            credential_id,
+            rp_id,
+            salt,
+            require_pin,
+        } = kind
+        else {
+            continue;
+        };
+
+        eprintln!("Touch your FIDO2 security key for factor '{id}'…");
+        let pin = if require_pin {
+            Some(prompt_password("Security key PIN")?)
+        } else {
+            None
+        };
+        let pin = pin.as_ref().map(|p| p.as_str());
+        match rcypher::fido2::hmac_secret(&credential_id, &rp_id, &salt, pin) {
+            Ok(secret) => {
+                if let Some(matched) = locked.try_fido2_secret(&secret)? {
+                    report_unlocked(Some(&matched), locked);
+                    return Ok(true);
+                }
+                eprintln!("  That key did not match factor '{id}'.");
+            }
+            Err(e) => eprintln!("  {e}"),
+        }
+    }
+    Ok(false)
 }
 
 /// Returns the store password — the one supplied via `--insecure-password`
@@ -221,11 +312,23 @@ fn open_existing_store(params: &CliParams, path: &Path, argon2: &Argon2Params) -
     let mut locked = LockedContainer::load_with_params(path, argon2)?;
     eprintln!("Unlock for {}: {}", path.display(), locked.requirement());
     collect_passwords(&mut locked, params)?;
+
+    // A legacy store is converted to the current format in memory on unlock — a fresh
+    // data key, re-encrypting every value, plus the new factor's Argon2 — so show
+    // that it's happening rather than appear to hang.
+    let spinner = locked.is_legacy().then(|| {
+        eprintln!("Legacy store format detected — converting to the current format in memory…");
+        Spinner::new("Converting", params.quiet)
+    });
     let store = locked.unlock::<SecretStore>()?;
+    if let Some(spinner) = spinner {
+        spinner.finish_and_clear();
+    }
+
     if store.was_upgraded() {
         eprintln!(
-            "Note: '{}' is a legacy store; it will be upgraded to the current format on the \
-             next write (the original is backed up to {} first).",
+            "Converted in memory. '{}' is rewritten in the current format on the next save \
+             (the original is backed up to {} first).",
             path.display(),
             rcypher::backup_path(path).display()
         );
@@ -261,7 +364,60 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
 
     // Persist an empty store so the file exists for later unlocks.
     store.save(&params.filename)?;
+
+    // Offer to add a FIDO2 security key as a second factor right away.
+    #[cfg(feature = "fido2")]
+    offer_fido2_enrollment(&mut store, params)?;
+
     Ok(store)
+}
+
+/// On a fresh interactive store, offers to enrol a FIDO2 security key and choose
+/// whether it is required alongside the password (AND) or an alternative to it (OR).
+/// A no-op on the non-interactive `--insecure-password` path.
+#[cfg(feature = "fido2")]
+fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
+    use crate::cli::utils::read_tty_confirmation;
+
+    if params.insecure_password.is_some()
+        || !read_tty_confirmation("Enrol a FIDO2 security key as a second factor now? [y/N]: ")?
+    {
+        return Ok(());
+    }
+
+    // A PIN is usable only if one is set on the key — detect it rather than asking.
+    let has_pin = rcypher::fido2::device_has_pin()?;
+    let pin = if has_pin {
+        Some(prompt_password("Security key PIN")?)
+    } else {
+        eprintln!("This key has no PIN set — the factor will unlock with a touch only.");
+        None
+    };
+    eprintln!("Touch your FIDO2 security key to enrol it…");
+    let cred = rcypher::fido2::enroll(cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
+
+    let factor_id = "key";
+    store.enroll_fido2(
+        factor_id,
+        cred.credential_id,
+        cli::FIDO2_RP_ID.to_string(),
+        cred.salt,
+        has_pin,
+        &cred.raw_hmac_secret,
+    )?;
+
+    let both = read_tty_confirmation(
+        "Require BOTH the password and the key to unlock? [y/N] (No = either one) : ",
+    )?;
+    let policy = if both {
+        format!("{} and {factor_id}", cli::DEFAULT_FACTOR_ID)
+    } else {
+        format!("{} or {factor_id}", cli::DEFAULT_FACTOR_ID)
+    };
+    store.set_policy(&policy)?;
+    store.save(&params.filename)?;
+    eprintln!("FIDO2 factor '{factor_id}' enrolled; unlock policy is now: {policy}");
+    Ok(())
 }
 
 /// Acquires the store for the interactive session: opens an existing one, or

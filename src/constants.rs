@@ -21,3 +21,9 @@ pub type HmacBytes = [u8; HMAC_SIZE];
 /// Length of a full key's material: a cipher key followed by an HMAC key.
 pub const KEY_MATERIAL_LEN: usize = KEY_LEN + HMAC_SIZE;
 pub type KeyMaterialBytes = [u8; KEY_MATERIAL_LEN];
+
+/// Length of a FIDO2 `hmac-secret` output — one SHA-256 HMAC computed on the
+/// authenticator, used as high-entropy input keying material for a FIDO2 factor's
+/// auth-KEK.
+pub const HMAC_SECRET_LEN: usize = 32;
+pub type HmacSecretBytes = [u8; HMAC_SECRET_LEN];

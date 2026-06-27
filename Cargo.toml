@@ -19,6 +19,11 @@ default = ["storage"]
 # Bundled key-value storage format (rcypher's own). Disable to use only the
 # crypto envelope (`Cypher`/`EncryptionKey`) with your own serialization.
 storage = ["dep:regex"]
+# Hardware FIDO2 security-key factors via the `hmac-secret` extension. Adds the
+# `rcypher::fido2` device module (CTAP over USB-HID). The pure FIDO2 KEK/enroll/
+# unlock primitives are always available; this only gates the device I/O, which
+# pulls native deps (hidapi → libudev/libusb; a CTAP PIN crypto backend).
+fido2 = ["dep:ctap-hid-fido2"]
 
 [dependencies]
 aes = "0.8"
@@ -27,6 +32,8 @@ argon2 = "0.5"
 bincode = "2.0.1"
 cbc = "0.1"
 cipher = { version = "0.4", features = ["block-padding"] }
+ctap-hid-fido2 = { version = "3.5", optional = true }
+hkdf = "0.12"
 hmac = "0.12"
 nix = { version = "0.30.1", features = ["process", "signal"] }
 num_enum = "0.7.5"

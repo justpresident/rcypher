@@ -4,7 +4,7 @@
 //! is secret-shared down a boolean [`PolicyNode`] access tree — an `Or` replicates
 //! its secret to each child, an `And` XOR-splits it — and each [`Leaf`] holds its
 //! share wrapped under the referenced factor's key. Recovering the DEK therefore
-//! requires satisfying the policy (e.g. `pass1 OR (pass2 AND yubikey)`).
+//! requires satisfying the policy (e.g. `pass1 OR (pass2 AND fido2)`).
 //!
 //! Layers: [`factor`] (a credential), [`policy`] (the boolean rule over factor
 //! names + its sharing), [`header`] ([`VaultHeader`] = factors + policy, the
@@ -12,6 +12,8 @@
 //! vault + unlock session).
 
 mod factor;
+#[cfg(feature = "fido2")]
+pub mod fido2;
 mod header;
 mod policy;
 mod vault;

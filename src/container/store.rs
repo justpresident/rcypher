@@ -16,6 +16,7 @@ use zeroize::Zeroizing;
 use super::{FileContainerFormat, FileContainerV8};
 use crate::DataContainer;
 use crate::auth::{FactorKind, PolicyVault, UnlockSession};
+use crate::constants::{HmacSecretBytes, SaltBytes};
 use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
 use crate::version::CypherVersion;
 
@@ -93,7 +94,7 @@ impl LockedContainer {
     }
 
     /// A human-readable description of what unlocking requires — e.g. `a password`
-    /// or `pass1 or (pass2 and yk)`.
+    /// or `pass1 or (pass2 and fido2)`.
     #[must_use]
     pub fn requirement(&self) -> String {
         match &self.lock {
@@ -102,14 +103,49 @@ impl LockedContainer {
         }
     }
 
-    /// Whether the lock can be satisfied with passwords alone (i.e. without a
-    /// not-yet-supported `YubiKey` factor).
+    /// Whether the lock can be satisfied with passwords alone — i.e. without
+    /// presenting a FIDO2 security key. A caller without FIDO2 support can use this
+    /// to decide whether it can unlock at all.
     #[must_use]
     pub fn satisfiable_by_password(&self) -> bool {
         match &self.lock {
             Lock::Legacy(_) => true,
             Lock::Policy { session, .. } => session.satisfiable_by_passwords(),
         }
+    }
+
+    /// The still-unsatisfied factors, each id paired with its kind — so a caller can
+    /// see which factor *types* remain (and read a pending FIDO2 factor's device
+    /// parameters: `credential_id`, `rp_id`, `salt`, `require_pin`) and prompt only
+    /// for those. Empty for a legacy single-password store (use
+    /// [`needs_password`](Self::needs_password) there).
+    #[must_use]
+    pub fn pending_factor_kinds(&self) -> Vec<(String, FactorKind)> {
+        match &self.lock {
+            Lock::Legacy(_) => Vec::new(),
+            Lock::Policy { session, .. } => session.pending_factor_kinds(),
+        }
+    }
+
+    /// Whether a password could still make progress toward unlocking — i.e. a legacy
+    /// store not yet unlocked, or a policy with an unsatisfied password factor. Lets
+    /// a prompt loop skip asking for a password when none is needed.
+    #[must_use]
+    pub fn needs_password(&self) -> bool {
+        match &self.lock {
+            Lock::Legacy(slot) => slot.is_none(),
+            Lock::Policy { session, .. } => session
+                .pending_factor_kinds()
+                .iter()
+                .any(|(_, kind)| matches!(kind, FactorKind::Password { .. })),
+        }
+    }
+
+    /// Whether this is a legacy single-password store (which [`unlock`](Self::unlock)
+    /// transparently converts to the current format).
+    #[must_use]
+    pub const fn is_legacy(&self) -> bool {
+        matches!(self.lock, Lock::Legacy(_))
     }
 
     /// Tries `password` against the still-unsatisfied factors. Returns the id of
@@ -135,6 +171,21 @@ impl LockedContainer {
                 });
                 Ok(Some(PRIMARY_FACTOR.to_string()))
             }
+        }
+    }
+
+    /// Tries a FIDO2 `hmac-secret` output (obtained from the authenticator for one
+    /// of the factors reported by [`factor_kinds`](Self::factor_kinds)) against the
+    /// still-unsatisfied factors. Returns the id of the FIDO2 factor it satisfied,
+    /// or `None`. A legacy single-password store has no FIDO2 factors, so this
+    /// returns `None` for one.
+    pub fn try_fido2_secret(
+        &mut self,
+        raw_hmac_secret: &HmacSecretBytes,
+    ) -> Result<Option<String>> {
+        match &mut self.lock {
+            Lock::Policy { session, .. } => session.try_fido2_secret(raw_hmac_secret),
+            Lock::Legacy(_) => Ok(None),
         }
     }
 
@@ -294,7 +345,23 @@ impl<T: DataContainer> UnlockedContainer<T> {
         self.vault.enroll_password(id, password, &self.argon2)
     }
 
-    /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and yk)`).
+    /// Enrolls a FIDO2 security-key factor from a just-enrolled credential and its
+    /// current `hmac-secret` output (obtain both via `rcypher::fido2`). The factor
+    /// is unused until [`set_policy`](Self::set_policy) references it.
+    pub fn enroll_fido2(
+        &mut self,
+        id: &str,
+        credential_id: Vec<u8>,
+        rp_id: String,
+        salt: SaltBytes,
+        require_pin: bool,
+        raw_hmac_secret: &HmacSecretBytes,
+    ) -> Result<()> {
+        self.vault
+            .enroll_fido2(id, credential_id, rp_id, salt, require_pin, raw_hmac_secret)
+    }
+
+    /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and fido2)`).
     pub fn set_policy(&mut self, expr: &str) -> Result<()> {
         self.vault.set_policy(expr)
     }
@@ -418,6 +485,48 @@ mod tests {
             Some("p2")
         );
         assert_eq!(locked.unlock::<Text>().unwrap().data().0, "d");
+    }
+
+    #[test]
+    fn enroll_fido2_and_unlock_via_secret() {
+        // A fixed `hmac-secret` standing in for an authenticator, so the facade's
+        // FIDO2 enroll/unlock path runs without hardware.
+        let secret = [5u8; crate::constants::HMAC_SECRET_LEN];
+        let mut store = new_store("p1pass", "d");
+        store
+            .enroll_fido2(
+                "key",
+                vec![1, 2],
+                "rcypher".into(),
+                crate::constants::SaltBytes::default(),
+                false,
+                &secret,
+            )
+            .unwrap();
+        store.set_policy("primary or key").unwrap();
+        let bytes = store.to_vec().unwrap();
+
+        // The locked container reports the FIDO2 factor's params for the caller to
+        // drive a `get_assertion`...
+        let mut locked = open(&bytes);
+        assert!(
+            locked
+                .pending_factor_kinds()
+                .iter()
+                .any(|(id, k)| id == "key" && matches!(k, FactorKind::Fido2 { .. }))
+        );
+
+        // ...and the resulting secret alone unlocks (OR replicates the DEK).
+        assert_eq!(
+            locked.try_fido2_secret(&secret).unwrap().as_deref(),
+            Some("key")
+        );
+        assert!(locked.can_unlock());
+        assert_eq!(locked.unlock::<Text>().unwrap().data().0, "d");
+
+        // A legacy-style lock (no FIDO2 factors) yields no match and empty kinds.
+        let mut pw_only = open(&new_store("only", "x").to_vec().unwrap());
+        assert_eq!(pw_only.try_fido2_secret(&secret).unwrap(), None);
     }
 
     #[test]

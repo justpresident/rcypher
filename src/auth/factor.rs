@@ -2,16 +2,20 @@
 //! into 64-byte key material that wraps/unwraps its policy leaves' shares.
 //!
 //! A password factor derives its key material with Argon2id (memory-hard, since
-//! the input is a human password). The FIDO2 yubikey factor is not yet
-//! implemented; its key material will come from the authenticator's
-//! `hmac-secret` output.
+//! the input is a human password). A FIDO2 security-key factor derives it by
+//! HKDF-expanding the authenticator's `hmac-secret` output — already high-entropy,
+//! so no memory-hard work is needed.
 
 use anyhow::{Result, bail};
 use bincode::{Decode, Encode};
 use rand::TryRngCore;
 
-use crate::constants::SaltBytes;
-use crate::crypto::{Argon2Params, KeyMaterial, derive_key_material};
+use crate::constants::{HmacSecretBytes, SaltBytes};
+use crate::crypto::{Argon2Params, KeyMaterial, derive_key_material, expand_key_material};
+
+/// Domain-separation label binding a FIDO2 factor's auth-KEK to its purpose (the
+/// HKDF `info`); version it so a future scheme change is unambiguous.
+const FIDO2_AUTHKEK_INFO: &[u8] = b"rcypher fido2 auth-kek v1";
 
 /// Key-derivation parameters for one enrolled factor.
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
@@ -26,7 +30,7 @@ pub enum FactorKind {
     /// A FIDO2 security-key factor via the `hmac-secret` extension. `require_pin`
     /// asks the authenticator for user verification (a PIN) in addition to the
     /// touch that is always required.
-    Yubikey {
+    Fido2 {
         credential_id: Vec<u8>,
         rp_id: String,
         salt: SaltBytes,
@@ -82,6 +86,15 @@ pub fn password_kek(password: &str, kind: &FactorKind) -> Result<KeyMaterial> {
             parallelism: *parallelism,
         },
     )
+}
+
+/// Derives a FIDO2 factor's 64-byte auth-KEK from the authenticator's
+/// `hmac-secret` output by HKDF-expanding it (the secret is already high-entropy,
+/// so no Argon2 and no extract salt — see [`expand_key_material`]). The KEK depends
+/// only on the secret, so the unlock path derives it once and matches it against
+/// every FIDO2 leaf, just as a password is tried against every password factor.
+pub fn fido2_kek(raw_hmac_secret: &HmacSecretBytes) -> Result<KeyMaterial> {
+    expand_key_material(raw_hmac_secret, FIDO2_AUTHKEK_INFO)
 }
 
 #[cfg(test)]
@@ -142,12 +155,55 @@ mod tests {
 
     #[test]
     fn rejects_non_password_kind() {
-        let yk = FactorKind::Yubikey {
+        let fido2 = FactorKind::Fido2 {
             credential_id: vec![1],
             rp_id: "rcypher".into(),
             salt: SaltBytes::default(),
             require_pin: false,
         };
-        assert!(password_kek("x", &yk).is_err());
+        assert!(password_kek("x", &fido2).is_err());
+    }
+
+    #[test]
+    fn same_fido2_secret_same_kek_different_secret_differs() {
+        let secret = [7u8; crate::constants::HMAC_SECRET_LEN];
+        assert_eq!(
+            fido2_kek(&secret).unwrap().as_slice(),
+            fido2_kek(&secret).unwrap().as_slice()
+        );
+
+        let mut other = secret;
+        other[0] ^= 0x01;
+        assert_ne!(
+            fido2_kek(&secret).unwrap().as_slice(),
+            fido2_kek(&other).unwrap().as_slice()
+        );
+    }
+
+    #[test]
+    fn fido2_kek_wraps_a_share_only_for_the_right_secret() {
+        let secret = [3u8; crate::constants::HMAC_SECRET_LEN];
+        let share = [9u8; KEY_MATERIAL_LEN];
+
+        let kek = fido2_kek(&secret).unwrap();
+        let wrapped = cypher_from_material(&kek, CypherVersion::default())
+            .encrypt_with_aad(&share, &[])
+            .unwrap();
+        assert_eq!(
+            cypher_from_material(&kek, CypherVersion::default())
+                .decrypt_with_aad(&wrapped, &[])
+                .unwrap()
+                .as_slice(),
+            &share[..]
+        );
+
+        let mut wrong_secret = secret;
+        wrong_secret[0] ^= 0x01;
+        let wrong = fido2_kek(&wrong_secret).unwrap();
+        assert!(
+            cypher_from_material(&wrong, CypherVersion::default())
+                .decrypt_with_aad(&wrapped, &[])
+                .is_err()
+        );
     }
 }

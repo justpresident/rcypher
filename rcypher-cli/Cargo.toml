@@ -13,6 +13,14 @@ categories = ["command-line-utilities"]
 name = "rcypher"
 path = "src/main.rs"
 
+[features]
+default = ["fido2"]
+# Hardware FIDO2 security-key support (enrol/unlock with a security key), on by
+# default. Build with `--no-default-features` for an environment without the native
+# USB-HID build deps (libudev/hidapi + pkg-config); the FIDO2 commands then report
+# that support isn't compiled in.
+fido2 = ["rcypher/fido2"]
+
 [dependencies]
 rcypher = { path = "..", version = "0.2.0", features = ["storage"] }
 anyhow = "1.0"

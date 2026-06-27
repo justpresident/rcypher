@@ -1,11 +1,12 @@
 # Multi-factor unlock protocol
 
 How rcypher protects a vault with an arbitrary boolean **access policy** over
-named factors — for example `pass1 OR (pass2 AND yubikey)`. This document is the
+named factors — for example `pass1 OR (pass2 AND fido2)`. This document is the
 normative description of the construction so it can be audited against the
 literature rather than taken on faith.
 
-Status: design complete; password factors implemented, FIDO2 factor in progress.
+Status: design complete; password and FIDO2 security-key factors implemented (the
+FIDO2 device I/O is behind the `fido2` cargo feature).
 Vault format version: **8** (policy vault), distinct from the version-7 plain
 password envelope.
 
@@ -53,11 +54,45 @@ All key material is **64 bytes = a 32-byte AES-256 key ‖ a 32-byte HMAC key**.
 | Key | Obtained from | Role |
 |---|---|---|
 | **DEK** (data-encryption key) | fresh random bytes at vault creation | encrypts the stored payload; the secret the policy protects |
-| **auth-KEKᵢ** (one per factor) | password: `Argon2id(passwordᵢ, saltᵢ)`; FIDO2: `HKDF(hmac-secret output)` | wraps that factor's policy-leaf shares |
+| **auth-KEKᵢ** (one per factor) | password: `Argon2id(passwordᵢ, saltᵢ)`; FIDO2: `HKDF-SHA256(hmac-secret output, info)` (no extract salt — the output is already a uniform PRF value) | wraps that factor's policy-leaf shares |
 | **shareⱼ** (one per policy leaf) | the DEK, secret-shared down the policy | reconstructs the DEK when enough leaves are unwrapped |
 
 KEK/DEK is the standard envelope-encryption split (NIST, cloud KMS, LUKS): a data
 key encrypts data; a key-encryption key wraps the data key.
+
+### FIDO2 factors and the `hmac-secret` user-verification binding
+
+A FIDO2 factor's `hmac-secret` input is obtained from a CTAP2 authenticator: enrol
+runs `make_credential` (a *non-resident* credential, with the `hmac-secret`
+extension) to get a `credential_id`, then a `get_assertion` to read the secret for a
+random per-factor `salt`. The secret is `HMAC(CredRandom, salt)`, where `CredRandom`
+is a per-credential random fixed on the key at creation. Both the `credential_id`
+(non-resident, so independent of the key's later state) and `CredRandom` survive a
+later PIN change — the key is **not** a different device, and the bound secret is
+stable.
+
+**The subtlety:** on CTAP 2.1 a credential has **two** `CredRandom` values, and the
+authenticator picks by whether **user verification was performed in that
+`get_assertion`** — `CredRandomWithUV` when a PIN/biometric was used, `CredRandom
+WithoutUV` for touch-only. So a factor's auth-KEK is bound to the **uv mode** used at
+enrolment. rcypher records that mode (`require_pin` in the factor, set from whether
+the key had a PIN at enrol time) and **replays the same mode at unlock**, so the same
+secret — and thus the same auth-KEK — is reproduced. It deliberately does *not*
+re-detect the key's current PIN state at unlock: switching modes would derive the
+*other* secret and fail to unwrap the leaf share.
+
+**Consequences for changing a key's policy after enrolment:**
+
+- *Setting a PIN* on a key a factor was enrolled touch-only on is **safe** — unlock
+  still uses the touch-only (`WithoutUV`) path and the same secret.
+- *Enabling "always require user verification" (`alwaysUv`)* on a key with a
+  touch-only factor, or *removing the PIN* a factor was enrolled with, makes the
+  enrolled uv mode impossible. The bound secret becomes unreachable and **that factor
+  can no longer satisfy its leaf** — the stored data is untouched, but you must unlock
+  via another satisfying branch of the policy and re-enrol the key.
+
+This is one more reason a FIDO2 factor should rarely be a policy's only branch (see
+the weak-`or`/recovery guidance in the README).
 
 ## Data structures
 
@@ -68,14 +103,14 @@ PolicyMetadata {
 }
 
 Factor {
-    id                : string            // e.g. "pass1", "yk-main"
+    id                : string            // e.g. "pass1", "fido2-main"
     kind              : FactorKind        // derivation parameters (below)
     authkek_under_dek : bytes             // = wrap(DEK, auth-KEK_of_this_factor)
 }
 
 FactorKind =
     | Password { salt, memory_cost, time_cost, parallelism }
-    | Yubikey  { credential_id, rp_id, salt, require_pin }
+    | Fido2  { credential_id, rp_id, salt, require_pin }
 
 PolicyNode =
     | And  [ PolicyNode, … ]              // satisfied iff all children are
@@ -270,7 +305,7 @@ Unlock outcomes:
   acceptable modification requires the DEK, and recovering the DEK requires
   satisfying the *original* policy — so an attacker who merely holds or can
   rewrite the file cannot tamper with it. This closes a policy-**downgrade**
-  attack: e.g. in `p1 OR (p2 AND yk)`, OR replicates the full DEK to the `p1`
+  attack: e.g. in `p1 OR (p2 AND fido2)`, OR replicates the full DEK to the `p1`
   branch, so without this binding an attacker could strip the policy down to the
   original `p1` leaf, get the victim to unlock with `p1` alone, and have the
   weakened policy persist on the next save.
@@ -300,4 +335,4 @@ Unlock outcomes:
 - **Envelope encryption / keyslots**: LUKS (`cryptsetup`) master-key keyslots;
   cloud KMS envelope encryption — the DEK + per-credential-wrapped-DEK model.
 - RFC 9106 (Argon2), FIPS 197 (AES), FIPS 198-1 (HMAC).
-- FIDO2 CTAP2 `hmac-secret` extension (the YubiKey factor's `auth-KEK` source).
+- FIDO2 CTAP2 `hmac-secret` extension (the FIDO2 factor's `auth-KEK` source).

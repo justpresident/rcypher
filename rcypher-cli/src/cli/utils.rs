@@ -179,7 +179,7 @@ fn show_weak_password_warning(entropy: &zxcvbn::Entropy) {
 /// Reads a yes/no answer from the controlling terminal (`/dev/tty`), so the
 /// prompt works even while the interactive line editor owns stdin. Returns
 /// `false` for anything other than an explicit yes.
-fn read_tty_confirmation(prompt: &str) -> Result<bool> {
+pub fn read_tty_confirmation(prompt: &str) -> Result<bool> {
     let tty = OpenOptions::new().read(true).write(true).open("/dev/tty")?;
     let mut writer = tty.try_clone()?;
     writer.write_all(prompt.as_bytes())?;

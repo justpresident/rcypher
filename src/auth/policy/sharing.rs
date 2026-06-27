@@ -207,7 +207,7 @@ mod tests {
     }
 
     #[test]
-    fn pass_or_pass_and_yubikey() {
+    fn pass_or_pass_and_fido2() {
         // a OR (b AND c)
         assert_exhaustive(&PolicyNode::Or(vec![
             leaf("a"),

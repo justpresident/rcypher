@@ -1,4 +1,4 @@
-//! Parsing and rendering of policy expressions like `pass1 or (pass2 and yk)`.
+//! Parsing and rendering of policy expressions like `pass1 or (pass2 and fido2)`.
 //!
 //! Grammar (recursive descent), with `and` binding tighter than `or`:
 //! ```text
@@ -150,7 +150,7 @@ fn join(children: &[PolicyNode], sep: &str, parent: &PolicyNode) -> String {
         .map(|child| {
             // Parenthesize a compound child of the opposite operator: required for
             // an OR inside an AND, and kept for readability for an AND inside an OR
-            // (so `pass1 or (pass2 and yk)` renders as typed).
+            // (so `pass1 or (pass2 and fido2)` renders as typed).
             let s = render_policy(child);
             if matches!(
                 (parent, child),
@@ -236,7 +236,7 @@ mod tests {
             "a and b and c",
             "a or b and c",
             "(a or b) and c",
-            "pass1 or (pass2 and yk-main)",
+            "pass1 or (pass2 and fido2-main)",
             "(a and b) or (c and d)",
             "((a or b) and c) or d",
         ] {

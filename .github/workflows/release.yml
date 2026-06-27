@@ -9,6 +9,10 @@ name: Release binaries
 # Each is built on a NATIVE runner - cross-compiling Apple targets from Linux
 # needs Apple's SDK, and native ARM avoids a cross-musl toolchain.
 #
+# The musl builds omit the FIDO2 security-key factor (its USB-HID backend can't
+# static-link into musl yet); the macOS builds include it. `cargo install` builds
+# FIDO2 in by default on any host with the build deps.
+#
 # Fires when a GitHub release is PUBLISHED (the curated-notes step in
 # docs/crate_release_process.md), so the binary attaches to that release with no
 # race against its creation.
@@ -35,17 +39,25 @@ jobs:
       matrix:
         include:
           # Static musl: a Linux binary that runs on any distro regardless of
-          # glibc version. Built on each arch's native runner.
+          # glibc version. Built on each arch's native runner. FIDO2 is OFF for
+          # these (`--no-default-features`): the hidapi/libudev USB-HID backend
+          # can't static-link into a musl binary yet — see the follow-up task
+          # `fido2-musl-static-builds`. `cargo install` still gets FIDO2 by default.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
+            cargo_args: "--no-default-features"
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-          # macOS Intel, built native on the Intel runner.
+            cargo_args: "--no-default-features"
+          # macOS Intel, built native on the Intel runner. FIDO2 on (hidapi uses
+          # IOKit — no system libs needed).
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          # macOS Apple Silicon, built native on the arm runner.
+            cargo_args: ""
+          # macOS Apple Silicon, built native on the arm runner. FIDO2 on.
           - os: macos-15
             target: aarch64-apple-darwin
+            cargo_args: ""
 
     steps:
       - name: Resolve tag
@@ -63,7 +75,7 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      # Pure-Rust crate, but the musl targets link through musl-gcc.
+      # The musl targets build without FIDO2 (pure Rust), linking through musl-gcc.
       - name: Install musl tools
         if: contains(matrix.target, '-linux-musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
@@ -74,7 +86,7 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release --locked --target ${{ matrix.target }} -p rcypher-cli --bin rcypher
+        run: cargo build --release --locked --target ${{ matrix.target }} -p rcypher-cli --bin rcypher ${{ matrix.cargo_args }}
 
       # Archive: rcypher + README + LICENSE as rcypher-<tag>-<target>.tar.gz, plus
       # a sibling .sha256. The binary is already stripped via [profile.release].

@@ -97,6 +97,10 @@ mod version;
 // The on-disk formats (`FileContainer*`), the keyslot vault (`PolicyVault`,
 // `UnlockSession`, …), and the policy types are internal: a client never names a
 // format version, and a new format is added without touching any client.
+/// FIDO2 security-key device I/O (enrol/read `hmac-secret`); requires the `fido2`
+/// feature and a connected authenticator.
+#[cfg(feature = "fido2")]
+pub use auth::fido2;
 pub use auth::{FactorKind, check_factor_password};
 pub use container::{LockedContainer, UnlockedContainer, backup_path};
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};

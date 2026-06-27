@@ -12,13 +12,13 @@ use anyhow::{Result, anyhow, bail};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use super::factor::{Factor, FactorKind, new_password_kind, password_kek};
+use super::factor::{Factor, FactorKind, fido2_kek, new_password_kind, password_kek};
 use super::header::VaultHeader;
 use super::policy::{
     Leaf, PolicyNode, Share, distribute, is_factor_id_char, parse_policy, reconstruct,
     render_policy, validate_factors,
 };
-use crate::constants::{KEY_MATERIAL_LEN, KeyMaterialBytes};
+use crate::constants::{HmacSecretBytes, KEY_MATERIAL_LEN, KeyMaterialBytes, SaltBytes};
 use crate::crypto::{
     Argon2Params, Cypher, EncryptionKey, KeyMaterial, cypher_from_material, generate_key_material,
 };
@@ -93,6 +93,38 @@ impl PolicyVault {
         Ok(())
     }
 
+    /// Enrolls a FIDO2 security-key factor from a just-enrolled credential and its
+    /// current `hmac-secret` output. Like [`enroll_password`](Self::enroll_password)
+    /// the policy is unchanged until [`set_policy`](Self::set_policy) references it.
+    pub fn enroll_fido2(
+        &mut self,
+        id: &str,
+        credential_id: Vec<u8>,
+        rp_id: String,
+        salt: SaltBytes,
+        require_pin: bool,
+        raw_hmac_secret: &HmacSecretBytes,
+    ) -> Result<()> {
+        validate_factor_id(id)?;
+        if self.factors.iter().any(|f| f.id == id) {
+            bail!("a factor named '{id}' already exists");
+        }
+        let authkek = fido2_kek(raw_hmac_secret)?;
+        self.factors.push(Factor {
+            id: id.to_string(),
+            kind: FactorKind::Fido2 {
+                credential_id,
+                rp_id,
+                salt,
+                require_pin,
+            },
+            authkek_under_dek: self
+                .dek_cypher()
+                .encrypt_with_aad(authkek.as_slice(), &[])?,
+        });
+        Ok(())
+    }
+
     /// The id of an enrolled password factor whose password equals `password`, if
     /// any — re-derives each factor's auth-KEK from `password` (with that factor's
     /// salt) and compares it to the factor's actual auth-KEK recovered from the
@@ -135,7 +167,7 @@ impl PolicyVault {
         Ok(())
     }
 
-    /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and yk)`),
+    /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and fido2)`),
     /// re-distributing the DEK across the new tree. Recovers every factor's
     /// auth-KEK from the DEK, so only an unlocked vault is required.
     pub fn set_policy(&mut self, expr: &str) -> Result<()> {
@@ -268,8 +300,8 @@ impl UnlockSession {
         self.policy.is_satisfied_by(&self.satisfied_ids())
     }
 
-    /// Whether the policy can be satisfied by password factors alone — i.e. the
-    /// store is unlockable without the not-yet-supported `YubiKey` factors.
+    /// Whether the policy is satisfiable by password factors alone — i.e. it can be
+    /// unlocked without presenting any FIDO2 security key.
     #[must_use]
     pub fn satisfiable_by_passwords(&self) -> bool {
         let passwords: HashSet<String> = self
@@ -279,6 +311,18 @@ impl UnlockSession {
             .map(|f| f.id.clone())
             .collect();
         self.policy.is_satisfied_by(&passwords)
+    }
+
+    /// The still-unsatisfied factors, each id paired with its kind — so a caller can
+    /// see which factor *types* remain (and read a pending FIDO2 factor's device
+    /// parameters) and prompt only for those.
+    #[must_use]
+    pub fn pending_factor_kinds(&self) -> Vec<(String, FactorKind)> {
+        self.factors
+            .iter()
+            .filter(|f| !self.authkeks.contains_key(&f.id))
+            .map(|f| (f.id.clone(), f.kind.clone()))
+            .collect()
     }
 
     /// Tries `password` against the not-yet-satisfied password factors and, on the
@@ -308,6 +352,44 @@ impl UnlockSession {
                 });
             if verified {
                 self.authkeks.insert(id.clone(), authkek);
+                return Ok(Some(id));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Tries a FIDO2 `hmac-secret` output against the not-yet-satisfied FIDO2
+    /// factors. The auth-KEK depends only on the secret, so it is derived once and
+    /// matched against each FIDO2 leaf; on the first whose wrapped share
+    /// authenticates, records it and returns the factor id. Mirrors
+    /// [`try_password`](Self::try_password); the caller obtains the secret from the
+    /// authenticator (see `rcypher::fido2`).
+    pub fn try_fido2_secret(
+        &mut self,
+        raw_hmac_secret: &HmacSecretBytes,
+    ) -> Result<Option<String>> {
+        let kek = fido2_kek(raw_hmac_secret)?;
+        let candidates: Vec<String> = self
+            .factors
+            .iter()
+            .filter(|f| {
+                matches!(f.kind, FactorKind::Fido2 { .. }) && !self.authkeks.contains_key(&f.id)
+            })
+            .map(|f| f.id.clone())
+            .collect();
+
+        for id in candidates {
+            let verified = self
+                .policy
+                .leaves()
+                .find(|leaf| leaf.factor == id)
+                .is_some_and(|leaf| {
+                    cypher_from_material(&kek, CypherVersion::default())
+                        .decrypt_with_aad(&leaf.wrapped_share, &[])
+                        .is_ok()
+                });
+            if verified {
+                self.authkeks.insert(id.clone(), kek);
                 return Ok(Some(id));
             }
         }
@@ -495,14 +577,14 @@ mod tests {
     #[test]
     fn payload_decrypts_via_either_branch() {
         let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
-        vault.enroll_password("yk", "two", &params()).unwrap();
-        vault.set_policy("p1 or yk").unwrap();
+        vault.enroll_password("fido2", "two", &params()).unwrap();
+        vault.set_policy("p1 or fido2").unwrap();
         let blob = vault
             .encrypt_payload(b"data", &[], CypherVersion::default())
             .unwrap();
 
         let via_p1 = reopen(&vault, &[("p1", "one")]).unwrap();
-        let via_yk = reopen(&vault, &[("yk", "two")]).unwrap();
+        let via_fido2 = reopen(&vault, &[("fido2", "two")]).unwrap();
         assert_eq!(
             via_p1
                 .decrypt_payload(&blob, &[], CypherVersion::default())
@@ -511,7 +593,7 @@ mod tests {
             b"data"
         );
         assert_eq!(
-            via_yk
+            via_fido2
                 .decrypt_payload(&blob, &[], CypherVersion::default())
                 .unwrap()
                 .as_slice(),
@@ -598,5 +680,74 @@ mod tests {
                 .enroll_password("backup", "s3cret-xyz", &params())
                 .is_ok()
         );
+    }
+
+    // A fixed `hmac-secret` standing in for an authenticator's output, so the FIDO2
+    // factor's pure key path is exercised without hardware.
+    fn fido2_secret(byte: u8) -> crate::constants::HmacSecretBytes {
+        [byte; crate::constants::HMAC_SECRET_LEN]
+    }
+
+    fn enroll_fido2(vault: &mut PolicyVault, id: &str, secret: &crate::constants::HmacSecretBytes) {
+        vault
+            .enroll_fido2(
+                id,
+                vec![1, 2, 3],
+                "rcypher".into(),
+                SaltBytes::default(),
+                false,
+                secret,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn fido2_factor_unlocks_via_or_branch() {
+        let secret = fido2_secret(42);
+        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        enroll_fido2(&mut vault, "key", &secret);
+        vault.set_policy("p1 or key").unwrap();
+        let blob = vault
+            .encrypt_payload(b"data", &[], CypherVersion::default())
+            .unwrap();
+
+        // The FIDO2 secret alone reconstructs the DEK (OR replicates it).
+        let mut session = UnlockSession::new(vault.header());
+        assert_eq!(
+            session.try_fido2_secret(&secret).unwrap().as_deref(),
+            Some("key")
+        );
+        let reopened = session.finish().unwrap();
+        assert_eq!(
+            reopened
+                .decrypt_payload(&blob, &[], CypherVersion::default())
+                .unwrap()
+                .as_slice(),
+            b"data"
+        );
+
+        // A wrong secret matches no factor.
+        let mut session = UnlockSession::new(vault.header());
+        assert_eq!(session.try_fido2_secret(&fido2_secret(43)).unwrap(), None);
+    }
+
+    #[test]
+    fn and_policy_needs_both_password_and_fido2() {
+        let secret = fido2_secret(7);
+        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        enroll_fido2(&mut vault, "key", &secret);
+        vault.set_policy("p1 and key").unwrap();
+
+        // Either alone is insufficient; together they complete the policy.
+        let mut session = UnlockSession::new(vault.header());
+        session.try_password("one").unwrap();
+        assert!(!session.is_complete());
+        session.try_fido2_secret(&secret).unwrap();
+        assert!(session.is_complete());
+        assert!(session.finish().is_ok());
+
+        // The FIDO2 factor makes the store not satisfiable by passwords alone.
+        let session = UnlockSession::new(vault.header());
+        assert!(!session.satisfiable_by_passwords());
     }
 }
