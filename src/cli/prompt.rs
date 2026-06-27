@@ -12,28 +12,48 @@ use anyhow::{Result, bail};
 use nix::fcntl::{Flock, FlockArg};
 use zeroize::{Zeroize, Zeroizing};
 
-/// Prints `what` straight to the controlling terminal, then zeroizes the buffer.
+/// A terminal printer for secrets, configured once with whether to fall back to
+/// stdout (testing only) — so callers don't repeat that flag on every print.
 ///
-/// Writes to `/dev/tty` rather than process stdout, so a secret can't be snooped
-/// from a redirected stdout; the write takes an exclusive advisory lock so
-/// concurrent secure prints don't interleave. With `insecure_stdout` (testing
-/// only) it falls back to `println!`.
-pub fn secure_print(mut what: String, insecure_stdout: bool) -> Result<()> {
-    if insecure_stdout {
-        println!("{}", &what);
-        return Ok(());
-    }
-    let tty = OpenOptions::new().write(true).open("/dev/tty")?;
-    let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
-        Ok(l) => l,
-        Err((_, e)) => bail!(e),
-    };
-    lock.write_all(what.as_bytes())?;
-    lock.write_all(b"\n")?;
-    lock.flush()?;
+/// Construct one with [`new`](Self::new) and reuse it; [`print`](Self::print)
+/// writes straight to the controlling terminal and wipes the buffer afterward.
+#[derive(Clone, Copy)]
+pub struct SecurePrinter {
+    insecure_stdout: bool,
+}
 
-    what.zeroize();
-    Ok(())
+impl SecurePrinter {
+    /// A printer that writes secrets to `/dev/tty`. With `insecure_stdout` (testing
+    /// only) it falls back to `println!` instead.
+    #[must_use]
+    pub const fn new(insecure_stdout: bool) -> Self {
+        Self { insecure_stdout }
+    }
+
+    /// Prints `what` to the controlling terminal, then zeroizes the owned buffer.
+    ///
+    /// Accepts a `String` (moved in and wiped after printing) or a `&str` (copied
+    /// into an owned buffer, which is wiped). Writing to `/dev/tty` rather than
+    /// process stdout means a secret can't be snooped from a redirected stdout; the
+    /// write takes an exclusive advisory lock so concurrent prints don't interleave.
+    pub fn print(&self, what: impl Into<String>) -> Result<()> {
+        let mut what = what.into();
+        if self.insecure_stdout {
+            println!("{what}");
+            return Ok(());
+        }
+        let tty = OpenOptions::new().write(true).open("/dev/tty")?;
+        let mut lock = match Flock::lock(tty, FlockArg::LockExclusive) {
+            Ok(l) => l,
+            Err((_, e)) => bail!(e),
+        };
+        lock.write_all(what.as_bytes())?;
+        lock.write_all(b"\n")?;
+        lock.flush()?;
+
+        what.zeroize();
+        Ok(())
+    }
 }
 
 /// Prompts (without echo) for a store password, in a zeroizing buffer.

@@ -2,7 +2,7 @@ use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp};
 use anyhow::{Result, anyhow, bail};
-use rcypher::cli::{confirm_if_weak_password, prompt_new_password, secure_print};
+use rcypher::cli::{SecurePrinter, confirm_if_weak_password, prompt_new_password};
 use rcypher::{EncryptedValue, FactorKind, check_factor_password, is_debugger_attached};
 use rustyline::CompletionType;
 use rustyline::Config;
@@ -16,7 +16,7 @@ use zeroize::Zeroize;
 
 pub struct InteractiveCli {
     prompt: String,
-    insecure_stdout: bool,
+    printer: SecurePrinter,
     /// The opened, unlocked store ([`UnlockedContainer`](rcypher::UnlockedContainer))
     /// behind one lock shared with the Tab completer, which reads keys and factor
     /// names from it live. Saving and the one-time legacy-upgrade backup are the
@@ -37,7 +37,7 @@ impl InteractiveCli {
     ) -> Self {
         Self {
             prompt,
-            insecure_stdout,
+            printer: SecurePrinter::new(insecure_stdout),
             store: Arc::new(Mutex::new(store)),
             filename,
             last_activity: clock.last_activity,
@@ -176,7 +176,7 @@ impl InteractiveCli {
         let encrypted_value = EncryptedValue::encrypt(&store.cypher(), value)?;
         store.data_mut().put(key.to_string(), encrypted_value);
 
-        secure_print(format!("{key} stored"), self.insecure_stdout)?;
+        self.printer.print(format!("{key} stored"))?;
 
         self.save(store)?;
         Ok(())
@@ -192,7 +192,7 @@ impl InteractiveCli {
                     let mut secret = val.decrypt(&cypher)?;
                     let output = format!("{}: {}", key, &*secret);
                     secret.zeroize();
-                    secure_print(output, self.insecure_stdout)?;
+                    self.printer.print(output)?;
                 }
                 if !found {
                     bail!("No keys matching '{pattern}' found!");
@@ -214,10 +214,10 @@ impl InteractiveCli {
                     (Some((first_key, _)), Some((second_key, _))) => {
                         // Multiple results - print all
                         println!("Multiple keys found! Please specify exact key name:");
-                        secure_print(first_key.to_string(), self.insecure_stdout)?;
-                        secure_print(second_key.to_string(), self.insecure_stdout)?;
+                        self.printer.print(first_key)?;
+                        self.printer.print(second_key)?;
                         for (key, _) in results {
-                            secure_print(key.to_string(), self.insecure_stdout)?;
+                            self.printer.print(key)?;
                         }
                     }
                     (Some((_, val)), None) => {
@@ -243,7 +243,7 @@ impl InteractiveCli {
                 let mut secret = entry.value.decrypt(&cypher)?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
                 secret.zeroize();
-                secure_print(output, self.insecure_stdout)?;
+                self.printer.print(output)?;
             }
         } else {
             bail!("No key '{key}' found!");
@@ -255,7 +255,7 @@ impl InteractiveCli {
         match store.data().search(pattern) {
             Ok(keys) => {
                 for key in keys {
-                    secure_print(key.to_string(), self.insecure_stdout)?;
+                    self.printer.print(key)?;
                 }
             }
             Err(e) => bail!("Error: {e}"),
@@ -265,7 +265,7 @@ impl InteractiveCli {
 
     fn cmd_delete(&self, key: &str, store: &mut crate::Store) -> Result<()> {
         if store.data_mut().delete(key) {
-            secure_print(format!("{key} deleted"), self.insecure_stdout)?;
+            self.printer.print(format!("{key} deleted"))?;
             self.save(store)?;
         } else {
             bail!("No such key '{key}' found");
@@ -295,7 +295,7 @@ impl InteractiveCli {
         match verb {
             "" | "show" => {
                 let expr = store.policy_expr();
-                secure_print(expr, self.insecure_stdout)
+                self.printer.print(expr)
             }
             "set" => {
                 if rest.is_empty() {
@@ -349,31 +349,24 @@ impl InteractiveCli {
     /// references it.
     #[cfg(feature = "fido2")]
     fn enroll_fido2(&self, name: &str, store: &mut crate::Store) -> Result<()> {
-        secure_print(
-            format!(
-                "Enrolling FIDO2 factor '{name}'. The name is a label (shown by 'auth factor list' \
+        self.printer.print(format!(
+            "Enrolling FIDO2 factor '{name}'. The name is a label (shown by 'auth factor list' \
                  once unlocked; encrypted in the store) — not a secret."
-            ),
-            self.insecure_stdout,
-        )?;
+        ))?;
         // A PIN is usable only if one is set on the key — detect it rather than
         // asking, so we don't try (and fail) to use a PIN that isn't configured.
         let has_pin = rcypher::fido2::device_has_pin()?;
         let pin = if has_pin {
             Some(rcypher::cli::prompt_password("Security key PIN")?)
         } else {
-            secure_print(
+            self.printer.print(
                 "This key has no PIN set — the factor will unlock with a touch only. Set a PIN on \
-                 the key (with your vendor's tool) if you want PIN protection."
-                    .to_string(),
-                self.insecure_stdout,
+                 the key (with your vendor's tool) if you want PIN protection.",
             )?;
             None
         };
-        secure_print(
-            "Touch your FIDO2 security key to enrol it…".to_string(),
-            self.insecure_stdout,
-        )?;
+        self.printer
+            .print("Touch your FIDO2 security key to enrol it…")?;
         let cred =
             rcypher::fido2::enroll(crate::cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
         store.enroll_fido2(
@@ -385,10 +378,9 @@ impl InteractiveCli {
             &cred.raw_hmac_secret,
         )?;
         self.save(store)?;
-        secure_print(
-            format!("Factor '{name}' enrolled. Reference it in 'auth policy set' to require it."),
-            self.insecure_stdout,
-        )?;
+        self.printer.print(format!(
+            "Factor '{name}' enrolled. Reference it in 'auth policy set' to require it."
+        ))?;
         Ok(())
     }
 
@@ -406,7 +398,7 @@ impl InteractiveCli {
                 FactorKind::Password { .. } => "password",
                 FactorKind::Fido2 { .. } => "fido2",
             };
-            secure_print(format!("{name} ({kind})"), self.insecure_stdout)?;
+            self.printer.print(format!("{name} ({kind})"))?;
         }
         Ok(())
     }
@@ -417,12 +409,11 @@ impl InteractiveCli {
     fn enroll_password(&self, name: &str, store: &mut crate::Store) -> Result<()> {
         // Make the role of NAME explicit: it is a label, not the secret.
         // Catches the mix-up of typing a password where the factor name belongs.
-        secure_print(
+        self.printer.print(
             format!(
                 "Enrolling factor '{name}'. The name is a label (shown by 'auth factor list' once \
                  unlocked; encrypted in the store) — not the password; you'll enter the password next."
             ),
-            self.insecure_stdout,
         )?;
         // The password is held in a zeroizing buffer, so every early return below
         // wipes it on drop; it is also wiped eagerly once the factor is enrolled.
@@ -439,13 +430,10 @@ impl InteractiveCli {
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
         self.save(store)?;
-        secure_print(
-            format!(
-                "Factor '{name}' enrolled. It is not yet used by the policy — run \
+        self.printer.print(format!(
+            "Factor '{name}' enrolled. It is not yet used by the policy — run \
                  'auth policy set EXPR' to require or accept it."
-            ),
-            self.insecure_stdout,
-        )?;
+        ))?;
         Ok(())
     }
 
@@ -453,7 +441,7 @@ impl InteractiveCli {
         store.set_policy(expr)?;
         let new_expr = store.policy_expr();
         self.save(store)?;
-        secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
+        self.printer.print(format!("Policy: {new_expr}"))?;
         Ok(())
     }
 
@@ -461,7 +449,7 @@ impl InteractiveCli {
     fn remove_factor(&self, name: &str, store: &mut crate::Store) -> Result<()> {
         store.remove_factor(name)?;
         self.save(store)?;
-        secure_print(format!("Factor '{name}' removed"), self.insecure_stdout)
+        self.printer.print(format!("Factor '{name}' removed"))
     }
 }
 

@@ -7,7 +7,7 @@
 //! (argument parsing, any REPL, clipboard, etc.).
 //!
 //! - Prompts: [`prompt_password`], [`get_password`], [`prompt_new_password`],
-//!   [`read_tty_confirmation`], and [`secure_print`] (direct-to-tty secret output).
+//!   [`read_tty_confirmation`], and [`SecurePrinter`] (direct-to-tty secret output).
 //! - [`confirm_if_weak_password`]: the zxcvbn strength gate.
 //! - [`prompt_until_unlocked`]: the policy-unlock prompt loop over a
 //!   [`LockedContainer`](crate::LockedContainer), with a pluggable
@@ -18,7 +18,7 @@ mod strength;
 mod unlock;
 
 pub use prompt::{
-    get_password, prompt_new_password, prompt_password, read_tty_confirmation, secure_print,
+    SecurePrinter, get_password, prompt_new_password, prompt_password, read_tty_confirmation,
 };
 pub use strength::confirm_if_weak_password;
 pub use unlock::{NoProgress, UnlockProgress, prompt_until_unlocked};

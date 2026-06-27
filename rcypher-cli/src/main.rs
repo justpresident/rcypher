@@ -24,7 +24,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-use rcypher::cli::{confirm_if_weak_password, get_password};
+use rcypher::cli::{SecurePrinter, confirm_if_weak_password, get_password};
 use rcypher::{
     Argon2Params, Cypher, CypherVersion, EncryptionKey, LockedContainer, SecretStore,
     UnlockedContainer,
@@ -547,7 +547,7 @@ fn main() -> Result<()> {
             &update_cypher,
             main.data_mut(),
             update.data(),
-            params.insecure_stdout,
+            SecurePrinter::new(params.insecure_stdout),
         )?;
         if changed {
             main.save(&params.filename)?;

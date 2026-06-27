@@ -1,6 +1,6 @@
 use crate::cli::utils::format_timestamp;
 use anyhow::Result;
-use rcypher::cli::secure_print;
+use rcypher::cli::SecurePrinter;
 use rcypher::{Cypher, EncryptedValue, SecretStore};
 use std::io;
 use std::io::Write;
@@ -71,20 +71,17 @@ fn display_update_entry(
     update: &UpdateEntry,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
-    insecure_stdout: bool,
+    printer: SecurePrinter,
 ) -> Result<()> {
     // Compact format for summary view
     if update.is_new_key() {
         let new_decrypted = update.new_value.decrypt(update_cypher)?;
-        secure_print(
-            format!(
-                "  [NEW] {}\n    New: {} ({})",
-                update.key,
-                &*new_decrypted,
-                format_timestamp(update.new_timestamp)
-            ),
-            insecure_stdout,
-        )?;
+        printer.print(format!(
+            "  [NEW] {}\n    New: {} ({})",
+            update.key,
+            &*new_decrypted,
+            format_timestamp(update.new_timestamp)
+        ))?;
     } else {
         let old_decrypted = update
             .old_value
@@ -92,17 +89,14 @@ fn display_update_entry(
             .expect("old value exists")
             .decrypt(main_cypher)?;
         let new_decrypted = update.new_value.decrypt(update_cypher)?;
-        secure_print(
-            format!(
-                "  [CONFLICT] {}\n    Current: {} ({})\n    Update:  {} ({})",
-                update.key,
-                &*old_decrypted,
-                format_timestamp(update.old_timestamp.expect("old timestamp exists")),
-                &*new_decrypted,
-                format_timestamp(update.new_timestamp)
-            ),
-            insecure_stdout,
-        )?;
+        printer.print(format!(
+            "  [CONFLICT] {}\n    Current: {} ({})\n    Update:  {} ({})",
+            update.key,
+            &*old_decrypted,
+            format_timestamp(update.old_timestamp.expect("old timestamp exists")),
+            &*new_decrypted,
+            format_timestamp(update.new_timestamp)
+        ))?;
     }
 
     Ok(())
@@ -113,7 +107,7 @@ fn display_update_summary(
     updates: &[UpdateEntry],
     main_cypher: &Cypher,
     update_cypher: &Cypher,
-    insecure_stdout: bool,
+    printer: SecurePrinter,
 ) -> Result<(usize, usize)> {
     println!(
         "\nFound {} key{} with different values:",
@@ -125,7 +119,7 @@ fn display_update_summary(
     let mut conflicts = 0;
 
     for update in updates {
-        display_update_entry(update, main_cypher, update_cypher, insecure_stdout)?;
+        display_update_entry(update, main_cypher, update_cypher, printer)?;
 
         if update.is_new_key() {
             new_keys += 1;
@@ -169,13 +163,13 @@ fn apply_updates_interactive(
     main_storage: &mut SecretStore,
     main_cypher: &Cypher,
     update_cypher: &Cypher,
-    insecure_stdout: bool,
+    printer: SecurePrinter,
 ) -> Result<bool> {
     let mut applied = 0;
     let mut skipped = 0;
 
     for update in updates {
-        display_update_entry(&update, main_cypher, update_cypher, insecure_stdout)?;
+        display_update_entry(&update, main_cypher, update_cypher, printer)?;
 
         print!("Apply this update? (y/n/q): ");
         io::stdout().flush()?;
@@ -238,7 +232,7 @@ pub fn run_update_with(
     update_cypher: &Cypher,
     main_storage: &mut SecretStore,
     update_storage: &SecretStore,
-    insecure_stdout: bool,
+    printer: SecurePrinter,
 ) -> Result<bool> {
     // Find what needs updating
     let updates = find_updates(main_storage, update_storage, main_cypher, update_cypher)?;
@@ -249,7 +243,7 @@ pub fn run_update_with(
     }
 
     // Display summary
-    display_update_summary(&updates, main_cypher, update_cypher, insecure_stdout)?;
+    display_update_summary(&updates, main_cypher, update_cypher, printer)?;
 
     // Prompt for action
     let choice = prompt_merge_mode()?;
@@ -260,13 +254,9 @@ pub fn run_update_with(
             apply_all_updates(updates, main_storage, main_cypher, update_cypher)?;
             Ok(true)
         }
-        "i" | "interactive" => apply_updates_interactive(
-            updates,
-            main_storage,
-            main_cypher,
-            update_cypher,
-            insecure_stdout,
-        ),
+        "i" | "interactive" => {
+            apply_updates_interactive(updates, main_storage, main_cypher, update_cypher, printer)
+        }
         _ => {
             println!("Cancelled. No changes made.");
             Ok(false)
