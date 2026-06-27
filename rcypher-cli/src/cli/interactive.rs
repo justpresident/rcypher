@@ -315,9 +315,9 @@ impl InteractiveCli {
             "list" => self.list_factors(store),
             "add" => self.cmd_auth_factor_add(rest, store),
             "remove" => {
-                let id =
+                let name =
                     first_word(rest).ok_or_else(|| anyhow!("syntax: auth factor remove NAME"))?;
-                self.remove_factor(id, store)
+                self.remove_factor(name, store)
             }
             "" => bail!("syntax: auth factor list|add|remove …"),
             other => {
@@ -330,16 +330,16 @@ impl InteractiveCli {
         let (kind, rest) = split_first_word(args);
         match kind {
             "password" => {
-                let id = first_word(rest).ok_or_else(|| {
+                let name = first_word(rest).ok_or_else(|| {
                     anyhow!("syntax: auth factor add password NAME (NAME is a label)")
                 })?;
-                self.enroll_password(id, store)
+                self.enroll_password(name, store)
             }
             "fido2" => {
-                let id = first_word(rest).ok_or_else(|| {
+                let name = first_word(rest).ok_or_else(|| {
                     anyhow!("syntax: auth factor add fido2 NAME (NAME is a label)")
                 })?;
-                self.enroll_fido2(id, store)
+                self.enroll_fido2(name, store)
             }
             _ => bail!("syntax: auth factor add password|fido2 NAME"),
         }
@@ -350,11 +350,11 @@ impl InteractiveCli {
     /// stores it. Like a password factor, it is unused until an `auth policy set`
     /// references it.
     #[cfg(feature = "fido2")]
-    fn enroll_fido2(&self, id: &str, store: &mut crate::Store) -> Result<()> {
+    fn enroll_fido2(&self, name: &str, store: &mut crate::Store) -> Result<()> {
         secure_print(
             format!(
-                "Enrolling FIDO2 factor '{id}'. The name is a public label (shown by 'auth factor \
-                 list', stored unencrypted) — not a secret."
+                "Enrolling FIDO2 factor '{name}'. The name is a label (shown by 'auth factor list' \
+                 once unlocked; encrypted in the store) — not a secret."
             ),
             self.insecure_stdout,
         )?;
@@ -379,7 +379,7 @@ impl InteractiveCli {
         let cred =
             rcypher::fido2::enroll(crate::cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
         store.enroll_fido2(
-            id,
+            name,
             cred.credential_id,
             crate::cli::FIDO2_RP_ID.to_string(),
             cred.salt,
@@ -388,7 +388,7 @@ impl InteractiveCli {
         )?;
         self.save(store)?;
         secure_print(
-            format!("Factor '{id}' enrolled. Reference it in 'auth policy set' to require it."),
+            format!("Factor '{name}' enrolled. Reference it in 'auth policy set' to require it."),
             self.insecure_stdout,
         )?;
         Ok(())
@@ -397,53 +397,53 @@ impl InteractiveCli {
     /// Without FIDO2 support compiled in, enrollment is unavailable.
     #[cfg(not(feature = "fido2"))]
     #[allow(clippy::unused_self)]
-    fn enroll_fido2(&self, _id: &str, _store: &mut crate::Store) -> Result<()> {
+    fn enroll_fido2(&self, _name: &str, _store: &mut crate::Store) -> Result<()> {
         bail!("this build has no FIDO2 support; rebuild rcypher-cli with --features fido2")
     }
 
     /// Lists the enrolled factors and their kinds.
     fn list_factors(&self, store: &crate::Store) -> Result<()> {
-        for (id, kind) in store.factor_kinds() {
+        for (name, kind) in store.factor_kinds() {
             let kind = match kind {
                 FactorKind::Password { .. } => "password",
                 FactorKind::Fido2 { .. } => "fido2",
             };
-            secure_print(format!("{id} ({kind})"), self.insecure_stdout)?;
+            secure_print(format!("{name} ({kind})"), self.insecure_stdout)?;
         }
         Ok(())
     }
 
-    /// Adds a new password factor. `id` is a public label, not the password; the
-    /// password is prompted separately. The factor is unused by the policy until
-    /// an `auth policy set` references it.
-    fn enroll_password(&self, id: &str, store: &mut crate::Store) -> Result<()> {
-        // Make the role of NAME explicit: it is a public label, not the secret.
+    /// Adds a new password factor. `name` is a label, not the password; the password
+    /// is prompted separately. The factor is unused by the policy until an `auth
+    /// policy set` references it.
+    fn enroll_password(&self, name: &str, store: &mut crate::Store) -> Result<()> {
+        // Make the role of NAME explicit: it is a label, not the secret.
         // Catches the mix-up of typing a password where the factor name belongs.
         secure_print(
             format!(
-                "Enrolling factor '{id}'. The name is a public label (shown by 'auth factor \
-                 list', stored unencrypted) — not the password; you'll enter the password next."
+                "Enrolling factor '{name}'. The name is a label (shown by 'auth factor list' once \
+                 unlocked; encrypted in the store) — not the password; you'll enter the password next."
             ),
             self.insecure_stdout,
         )?;
         // The password is held in a zeroizing buffer, so every early return below
         // wipes it on drop; it is also wiped eagerly once the factor is enrolled.
-        let mut password = prompt_new_password(&format!("factor '{id}'"))?;
+        let mut password = prompt_new_password(&format!("factor '{name}'"))?;
 
-        // Reject a password that resembles the (cleartext) name first, so that
-        // mix-up gets its specific message rather than a generic strength warning.
-        check_factor_password(id, &password)?;
-        if !confirm_if_weak_password(&password, &[id, "rcypher"])? {
+        // Reject a password that resembles the name first, so that mix-up gets its
+        // specific message rather than a generic strength warning.
+        check_factor_password(name, &password)?;
+        if !confirm_if_weak_password(&password, &[name, "rcypher"])? {
             bail!("enrollment cancelled (weak password not confirmed)");
         }
 
-        store.enroll_password(id, &password)?;
+        store.enroll_password(name, &password)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
         self.save(store)?;
         secure_print(
             format!(
-                "Factor '{id}' enrolled. It is not yet used by the policy — run \
+                "Factor '{name}' enrolled. It is not yet used by the policy — run \
                  'auth policy set EXPR' to require or accept it."
             ),
             self.insecure_stdout,
@@ -460,10 +460,10 @@ impl InteractiveCli {
     }
 
     /// Drops a factor (must not be referenced by the policy).
-    fn remove_factor(&self, id: &str, store: &mut crate::Store) -> Result<()> {
-        store.remove_factor(id)?;
+    fn remove_factor(&self, name: &str, store: &mut crate::Store) -> Result<()> {
+        store.remove_factor(name)?;
         self.save(store)?;
-        secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
+        secure_print(format!("Factor '{name}' removed"), self.insecure_stdout)
     }
 }
 

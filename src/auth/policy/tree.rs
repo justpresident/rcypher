@@ -1,13 +1,19 @@
 //! The access-policy tree: a monotone boolean formula (`And`/`Or`/`Leaf`) over
-//! named factors.
+//! factors.
 //!
-//! Leaves reference factors by **id only**, so the tree is agnostic to what a
-//! factor actually is. The text syntax lives in the `parser` submodule; the
-//! secret sharing that splits a key across the tree lives in `sharing`.
+//! Leaves reference factors by their opaque [`FactorId`] only, so the tree is
+//! agnostic to what a factor actually is. The user-facing, name-keyed form is a
+//! separate [`PolicyExpr`] (the parser's product); the vault translates between the
+//! two — [`PolicyExpr::resolve`] (names → ids) and [`PolicyNode::to_expr`] (ids →
+//! names). The text syntax lives in the `parser` submodule; the secret sharing that
+//! splits a key across the tree lives in `sharing`.
 
 use std::collections::HashSet;
 
+use anyhow::Result;
 use bincode::{Decode, Encode};
+
+use crate::auth::FactorId;
 
 /// A monotone boolean access policy over named factors.
 ///
@@ -25,14 +31,14 @@ pub enum PolicyNode {
     Leaf(Leaf),
 }
 
-/// A factor leaf: the id of the factor that satisfies it, plus this leaf's
-/// secret-share wrapped under that factor's key (empty until the DEK is
+/// A factor leaf: the [`FactorId`] of the factor that satisfies it, plus this
+/// leaf's secret-share wrapped under that factor's key (empty until the DEK is
 /// distributed across the policy).
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
 pub struct Leaf {
     /// Id of the enrolled factor (into the [`VaultHeader`](crate::auth::VaultHeader)
     /// factor table) that unlocks this leaf.
-    pub factor: String,
+    pub factor: FactorId,
     /// This leaf's secret-share, encrypted under the factor's key.
     pub wrapped_share: Vec<u8>,
 }
@@ -44,11 +50,26 @@ impl PolicyNode {
     /// to drive the unlock UX (which factors to prompt for, and when enough have
     /// been collected) before doing any expensive key derivation.
     #[must_use]
-    pub fn is_satisfied_by(&self, available: &HashSet<String>) -> bool {
+    pub fn is_satisfied_by(&self, available: &HashSet<FactorId>) -> bool {
         match self {
             Self::Leaf(leaf) => available.contains(&leaf.factor),
             Self::And(children) => children.iter().all(|c| c.is_satisfied_by(available)),
             Self::Or(children) => children.iter().any(|c| c.is_satisfied_by(available)),
+        }
+    }
+
+    /// Renders this stored tree as a name-keyed [`PolicyExpr`], resolving each
+    /// leaf's opaque [`FactorId`] back to a name via `name_of` — the inverse of
+    /// [`PolicyExpr::resolve`], for displaying the policy after unlock.
+    pub fn to_expr(&self, name_of: &impl Fn(&FactorId) -> String) -> PolicyExpr {
+        match self {
+            Self::Leaf(leaf) => PolicyExpr::Leaf(name_of(&leaf.factor)),
+            Self::And(children) => {
+                PolicyExpr::And(children.iter().map(|c| c.to_expr(name_of)).collect())
+            }
+            Self::Or(children) => {
+                PolicyExpr::Or(children.iter().map(|c| c.to_expr(name_of)).collect())
+            }
         }
     }
 
@@ -88,13 +109,72 @@ impl PolicyNode {
     }
 }
 
+/// A parsed access-policy expression over factor **names** — the user-facing,
+/// textual form produced by [`parse_policy`](super::parse_policy) and rendered by
+/// [`render_policy`](super::render_policy).
+///
+/// This is the name-keyed counterpart to the stored [`PolicyNode`], whose leaves
+/// hold the opaque [`FactorId`] and the wrapped secret-shares. The two never mix:
+/// the parser/renderer/validator work entirely in names, and the vault crosses the
+/// boundary once via [`resolve`](Self::resolve) / [`PolicyNode::to_expr`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyExpr {
+    /// Satisfied only when **all** children are satisfied.
+    And(Vec<Self>),
+    /// Satisfied when **any** child is satisfied.
+    Or(Vec<Self>),
+    /// A factor name.
+    Leaf(String),
+}
+
+impl PolicyExpr {
+    /// The factor names this expression references, in left-to-right depth-first
+    /// order (the same order [`PolicyNode::leaves`] uses for the resolved tree).
+    pub fn leaf_names(&self) -> impl Iterator<Item = &str> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            while let Some(node) = stack.pop() {
+                match node {
+                    Self::Leaf(name) => return Some(name.as_str()),
+                    Self::And(children) | Self::Or(children) => stack.extend(children.iter().rev()),
+                }
+            }
+            None
+        })
+    }
+
+    /// Resolves each name leaf to a [`FactorId`] via `lookup`, producing the stored
+    /// [`PolicyNode`] with empty shares (ready for [`distribute`](super::distribute)
+    /// to fill in). The inverse of [`PolicyNode::to_expr`].
+    pub fn resolve(&self, lookup: &impl Fn(&str) -> Result<FactorId>) -> Result<PolicyNode> {
+        Ok(match self {
+            Self::Leaf(name) => PolicyNode::Leaf(Leaf {
+                factor: lookup(name)?,
+                wrapped_share: Vec::new(),
+            }),
+            Self::And(children) => PolicyNode::And(
+                children
+                    .iter()
+                    .map(|c| c.resolve(lookup))
+                    .collect::<Result<_>>()?,
+            ),
+            Self::Or(children) => PolicyNode::Or(
+                children
+                    .iter()
+                    .map(|c| c.resolve(lookup))
+                    .collect::<Result<_>>()?,
+            ),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn leaf(name: &str) -> PolicyNode {
         PolicyNode::Leaf(Leaf {
-            factor: name.into(),
+            factor: FactorId(name.as_bytes().to_vec()),
             wrapped_share: Vec::new(),
         })
     }
@@ -103,7 +183,11 @@ mod tests {
     fn is_satisfied_by_matches_boolean_logic() {
         // a OR (b AND c)
         let policy = PolicyNode::Or(vec![leaf("a"), PolicyNode::And(vec![leaf("b"), leaf("c")])]);
-        let have = |ids: &[&str]| ids.iter().map(|s| (*s).to_string()).collect::<HashSet<_>>();
+        let have = |ids: &[&str]| {
+            ids.iter()
+                .map(|s| FactorId(s.as_bytes().to_vec()))
+                .collect::<HashSet<_>>()
+        };
 
         assert!(policy.is_satisfied_by(&have(&["a"])));
         assert!(policy.is_satisfied_by(&have(&["b", "c"])));

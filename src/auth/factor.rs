@@ -38,10 +38,37 @@ pub enum FactorKind {
     },
 }
 
+/// A factor's opaque identifier: its human **name encrypted under the DEK**, kept
+/// as raw bytes.
+///
+/// It is the only per-factor value in the cleartext header and the link between a
+/// [`Factor`] and the policy leaves that reference it. Being ciphertext it reveals
+/// nothing about the name at rest; the unlocked vault decrypts it back to the name.
+/// The policy treats it purely as an opaque identity token (equality/hash only),
+/// so the access tree stays agnostic to what a factor is.
+#[derive(Clone, Debug, Encode, Decode, PartialEq, Eq, Hash)]
+pub struct FactorId(pub Vec<u8>);
+
+impl FactorId {
+    /// A lowercase-hex rendering of the opaque id — for diagnostics, and as a
+    /// last-resort label when the human name is unavailable (e.g. an error raised
+    /// before the names have been recovered at unlock).
+    #[must_use]
+    pub fn to_hex(&self) -> String {
+        use std::fmt::Write as _;
+        self.0
+            .iter()
+            .fold(String::with_capacity(self.0.len() * 2), |mut s, b| {
+                let _ = write!(s, "{b:02x}");
+                s
+            })
+    }
+}
+
 /// A named, enrolled factor and its derivation parameters.
 #[derive(Clone, Debug, Encode, Decode, PartialEq, Eq)]
 pub struct Factor {
-    pub id: String,
+    pub id: FactorId,
     pub kind: FactorKind,
     /// This factor's auth-KEK (the 64-byte material it derives from its password
     /// or security key) encrypted under the DEK. It lets a holder of the unlocked

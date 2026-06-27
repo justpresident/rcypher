@@ -199,7 +199,7 @@ fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result
                 let spinner = Spinner::new("Checking", params.quiet);
                 let matched = locked.try_password(&password)?;
                 spinner.finish_and_clear();
-                report_unlocked(matched.as_deref(), locked);
+                report_unlocked(matched, locked);
                 continue;
             }
             // Empty entry: use a key if one applies, else cancel.
@@ -220,16 +220,16 @@ fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result
     Ok(())
 }
 
-/// Reports a factor attempt and whether more factors are still needed.
-fn report_unlocked(matched: Option<&str>, locked: &LockedContainer) {
-    match matched {
-        None => eprintln!("That did not match any factor — try again."),
-        Some(id) => {
-            eprintln!("Factor '{id}' unlocked.");
-            if !locked.can_unlock() {
-                eprintln!("More factors are required to satisfy the policy.");
-            }
+/// Reports a factor attempt and whether more factors are still needed. Factor names
+/// are hidden until unlock, so a match is reported without naming the factor.
+fn report_unlocked(matched: bool, locked: &LockedContainer) {
+    if matched {
+        eprintln!("Factor unlocked.");
+        if !locked.can_unlock() {
+            eprintln!("More factors are required to satisfy the policy.");
         }
+    } else {
+        eprintln!("That did not match any factor — try again.");
     }
 }
 
@@ -239,7 +239,7 @@ fn pending_fido2(locked: &LockedContainer) -> bool {
     locked
         .pending_factor_kinds()
         .iter()
-        .any(|(_, kind)| matches!(kind, rcypher::FactorKind::Fido2 { .. }))
+        .any(|kind| matches!(kind, rcypher::FactorKind::Fido2 { .. }))
 }
 #[cfg(not(feature = "fido2"))]
 const fn pending_fido2(_locked: &LockedContainer) -> bool {
@@ -252,7 +252,7 @@ const fn pending_fido2(_locked: &LockedContainer) -> bool {
 #[cfg(feature = "fido2")]
 fn present_fido2_factor(locked: &mut LockedContainer) -> Result<bool> {
     // `pending_factor_kinds()` is owned, so we can iterate it while mutably trying.
-    for (id, kind) in locked.pending_factor_kinds() {
+    for kind in locked.pending_factor_kinds() {
         let rcypher::FactorKind::Fido2 {
             credential_id,
             rp_id,
@@ -263,7 +263,7 @@ fn present_fido2_factor(locked: &mut LockedContainer) -> Result<bool> {
             continue;
         };
 
-        eprintln!("Touch your FIDO2 security key for factor '{id}'…");
+        eprintln!("Touch your FIDO2 security key…");
         let pin = if require_pin {
             Some(prompt_password("Security key PIN")?)
         } else {
@@ -272,11 +272,11 @@ fn present_fido2_factor(locked: &mut LockedContainer) -> Result<bool> {
         let pin = pin.as_ref().map(|p| p.as_str());
         match rcypher::fido2::hmac_secret(&credential_id, &rp_id, &salt, pin) {
             Ok(secret) => {
-                if let Some(matched) = locked.try_fido2_secret(&secret)? {
-                    report_unlocked(Some(&matched), locked);
+                if locked.try_fido2_secret(&secret)? {
+                    report_unlocked(true, locked);
                     return Ok(true);
                 }
-                eprintln!("  That key did not match factor '{id}'.");
+                eprintln!("  That key did not match any factor.");
             }
             Err(e) => eprintln!("  {e}"),
         }
@@ -346,14 +346,14 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
     // Strength-check an interactively chosen password (skip in the test-only
     // `--insecure-password` path, which is non-interactive).
     if params.insecure_password.is_none()
-        && !confirm_if_weak_password(&password, &[cli::DEFAULT_FACTOR_ID, "rcypher"])?
+        && !confirm_if_weak_password(&password, &[cli::DEFAULT_FACTOR_NAME, "rcypher"])?
     {
         bail!("store creation cancelled (weak password not confirmed)");
     }
 
     let spinner = Spinner::new("Deriving encryption key", params.quiet);
     let store = UnlockedContainer::create_with_params(
-        cli::DEFAULT_FACTOR_ID,
+        cli::DEFAULT_FACTOR_NAME,
         &password,
         SecretStore::new(),
         argon2,
@@ -396,9 +396,9 @@ fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
     eprintln!("Touch your FIDO2 security key to enrol it…");
     let cred = rcypher::fido2::enroll(cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
 
-    let factor_id = "key";
+    let factor_name = "key";
     store.enroll_fido2(
-        factor_id,
+        factor_name,
         cred.credential_id,
         cli::FIDO2_RP_ID.to_string(),
         cred.salt,
@@ -410,13 +410,13 @@ fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
         "Require BOTH the password and the key to unlock? [y/N] (No = either one) : ",
     )?;
     let policy = if both {
-        format!("{} and {factor_id}", cli::DEFAULT_FACTOR_ID)
+        format!("{} and {factor_name}", cli::DEFAULT_FACTOR_NAME)
     } else {
-        format!("{} or {factor_id}", cli::DEFAULT_FACTOR_ID)
+        format!("{} or {factor_name}", cli::DEFAULT_FACTOR_NAME)
     };
     store.set_policy(&policy)?;
     store.save(&params.filename)?;
-    eprintln!("FIDO2 factor '{factor_id}' enrolled; unlock policy is now: {policy}");
+    eprintln!("FIDO2 factor '{factor_name}' enrolled; unlock policy is now: {policy}");
     Ok(())
 }
 

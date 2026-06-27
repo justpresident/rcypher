@@ -20,7 +20,7 @@ use crate::constants::{HmacSecretBytes, SaltBytes};
 use crate::crypto::{Argon2Params, Cypher, EncryptionKey};
 use crate::version::CypherVersion;
 
-/// Factor id given to the password enrolled when a legacy store is upgraded.
+/// Factor name given to the password enrolled when a legacy store is upgraded.
 const PRIMARY_FACTOR: &str = "primary";
 
 /// A loaded but locked store file. Version-agnostic: you cannot tell whether the
@@ -93,13 +93,16 @@ impl LockedContainer {
         })
     }
 
-    /// A human-readable description of what unlocking requires — e.g. `a password`
-    /// or `pass1 or (pass2 and fido2)`.
+    /// A human-readable description of what unlocking requires. Factor names are
+    /// encrypted until unlock, so a policy store reports only generically — the
+    /// loop's prompt still adapts to the pending factor *kinds*.
     #[must_use]
     pub fn requirement(&self) -> String {
         match &self.lock {
             Lock::Legacy(_) => "a password".to_string(),
-            Lock::Policy { session, .. } => session.policy_expr(),
+            Lock::Policy { .. } => {
+                "the configured factors (names are hidden until unlock)".to_string()
+            }
         }
     }
 
@@ -114,13 +117,14 @@ impl LockedContainer {
         }
     }
 
-    /// The still-unsatisfied factors, each id paired with its kind — so a caller can
-    /// see which factor *types* remain (and read a pending FIDO2 factor's device
-    /// parameters: `credential_id`, `rp_id`, `salt`, `require_pin`) and prompt only
-    /// for those. Empty for a legacy single-password store (use
-    /// [`needs_password`](Self::needs_password) there).
+    /// The kinds of the still-unsatisfied factors — so a caller can see which factor
+    /// *types* remain (and read a pending FIDO2 factor's device parameters:
+    /// `credential_id`, `rp_id`, `salt`, `require_pin`, carried in
+    /// [`FactorKind::Fido2`]) and prompt only for those. Factor names are hidden
+    /// until unlock, so no name is exposed. Empty for a legacy single-password store
+    /// (use [`needs_password`](Self::needs_password) there).
     #[must_use]
-    pub fn pending_factor_kinds(&self) -> Vec<(String, FactorKind)> {
+    pub fn pending_factor_kinds(&self) -> Vec<FactorKind> {
         match &self.lock {
             Lock::Legacy(_) => Vec::new(),
             Lock::Policy { session, .. } => session.pending_factor_kinds(),
@@ -137,7 +141,7 @@ impl LockedContainer {
             Lock::Policy { session, .. } => session
                 .pending_factor_kinds()
                 .iter()
-                .any(|(_, kind)| matches!(kind, FactorKind::Password { .. })),
+                .any(|kind| matches!(kind, FactorKind::Password { .. })),
         }
     }
 
@@ -148,14 +152,15 @@ impl LockedContainer {
         matches!(self.lock, Lock::Legacy(_))
     }
 
-    /// Tries `password` against the still-unsatisfied factors. Returns the id of
-    /// the factor it satisfied (or `None` if it matched nothing).
-    pub fn try_password(&mut self, password: &str) -> Result<Option<String>> {
+    /// Tries `password` against the still-unsatisfied factors. Returns whether it
+    /// satisfied one. The matched factor's name is hidden until unlock, so only the
+    /// match itself is reported.
+    pub fn try_password(&mut self, password: &str) -> Result<bool> {
         match &mut self.lock {
             Lock::Policy { session, .. } => session.try_password(password),
             Lock::Legacy(slot) => {
                 if slot.is_some() {
-                    return Ok(Some(PRIMARY_FACTOR.to_string()));
+                    return Ok(true);
                 }
                 // The legacy file is one password envelope; a correct password is
                 // exactly one whose derived key authenticates the whole file. Verify
@@ -163,29 +168,25 @@ impl LockedContainer {
                 // so the cleartext payload never lives in the locked handle.
                 let key = EncryptionKey::for_data_with_params(password, &self.bytes, &self.argon2)?;
                 if Cypher::new(key.clone()).decrypt(&self.bytes).is_err() {
-                    return Ok(None);
+                    return Ok(false);
                 }
                 *slot = Some(Legacy {
                     password: Zeroizing::new(password.to_string()),
                     key,
                 });
-                Ok(Some(PRIMARY_FACTOR.to_string()))
+                Ok(true)
             }
         }
     }
 
     /// Tries a FIDO2 `hmac-secret` output (obtained from the authenticator for one
     /// of the factors reported by [`pending_factor_kinds`](Self::pending_factor_kinds)) against the
-    /// still-unsatisfied factors. Returns the id of the FIDO2 factor it satisfied,
-    /// or `None`. A legacy single-password store has no FIDO2 factors, so this
-    /// returns `None` for one.
-    pub fn try_fido2_secret(
-        &mut self,
-        raw_hmac_secret: &HmacSecretBytes,
-    ) -> Result<Option<String>> {
+    /// still-unsatisfied factors. Returns whether it satisfied one. A legacy
+    /// single-password store has no FIDO2 factors, so this returns `false` for one.
+    pub fn try_fido2_secret(&mut self, raw_hmac_secret: &HmacSecretBytes) -> Result<bool> {
         match &mut self.lock {
             Lock::Policy { session, .. } => session.try_fido2_secret(raw_hmac_secret),
-            Lock::Legacy(_) => Ok(None),
+            Lock::Legacy(_) => Ok(false),
         }
     }
 
@@ -276,19 +277,19 @@ impl<T: DataContainer> UnlockedContainer<T> {
     /// Creates a brand-new store protected by a single password factor, holding
     /// `data`. Uses secure default Argon2 parameters; [`save`](Self::save) writes
     /// it in the current format.
-    pub fn create(factor_id: &str, password: &str, data: T) -> Result<Self> {
-        Self::create_with_params(factor_id, password, data, &Argon2Params::default())
+    pub fn create(factor_name: &str, password: &str, data: T) -> Result<Self> {
+        Self::create_with_params(factor_name, password, data, &Argon2Params::default())
     }
 
     /// Like [`create`](Self::create) with explicit Argon2 cost parameters.
     pub fn create_with_params(
-        factor_id: &str,
+        factor_name: &str,
         password: &str,
         data: T,
         argon2: &Argon2Params,
     ) -> Result<Self> {
         Ok(Self {
-            vault: PolicyVault::create(factor_id, password, argon2)?,
+            vault: PolicyVault::create(factor_name, password, argon2)?,
             data,
             argon2: *argon2,
             provenance: Provenance::Fresh,
@@ -328,21 +329,21 @@ impl<T: DataContainer> UnlockedContainer<T> {
         self.vault.policy_expr()
     }
 
-    /// The ids of all enrolled factors.
+    /// The names of all enrolled factors.
     #[must_use]
-    pub fn factor_ids(&self) -> Vec<String> {
-        self.vault.factor_ids()
+    pub fn factor_names(&self) -> Vec<String> {
+        self.vault.factor_names()
     }
 
-    /// Each enrolled factor's id paired with its kind (for display).
+    /// Each enrolled factor's name paired with its kind (for display).
     #[must_use]
     pub fn factor_kinds(&self) -> Vec<(String, FactorKind)> {
         self.vault.factor_kinds()
     }
 
     /// Enrolls an additional password factor (using the load-time Argon2 params).
-    pub fn enroll_password(&mut self, id: &str, password: &str) -> Result<()> {
-        self.vault.enroll_password(id, password, &self.argon2)
+    pub fn enroll_password(&mut self, name: &str, password: &str) -> Result<()> {
+        self.vault.enroll_password(name, password, &self.argon2)
     }
 
     /// Enrolls a FIDO2 security-key factor from a just-enrolled credential and its
@@ -350,15 +351,21 @@ impl<T: DataContainer> UnlockedContainer<T> {
     /// is unused until [`set_policy`](Self::set_policy) references it.
     pub fn enroll_fido2(
         &mut self,
-        id: &str,
+        name: &str,
         credential_id: Vec<u8>,
         rp_id: String,
         salt: SaltBytes,
         require_pin: bool,
         raw_hmac_secret: &HmacSecretBytes,
     ) -> Result<()> {
-        self.vault
-            .enroll_fido2(id, credential_id, rp_id, salt, require_pin, raw_hmac_secret)
+        self.vault.enroll_fido2(
+            name,
+            credential_id,
+            rp_id,
+            salt,
+            require_pin,
+            raw_hmac_secret,
+        )
     }
 
     /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and fido2)`).
@@ -367,8 +374,8 @@ impl<T: DataContainer> UnlockedContainer<T> {
     }
 
     /// Removes a factor. Fails if the current policy still references it.
-    pub fn remove_factor(&mut self, id: &str) -> Result<()> {
-        self.vault.remove_factor(id)
+    pub fn remove_factor(&mut self, name: &str) -> Result<()> {
+        self.vault.remove_factor(name)
     }
 
     /// Serializes the store to a self-contained byte vector, in the current
@@ -447,25 +454,25 @@ mod tests {
         let bytes = new_store("hunter2", "secret data").to_vec().unwrap();
 
         let mut locked = open(&bytes);
-        assert_eq!(locked.requirement(), "primary");
+        // Names are hidden pre-unlock, so the requirement is generic.
+        assert!(locked.requirement().contains("hidden until unlock"));
         assert!(!locked.can_unlock());
-        assert_eq!(locked.try_password("wrong").unwrap(), None);
-        assert_eq!(
-            locked.try_password("hunter2").unwrap().as_deref(),
-            Some("primary")
-        );
+        assert!(!locked.try_password("wrong").unwrap());
+        assert!(locked.try_password("hunter2").unwrap());
         assert!(locked.can_unlock());
 
         let unlocked = locked.unlock::<Text>().unwrap();
         assert_eq!(unlocked.data().0, "secret data");
         assert!(!unlocked.was_upgraded());
+        // After unlock the human name is restored.
+        assert!(unlocked.factor_names().contains(&"primary".to_string()));
     }
 
     #[test]
     fn wrong_password_never_unlocks() {
         let bytes = new_store("right", "data").to_vec().unwrap();
         let mut locked = open(&bytes);
-        assert_eq!(locked.try_password("nope").unwrap(), None);
+        assert!(!locked.try_password("nope").unwrap());
         assert!(!locked.can_unlock());
         assert!(locked.unlock::<Text>().is_err());
     }
@@ -477,14 +484,14 @@ mod tests {
         store.set_policy("primary or p2").unwrap();
         let bytes = store.to_vec().unwrap();
 
-        // Unlock via the second factor.
+        // Unlock via the second factor (names hidden, so the match isn't named).
         let mut locked = open(&bytes);
-        assert_eq!(locked.requirement(), "primary or p2");
-        assert_eq!(
-            locked.try_password("p2pass").unwrap().as_deref(),
-            Some("p2")
-        );
-        assert_eq!(locked.unlock::<Text>().unwrap().data().0, "d");
+        assert!(locked.requirement().contains("hidden until unlock"));
+        assert!(locked.try_password("p2pass").unwrap());
+        let unlocked = locked.unlock::<Text>().unwrap();
+        assert_eq!(unlocked.data().0, "d");
+        // Names round-trip through save/load.
+        assert_eq!(unlocked.policy_expr(), "primary or p2");
     }
 
     #[test]
@@ -506,27 +513,24 @@ mod tests {
         store.set_policy("primary or key").unwrap();
         let bytes = store.to_vec().unwrap();
 
-        // The locked container reports the FIDO2 factor's params for the caller to
-        // drive a `get_assertion`...
+        // The locked container reports a pending FIDO2 factor (by kind — its name is
+        // hidden) so the caller can drive a `get_assertion`...
         let mut locked = open(&bytes);
         assert!(
             locked
                 .pending_factor_kinds()
                 .iter()
-                .any(|(id, k)| id == "key" && matches!(k, FactorKind::Fido2 { .. }))
+                .any(|k| matches!(k, FactorKind::Fido2 { .. }))
         );
 
         // ...and the resulting secret alone unlocks (OR replicates the DEK).
-        assert_eq!(
-            locked.try_fido2_secret(&secret).unwrap().as_deref(),
-            Some("key")
-        );
+        assert!(locked.try_fido2_secret(&secret).unwrap());
         assert!(locked.can_unlock());
         assert_eq!(locked.unlock::<Text>().unwrap().data().0, "d");
 
         // A legacy-style lock (no FIDO2 factors) yields no match and empty kinds.
         let mut pw_only = open(&new_store("only", "x").to_vec().unwrap());
-        assert_eq!(pw_only.try_fido2_secret(&secret).unwrap(), None);
+        assert!(!pw_only.try_fido2_secret(&secret).unwrap());
     }
 
     #[test]
@@ -557,8 +561,11 @@ mod tests {
         Ok(locked.unlock::<Text>()?.data().clone())
     }
 
-    fn first_leaf(node: &crate::auth::PolicyNode, id: &str) -> Option<crate::auth::Leaf> {
-        node.leaves().find(|l| l.factor == id).cloned()
+    fn first_leaf(
+        node: &crate::auth::PolicyNode,
+        id: &crate::auth::FactorId,
+    ) -> Option<crate::auth::Leaf> {
+        node.leaves().find(|l| &l.factor == id).cloned()
     }
 
     #[test]
@@ -585,20 +592,16 @@ mod tests {
         let bytes = store.to_vec().unwrap();
         assert!(try_open(&bytes, "p1pass").is_ok());
 
-        // An attacker rewrites the keyslot down to a single `primary` leaf, reusing
-        // its original factor and wrapped share, keeping the original payload.
+        // An attacker rewrites the keyslot down to a single leaf, reusing one of the
+        // original factors and its wrapped share, keeping the original payload. (Factor
+        // ids are now opaque encrypted names, so pick by position rather than by name.)
         let parsed = FileContainerV8::parse(&bytes).unwrap();
         let header = parsed.header();
-        let primary = header
-            .factors
-            .iter()
-            .find(|f| f.id == "primary")
-            .unwrap()
-            .clone();
-        let leaf = first_leaf(&header.policy, "primary").unwrap();
+        let kept = header.factors[0].clone();
+        let leaf = first_leaf(&header.policy, &kept.id).unwrap();
         let payload = parsed.payload().to_vec();
         let stripped = VaultHeader {
-            factors: vec![primary],
+            factors: vec![kept],
             policy: PolicyNode::Leaf(leaf),
         };
         let mut tampered = FileContainerFormat::V8.tag().to_vec();

@@ -514,11 +514,11 @@ fn test_encrypt_decrypt_with_output_file() {
 /// Creates a version-8 single-password store at `path`, holding an empty
 /// store, derived with insecure Argon2 params so the binary's `--insecure-password`
 /// path unlocks it quickly.
-fn create_store(path: &Path, factor_id: &str, password: &str) {
+fn create_store(path: &Path, factor_name: &str, password: &str) {
     use rcypher::{Argon2Params, SecretStore, UnlockedContainer};
 
     let mut store = UnlockedContainer::create_with_params(
-        factor_id,
+        factor_name,
         password,
         SecretStore::new(),
         &Argon2Params::insecure(),

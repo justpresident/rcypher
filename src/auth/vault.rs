@@ -12,11 +12,11 @@ use anyhow::{Result, anyhow, bail};
 use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
-use super::factor::{Factor, FactorKind, fido2_kek, new_password_kind, password_kek};
+use super::factor::{Factor, FactorId, FactorKind, fido2_kek, new_password_kind, password_kek};
 use super::header::VaultHeader;
 use super::policy::{
-    Leaf, PolicyNode, Share, distribute, is_factor_id_char, parse_policy, reconstruct,
-    render_policy, validate_factors,
+    Leaf, PolicyExpr, PolicyNode, Share, distribute, is_factor_name_char, parse_policy,
+    reconstruct, render_policy, validate_factors,
 };
 use crate::constants::{HmacSecretBytes, KEY_MATERIAL_LEN, KeyMaterialBytes, SaltBytes};
 use crate::crypto::{
@@ -26,6 +26,13 @@ use crate::version::CypherVersion;
 
 /// An unlocked policy vault: the enrolled factors, the access policy (leaves
 /// carrying wrapped shares), and the recovered data-encryption key.
+///
+/// A factor's [`FactorId`] (the link between [`Factor`] and the policy [`Leaf`]s,
+/// and the only per-factor value visible in the cleartext header) is the factor's
+/// human **name encrypted under the DEK**, so the name leaks nothing at rest. With
+/// the DEK in hand the vault decrypts an id back to its name on demand (see
+/// [`name_for_id`](Self::name_for_id)) for display and management — names are a
+/// projection of `factors` + the DEK, not separate state to keep in sync.
 pub struct PolicyVault {
     factors: Vec<Factor>,
     policy: PolicyNode,
@@ -36,24 +43,25 @@ impl PolicyVault {
     /// Creates a new vault protected by a single password factor; the initial
     /// policy is just that factor. Enroll more factors and refine the policy with
     /// [`PolicyVault::enroll_password`] and [`PolicyVault::set_policy`].
-    pub fn create(id: &str, password: &str, params: &Argon2Params) -> Result<Self> {
-        check_factor_password(id, password)?;
+    pub fn create(name: &str, password: &str, params: &Argon2Params) -> Result<Self> {
+        check_factor_password(name, password)?;
         let dek = generate_key_material()?;
+        let dek_cypher = cypher_from_material(&dek, CypherVersion::default());
 
         let kind = new_password_kind(params)?;
         let authkek = password_kek(password, &kind)?;
+        let id = encrypt_factor_name(&dek_cypher, name)?;
         let factor = Factor {
-            id: id.to_string(),
+            id: id.clone(),
             kind,
-            authkek_under_dek: cypher_from_material(&dek, CypherVersion::default())
-                .encrypt_with_aad(authkek.as_slice(), &[])?,
+            authkek_under_dek: dek_cypher.encrypt_with_aad(authkek.as_slice(), &[])?,
         };
 
         let template = PolicyNode::Leaf(Leaf {
-            factor: id.to_string(),
+            factor: id.clone(),
             wrapped_share: Vec::new(),
         });
-        let authkeks = HashMap::from([(id.to_string(), authkek)]);
+        let authkeks = HashMap::from([(id, authkek)]);
         let policy = distribute_and_wrap(&template, &dek, &authkeks)?;
 
         Ok(Self {
@@ -67,13 +75,13 @@ impl PolicyVault {
     /// [`PolicyVault::set_policy`] to start requiring or accepting the new factor.
     pub fn enroll_password(
         &mut self,
-        id: &str,
+        name: &str,
         password: &str,
         params: &Argon2Params,
     ) -> Result<()> {
-        check_factor_password(id, password)?;
-        if self.factors.iter().any(|f| f.id == id) {
-            bail!("a factor named '{id}' already exists");
+        check_factor_password(name, password)?;
+        if self.id_for_name(name).is_some() {
+            bail!("a factor named '{name}' already exists");
         }
         if let Some(existing) = self.factor_matching_password(password)? {
             bail!(
@@ -83,8 +91,9 @@ impl PolicyVault {
         }
         let kind = new_password_kind(params)?;
         let authkek = password_kek(password, &kind)?;
+        let id = self.encrypt_name(name)?;
         self.factors.push(Factor {
-            id: id.to_string(),
+            id,
             kind,
             authkek_under_dek: self
                 .dek_cypher()
@@ -98,20 +107,21 @@ impl PolicyVault {
     /// the policy is unchanged until [`set_policy`](Self::set_policy) references it.
     pub fn enroll_fido2(
         &mut self,
-        id: &str,
+        name: &str,
         credential_id: Vec<u8>,
         rp_id: String,
         salt: SaltBytes,
         require_pin: bool,
         raw_hmac_secret: &HmacSecretBytes,
     ) -> Result<()> {
-        validate_factor_id(id)?;
-        if self.factors.iter().any(|f| f.id == id) {
-            bail!("a factor named '{id}' already exists");
+        validate_factor_name(name)?;
+        if self.id_for_name(name).is_some() {
+            bail!("a factor named '{name}' already exists");
         }
         let authkek = fido2_kek(raw_hmac_secret)?;
+        let id = self.encrypt_name(name)?;
         self.factors.push(Factor {
-            id: id.to_string(),
+            id,
             kind: FactorKind::Fido2 {
                 credential_id,
                 rp_id,
@@ -125,7 +135,7 @@ impl PolicyVault {
         Ok(())
     }
 
-    /// The id of an enrolled password factor whose password equals `password`, if
+    /// The name of an enrolled password factor whose password equals `password`, if
     /// any — re-derives each factor's auth-KEK from `password` (with that factor's
     /// salt) and compares it to the factor's actual auth-KEK recovered from the
     /// DEK. Lets enrollment refuse a password already used by another factor.
@@ -143,25 +153,19 @@ impl PolicyVault {
             };
             // Both sides are secret 64-byte auth-KEKs; compare in constant time.
             if bool::from(candidate.as_slice().ct_eq(actual.as_slice())) {
-                return Ok(Some(factor.id.clone()));
+                return Ok(Some(self.name_for_id(&factor.id)));
             }
         }
         Ok(None)
     }
 
-    /// Removes a factor. Fails if the current policy still references it.
-    pub fn remove_factor(&mut self, id: &str) -> Result<()> {
-        if !self.factors.iter().any(|f| f.id == id) {
-            bail!("no factor named '{id}'");
-        }
-        let remaining: HashSet<String> = self
-            .factors
-            .iter()
-            .filter(|f| f.id != id)
-            .map(|f| f.id.clone())
-            .collect();
-        if validate_factors(&self.policy, &remaining).is_err() {
-            bail!("factor '{id}' is still used by the policy; change the policy first");
+    /// Removes a factor by name. Fails if the current policy still references it.
+    pub fn remove_factor(&mut self, name: &str) -> Result<()> {
+        let Some(id) = self.id_for_name(name) else {
+            bail!("no factor named '{name}'");
+        };
+        if self.policy.leaves().any(|leaf| leaf.factor == id) {
+            bail!("factor '{name}' is still used by the policy; change the policy first");
         }
         self.factors.retain(|f| f.id != id);
         Ok(())
@@ -171,33 +175,68 @@ impl PolicyVault {
     /// re-distributing the DEK across the new tree. Recovers every factor's
     /// auth-KEK from the DEK, so only an unlocked vault is required.
     pub fn set_policy(&mut self, expr: &str) -> Result<()> {
-        let template = parse_policy(expr)?;
-        let known: HashSet<String> = self.factors.iter().map(|f| f.id.clone()).collect();
-        validate_factors(&template, &known)?;
+        let parsed = parse_policy(expr)?;
+        let known: HashSet<String> = self
+            .factors
+            .iter()
+            .map(|f| self.name_for_id(&f.id))
+            .collect();
+        validate_factors(&parsed, &known)?;
+        // The parser produced name leaves; resolve them to opaque factor ids.
+        let template = parsed.resolve(&|name| {
+            self.id_for_name(name)
+                .ok_or_else(|| anyhow!("unknown factor '{name}'"))
+        })?;
         let authkeks = self.recover_all_authkeks()?;
         self.policy = distribute_and_wrap(&template, &self.dek, &authkeks)?;
         Ok(())
     }
 
-    /// The current policy as a canonical expression.
+    /// The current policy as a canonical, human-readable expression (names restored).
     #[must_use]
     pub fn policy_expr(&self) -> String {
-        render_policy(&self.policy)
+        render_policy(&self.named_expr())
     }
 
-    /// The ids of all enrolled factors.
+    /// The names of all enrolled factors.
     #[must_use]
-    pub fn factor_ids(&self) -> Vec<String> {
-        self.factors.iter().map(|f| f.id.clone()).collect()
+    pub fn factor_names(&self) -> Vec<String> {
+        self.factors
+            .iter()
+            .map(|f| self.name_for_id(&f.id))
+            .collect()
     }
 
-    /// Each enrolled factor's id paired with its kind (for display).
+    /// Each enrolled factor's name paired with its kind (for display).
     #[must_use]
     pub fn factor_kinds(&self) -> Vec<(String, FactorKind)> {
         self.factors
             .iter()
-            .map(|f| (f.id.clone(), f.kind.clone()))
+            .map(|f| (self.name_for_id(&f.id), f.kind.clone()))
             .collect()
+    }
+
+    /// The opaque id of the factor named `name`, if enrolled — found by decrypting
+    /// each factor's id and matching the name.
+    fn id_for_name(&self, name: &str) -> Option<FactorId> {
+        self.factors
+            .iter()
+            .find(|f| self.name_for_id(&f.id) == name)
+            .map(|f| f.id.clone())
+    }
+
+    /// The human name for an opaque factor id: decrypts it under the DEK. Falls back
+    /// to the id's hex on a decryption failure, which a validly unlocked vault never
+    /// hits — every id is the ciphertext of its name under this DEK, and the header
+    /// (factor ids included) is authenticated against the payload at unlock.
+    fn name_for_id(&self, id: &FactorId) -> String {
+        decrypt_factor_name(&self.dek_cypher(), id).unwrap_or_else(|_| id.to_hex())
+    }
+
+    /// The policy as a name-keyed [`PolicyExpr`] (each leaf's opaque id mapped back
+    /// to its human name), for rendering.
+    fn named_expr(&self) -> PolicyExpr {
+        self.policy.to_expr(&|id| self.name_for_id(id))
     }
 
     /// The vault header (factors + policy) — the locked, serializable projection
@@ -248,16 +287,27 @@ impl PolicyVault {
     }
 
     /// Recovers every factor's auth-KEK from the DEK (for re-distribution).
-    fn recover_all_authkeks(&self) -> Result<HashMap<String, KeyMaterial>> {
+    fn recover_all_authkeks(&self) -> Result<HashMap<FactorId, KeyMaterial>> {
         let mut authkeks = HashMap::new();
         for factor in &self.factors {
             let bytes = self
                 .dek_cypher()
                 .decrypt_with_aad(&factor.authkek_under_dek, &[])
-                .map_err(|_| anyhow!("corrupt keyslot for factor '{}'", factor.id))?;
+                .map_err(|_| {
+                    anyhow!(
+                        "corrupt keyslot for factor '{}'",
+                        self.name_for_id(&factor.id)
+                    )
+                })?;
             authkeks.insert(factor.id.clone(), to_key_material(&bytes)?);
         }
         Ok(authkeks)
+    }
+
+    /// Mints a factor's opaque id from its human `name`: the name encrypted under
+    /// the DEK, so the name is absent from the cleartext header.
+    fn encrypt_name(&self, name: &str) -> Result<FactorId> {
+        encrypt_factor_name(&self.dek_cypher(), name)
     }
 
     /// A `Cypher` keyed by the DEK for the vault's *internal* key-wrapping — auth-KEKs
@@ -277,7 +327,7 @@ impl PolicyVault {
 pub struct UnlockSession {
     factors: Vec<Factor>,
     policy: PolicyNode,
-    authkeks: HashMap<String, KeyMaterial>,
+    authkeks: HashMap<FactorId, KeyMaterial>,
 }
 
 impl UnlockSession {
@@ -290,7 +340,7 @@ impl UnlockSession {
         }
     }
 
-    fn satisfied_ids(&self) -> HashSet<String> {
+    fn satisfied_ids(&self) -> HashSet<FactorId> {
         self.authkeks.keys().cloned().collect()
     }
 
@@ -304,7 +354,7 @@ impl UnlockSession {
     /// unlocked without presenting any FIDO2 security key.
     #[must_use]
     pub fn satisfiable_by_passwords(&self) -> bool {
-        let passwords: HashSet<String> = self
+        let passwords: HashSet<FactorId> = self
             .factors
             .iter()
             .filter(|f| matches!(f.kind, FactorKind::Password { .. }))
@@ -313,24 +363,25 @@ impl UnlockSession {
         self.policy.is_satisfied_by(&passwords)
     }
 
-    /// The still-unsatisfied factors, each id paired with its kind — so a caller can
-    /// see which factor *types* remain (and read a pending FIDO2 factor's device
-    /// parameters) and prompt only for those.
+    /// The kinds of the still-unsatisfied factors — so a caller can see which factor
+    /// *types* remain (and read a pending FIDO2 factor's device parameters, carried
+    /// in [`FactorKind::Fido2`]) and prompt only for those. The factor names stay
+    /// hidden until unlock, so no id is exposed here.
     #[must_use]
-    pub fn pending_factor_kinds(&self) -> Vec<(String, FactorKind)> {
+    pub fn pending_factor_kinds(&self) -> Vec<FactorKind> {
         self.factors
             .iter()
             .filter(|f| !self.authkeks.contains_key(&f.id))
-            .map(|f| (f.id.clone(), f.kind.clone()))
+            .map(|f| f.kind.clone())
             .collect()
     }
 
-    /// Tries `password` against the not-yet-satisfied password factors and, on the
-    /// first match, records its auth-KEK and returns the factor id. Each factor
-    /// has a distinct password (enforced at enroll), so one match is conclusive —
-    /// no need to try the rest.
-    pub fn try_password(&mut self, password: &str) -> Result<Option<String>> {
-        let candidates: Vec<(String, FactorKind)> = self
+    /// Tries `password` against the not-yet-satisfied password factors, recording its
+    /// auth-KEK on the first match. Returns whether a factor matched. Each factor has
+    /// a distinct password (enforced at enroll), so one match is conclusive — no need
+    /// to try the rest. The matched factor's name stays hidden until unlock.
+    pub fn try_password(&mut self, password: &str) -> Result<bool> {
+        let candidates: Vec<(FactorId, FactorKind)> = self
             .factors
             .iter()
             .filter(|f| {
@@ -351,25 +402,22 @@ impl UnlockSession {
                         .is_ok()
                 });
             if verified {
-                self.authkeks.insert(id.clone(), authkek);
-                return Ok(Some(id));
+                self.authkeks.insert(id, authkek);
+                return Ok(true);
             }
         }
-        Ok(None)
+        Ok(false)
     }
 
     /// Tries a FIDO2 `hmac-secret` output against the not-yet-satisfied FIDO2
     /// factors. The auth-KEK depends only on the secret, so it is derived once and
     /// matched against each FIDO2 leaf; on the first whose wrapped share
-    /// authenticates, records it and returns the factor id. Mirrors
+    /// authenticates, records it and returns `true`. Mirrors
     /// [`try_password`](Self::try_password); the caller obtains the secret from the
     /// authenticator (see `rcypher::fido2`).
-    pub fn try_fido2_secret(
-        &mut self,
-        raw_hmac_secret: &HmacSecretBytes,
-    ) -> Result<Option<String>> {
+    pub fn try_fido2_secret(&mut self, raw_hmac_secret: &HmacSecretBytes) -> Result<bool> {
         let kek = fido2_kek(raw_hmac_secret)?;
-        let candidates: Vec<String> = self
+        let candidates: Vec<FactorId> = self
             .factors
             .iter()
             .filter(|f| {
@@ -389,18 +437,11 @@ impl UnlockSession {
                         .is_ok()
                 });
             if verified {
-                self.authkeks.insert(id.clone(), kek);
-                return Ok(Some(id));
+                self.authkeks.insert(id, kek);
+                return Ok(true);
             }
         }
-        Ok(None)
-    }
-
-    /// The unlock policy as a canonical expression (a prompt hint shown before any
-    /// factor is supplied).
-    #[must_use]
-    pub fn policy_expr(&self) -> String {
-        render_policy(&self.policy)
+        Ok(false)
     }
 
     /// Reconstructs the data-encryption key from the gathered factors and returns
@@ -423,6 +464,8 @@ impl UnlockSession {
         let dek_bytes = reconstruct(&self.policy, &provided)
             .ok_or_else(|| anyhow!("the provided factors do not satisfy the unlock policy"))?;
         let dek = to_key_material(&dek_bytes)?;
+        // Names are decrypted on demand from each factor's id with the DEK (see
+        // `PolicyVault::name_for_id`), so there is nothing to recover up front here.
         Ok(PolicyVault {
             factors: self.factors,
             policy: self.policy,
@@ -438,7 +481,7 @@ impl UnlockSession {
 fn distribute_and_wrap(
     template: &PolicyNode,
     dek: &KeyMaterialBytes,
-    authkeks: &HashMap<String, KeyMaterial>,
+    authkeks: &HashMap<FactorId, KeyMaterial>,
 ) -> Result<PolicyNode> {
     let shares = distribute(dek, template)?;
     let mut policy = template.clone();
@@ -449,7 +492,7 @@ fn distribute_and_wrap(
             .ok_or_else(|| anyhow!("internal error: share/leaf count mismatch"))?;
         let kek = authkeks
             .get(&leaf.factor)
-            .ok_or_else(|| anyhow!("no key material for factor '{}'", leaf.factor))?;
+            .ok_or_else(|| anyhow!("no key material for factor '{}'", leaf.factor.to_hex()))?;
         leaf.wrapped_share =
             cypher_from_material(kek, CypherVersion::default()).encrypt_with_aad(share, &[])?;
     }
@@ -470,39 +513,53 @@ fn to_key_material(bytes: &[u8]) -> Result<KeyMaterial> {
     Ok(material)
 }
 
-fn validate_factor_id(id: &str) -> Result<()> {
-    if id.is_empty() {
-        bail!("a factor id cannot be empty");
+/// Mints a factor's opaque [`FactorId`]: its human `name` encrypted under the DEK
+/// (via a DEK-keyed `cypher`) as raw bytes, so the name is absent from the
+/// cleartext header. Encryption is non-deterministic, so the id is minted once at
+/// enrolment and reused thereafter.
+fn encrypt_factor_name(cypher: &Cypher, name: &str) -> Result<FactorId> {
+    Ok(FactorId(cypher.encrypt_with_aad(name.as_bytes(), &[])?))
+}
+
+/// Recovers a factor's human name from its opaque [`FactorId`] — the inverse of
+/// [`encrypt_factor_name`], using the same DEK-keyed `cypher`.
+fn decrypt_factor_name(cypher: &Cypher, id: &FactorId) -> Result<String> {
+    let plaintext = cypher.decrypt_with_aad(&id.0, &[])?;
+    String::from_utf8(plaintext.to_vec()).map_err(|_| anyhow!("corrupt factor name in keyslot"))
+}
+
+fn validate_factor_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("a factor name cannot be empty");
     }
-    if id.eq_ignore_ascii_case("and") || id.eq_ignore_ascii_case("or") {
-        bail!("'{id}' is a reserved keyword and cannot be a factor id");
+    if name.eq_ignore_ascii_case("and") || name.eq_ignore_ascii_case("or") {
+        bail!("'{name}' is a reserved keyword and cannot be a factor name");
     }
-    if !id.chars().all(is_factor_id_char) {
-        bail!("factor id '{id}' may contain only letters, digits, '-' and '_'");
+    if !name.chars().all(is_factor_name_char) {
+        bail!("factor name '{name}' may contain only letters, digits, '-' and '_'");
     }
     Ok(())
 }
 
 /// Guards against a password that is too similar to the factor *name*.
 ///
-/// The name is stored unencrypted as a label, so a password that shares a long
-/// prefix with it (e.g. name `foobar`, password `foobar1`) leaks most of the
-/// password to anyone reading the file. Require the password to be at least twice
-/// as long as the prefix it shares with the name — which also rejects a password
-/// equal to the name, catching the mix-up of typing a password into the name
-/// slot. Comparison is case-insensitive, since an attacker would try case
-/// variants of a known label cheaply.
-/// Validates that `password` is acceptable for a factor named `id`, independent
+/// A password equal or close to the factor name is almost always a mistake — the
+/// name typed into the password slot and then repeated — and a weak, guessable
+/// choice. Require the password to be at least twice as long as any prefix it
+/// shares with the name, which rejects that mix-up. Comparison is case-insensitive.
+/// (The name itself is now encrypted in the store, so this is about the password's
+/// quality, not a plaintext-name leak.)
+/// Validates that `password` is acceptable for a factor named `name`, independent
 /// of any vault — so a caller can check it before doing more work (e.g. a
 /// strength prompt). The name must be well-formed and the password must not be
 /// too similar to it. Creating a vault and enrolling a factor apply the same check.
-pub fn check_factor_password(id: &str, password: &str) -> Result<()> {
-    validate_factor_id(id)?;
-    reject_password_resembling_id(id, password)
+pub fn check_factor_password(name: &str, password: &str) -> Result<()> {
+    validate_factor_name(name)?;
+    reject_password_resembling_name(name, password)
 }
 
-fn reject_password_resembling_id(id: &str, password: &str) -> Result<()> {
-    let shared_prefix = id
+fn reject_password_resembling_name(name: &str, password: &str) -> Result<()> {
+    let shared_prefix = name
         .chars()
         .flat_map(char::to_lowercase)
         .zip(password.chars().flat_map(char::to_lowercase))
@@ -510,9 +567,9 @@ fn reject_password_resembling_id(id: &str, password: &str) -> Result<()> {
         .count();
     if password.chars().count() < 2 * shared_prefix {
         bail!(
-            "the password is too similar to the factor name '{id}': they share a \
-             {shared_prefix}-character prefix, and the name is stored unencrypted. Use a \
-             password at least twice as long as any prefix it shares with the name (or pick a \
+            "the password is too similar to the factor name '{name}': they share a \
+             {shared_prefix}-character prefix. A password close to the factor name is a weak, \
+             guessable choice — use one at least twice as long as any shared prefix (or pick a \
              different name). Did you type your password where the factor name belongs? The \
              name is just a label; the password is prompted separately."
         );
@@ -529,11 +586,11 @@ mod tests {
     }
 
     /// Round-trips a vault through its serialized header, then unlocks it by
-    /// presenting each provided password to an [`UnlockSession`] (the factor id is
+    /// presenting each provided password to an [`UnlockSession`] (the factor name is
     /// just a label here — the session matches the password against the factors).
     fn reopen(vault: &PolicyVault, provided: &[(&str, &str)]) -> Result<PolicyVault> {
         let mut session = UnlockSession::new(vault.header());
-        for (_id, password) in provided {
+        for (_name, password) in provided {
             session.try_password(password)?;
         }
         session.finish()
@@ -624,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_bad_factor_ids_and_dupes() {
+    fn rejects_bad_factor_names_and_dupes() {
         assert!(PolicyVault::create("and", "x", &params()).is_err());
         assert!(PolicyVault::create("a b", "x", &params()).is_err());
         let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
@@ -688,10 +745,14 @@ mod tests {
         [byte; crate::constants::HMAC_SECRET_LEN]
     }
 
-    fn enroll_fido2(vault: &mut PolicyVault, id: &str, secret: &crate::constants::HmacSecretBytes) {
+    fn enroll_fido2(
+        vault: &mut PolicyVault,
+        name: &str,
+        secret: &crate::constants::HmacSecretBytes,
+    ) {
         vault
             .enroll_fido2(
-                id,
+                name,
                 vec![1, 2, 3],
                 "rcypher".into(),
                 SaltBytes::default(),
@@ -711,12 +772,10 @@ mod tests {
             .encrypt_payload(b"data", &[], CypherVersion::default())
             .unwrap();
 
-        // The FIDO2 secret alone reconstructs the DEK (OR replicates it).
+        // The FIDO2 secret alone reconstructs the DEK (OR replicates it). The match
+        // is reported generically (true/false) — the factor name stays hidden.
         let mut session = UnlockSession::new(vault.header());
-        assert_eq!(
-            session.try_fido2_secret(&secret).unwrap().as_deref(),
-            Some("key")
-        );
+        assert!(session.try_fido2_secret(&secret).unwrap());
         let reopened = session.finish().unwrap();
         assert_eq!(
             reopened
@@ -725,10 +784,12 @@ mod tests {
                 .as_slice(),
             b"data"
         );
+        // After unlock the human name is restored.
+        assert!(reopened.factor_names().contains(&"key".to_string()));
 
         // A wrong secret matches no factor.
         let mut session = UnlockSession::new(vault.header());
-        assert_eq!(session.try_fido2_secret(&fido2_secret(43)).unwrap(), None);
+        assert!(!session.try_fido2_secret(&fido2_secret(43)).unwrap());
     }
 
     #[test]
@@ -749,5 +810,32 @@ mod tests {
         // The FIDO2 factor makes the store not satisfiable by passwords alone.
         let session = UnlockSession::new(vault.header());
         assert!(!session.satisfiable_by_passwords());
+    }
+
+    #[test]
+    fn factor_names_are_encrypted_in_the_header() {
+        // A distinctive name + a recognizable substring inside the policy.
+        let mut vault =
+            PolicyVault::create("secret-bank", "a-strong-passphrase", &params()).unwrap();
+        vault
+            .enroll_password("recovery-stash", "another-strong-one", &params())
+            .unwrap();
+        vault.set_policy("secret-bank or recovery-stash").unwrap();
+
+        let header = vault.header();
+        let bytes = bincode::encode_to_vec(&header, bincode::config::standard()).unwrap();
+        for name in [b"secret-bank".as_slice(), b"recovery-stash".as_slice()] {
+            assert!(
+                !bytes.windows(name.len()).any(|w| w == name),
+                "factor name leaked into the cleartext header"
+            );
+        }
+
+        // After unlock the human names are restored (id ↔ name round-trips).
+        let reopened = reopen(&vault, &[("secret-bank", "a-strong-passphrase")]).unwrap();
+        let ids = reopened.factor_names();
+        assert!(ids.contains(&"secret-bank".to_string()));
+        assert!(ids.contains(&"recovery-stash".to_string()));
+        assert_eq!(reopened.policy_expr(), "secret-bank or recovery-stash");
     }
 }

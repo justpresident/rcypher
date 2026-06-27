@@ -13,13 +13,13 @@ use std::collections::HashSet;
 
 use anyhow::{Result, bail};
 
-use super::tree::{Leaf, PolicyNode};
+use super::tree::PolicyExpr;
 
-/// The character class a factor id is made of: letters, digits, `-` and `_`. The
-/// single source of truth shared by the tokenizer and the factor-id validator, so
+/// The character class a factor name is made of: letters, digits, `-` and `_`. The
+/// single source of truth shared by the tokenizer and the factor-name validator, so
 /// the lexer and the validator can't drift apart.
 #[must_use]
-pub fn is_factor_id_char(c: char) -> bool {
+pub fn is_factor_name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '-' || c == '_'
 }
 
@@ -48,10 +48,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::RParen);
                 chars.next();
             }
-            c if is_factor_id_char(c) => {
+            c if is_factor_name_char(c) => {
                 let mut ident = String::new();
                 while let Some(&c) = chars.peek() {
-                    if is_factor_id_char(c) {
+                    if is_factor_name_char(c) {
                         ident.push(c);
                         chars.next();
                     } else {
@@ -70,9 +70,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
     Ok(tokens)
 }
 
-/// Parses a policy expression into a [`PolicyNode`] (leaves carry the factor name
-/// and an empty share). Use [`validate_factors`] to check the names exist.
-pub fn parse_policy(input: &str) -> Result<PolicyNode> {
+/// Parses a policy expression into a name-keyed [`PolicyExpr`]. Use
+/// [`validate_factors`] to check the names exist, then
+/// [`PolicyExpr::resolve`](super::PolicyExpr::resolve) to bind them to factor ids.
+pub fn parse_policy(input: &str) -> Result<PolicyExpr> {
     let tokens = tokenize(input)?;
     if tokens.is_empty() {
         bail!("empty policy expression");
@@ -85,7 +86,7 @@ pub fn parse_policy(input: &str) -> Result<PolicyNode> {
     Ok(node)
 }
 
-fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<PolicyNode> {
+fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<PolicyExpr> {
     let mut children = vec![parse_and(tokens, pos)?];
     while tokens.get(*pos) == Some(&Token::Or) {
         *pos += 1;
@@ -94,11 +95,11 @@ fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<PolicyNode> {
     Ok(if children.len() == 1 {
         children.swap_remove(0)
     } else {
-        PolicyNode::Or(children)
+        PolicyExpr::Or(children)
     })
 }
 
-fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<PolicyNode> {
+fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<PolicyExpr> {
     let mut children = vec![parse_atom(tokens, pos)?];
     while tokens.get(*pos) == Some(&Token::And) {
         *pos += 1;
@@ -107,18 +108,15 @@ fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<PolicyNode> {
     Ok(if children.len() == 1 {
         children.swap_remove(0)
     } else {
-        PolicyNode::And(children)
+        PolicyExpr::And(children)
     })
 }
 
-fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<PolicyNode> {
+fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<PolicyExpr> {
     match tokens.get(*pos) {
         Some(Token::Factor(name)) => {
             *pos += 1;
-            Ok(PolicyNode::Leaf(Leaf {
-                factor: name.clone(),
-                wrapped_share: Vec::new(),
-            }))
+            Ok(PolicyExpr::Leaf(name.clone()))
         }
         Some(Token::LParen) => {
             *pos += 1;
@@ -134,17 +132,17 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<PolicyNode> {
     }
 }
 
-/// Renders a policy tree to its canonical, re-parseable expression.
+/// Renders a policy expression to its canonical, re-parseable text.
 #[must_use]
-pub fn render_policy(node: &PolicyNode) -> String {
+pub fn render_policy(node: &PolicyExpr) -> String {
     match node {
-        PolicyNode::Leaf(leaf) => leaf.factor.clone(),
-        PolicyNode::And(children) => join(children, " and ", node),
-        PolicyNode::Or(children) => join(children, " or ", node),
+        PolicyExpr::Leaf(name) => name.clone(),
+        PolicyExpr::And(children) => join(children, " and ", node),
+        PolicyExpr::Or(children) => join(children, " or ", node),
     }
 }
 
-fn join(children: &[PolicyNode], sep: &str, parent: &PolicyNode) -> String {
+fn join(children: &[PolicyExpr], sep: &str, parent: &PolicyExpr) -> String {
     children
         .iter()
         .map(|child| {
@@ -154,7 +152,7 @@ fn join(children: &[PolicyNode], sep: &str, parent: &PolicyNode) -> String {
             let s = render_policy(child);
             if matches!(
                 (parent, child),
-                (PolicyNode::And(_), PolicyNode::Or(_)) | (PolicyNode::Or(_), PolicyNode::And(_))
+                (PolicyExpr::And(_), PolicyExpr::Or(_)) | (PolicyExpr::Or(_), PolicyExpr::And(_))
             ) {
                 format!("({s})")
             } else {
@@ -165,12 +163,12 @@ fn join(children: &[PolicyNode], sep: &str, parent: &PolicyNode) -> String {
         .join(sep)
 }
 
-/// Errors if any leaf references a factor name not in `known`.
-pub fn validate_factors(node: &PolicyNode, known: &HashSet<String>) -> Result<()> {
+/// Errors if the expression references a factor name not in `known`.
+pub fn validate_factors(node: &PolicyExpr, known: &HashSet<String>) -> Result<()> {
     let mut unknown: Vec<String> = node
-        .leaves()
-        .filter(|leaf| !known.contains(&leaf.factor))
-        .map(|leaf| leaf.factor.clone())
+        .leaf_names()
+        .filter(|name| !known.contains(*name))
+        .map(ToString::to_string)
         .collect();
     if unknown.is_empty() {
         Ok(())
@@ -188,8 +186,8 @@ pub fn validate_factors(node: &PolicyNode, known: &HashSet<String>) -> Result<()
 mod tests {
     use super::*;
 
-    fn names(node: &PolicyNode) -> HashSet<String> {
-        node.leaves().map(|l| l.factor.clone()).collect()
+    fn names(node: &PolicyExpr) -> HashSet<String> {
+        node.leaf_names().map(ToString::to_string).collect()
     }
 
     #[test]
@@ -203,20 +201,11 @@ mod tests {
         let p = parse_policy("a or b and c").unwrap();
         assert_eq!(
             p,
-            PolicyNode::Or(vec![
-                PolicyNode::Leaf(Leaf {
-                    factor: "a".into(),
-                    wrapped_share: vec![]
-                }),
-                PolicyNode::And(vec![
-                    PolicyNode::Leaf(Leaf {
-                        factor: "b".into(),
-                        wrapped_share: vec![]
-                    }),
-                    PolicyNode::Leaf(Leaf {
-                        factor: "c".into(),
-                        wrapped_share: vec![]
-                    }),
+            PolicyExpr::Or(vec![
+                PolicyExpr::Leaf("a".into()),
+                PolicyExpr::And(vec![
+                    PolicyExpr::Leaf("b".into()),
+                    PolicyExpr::Leaf("c".into())
                 ]),
             ])
         );

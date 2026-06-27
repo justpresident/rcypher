@@ -134,7 +134,7 @@ impl Completer for CypherCompleter {
         // not the whole keyset.
         let (start, cands) = {
             let store = self.store.lock().expect("able to take a lock");
-            let factors = store.factor_ids();
+            let factors = store.factor_names();
             candidates(line, pos, store.data().keys(), &factors)
         };
         let pairs = cands
@@ -163,7 +163,7 @@ mod tests {
     use super::candidates;
 
     /// Candidate strings for `line` with the cursor at its end, against a small
-    /// fixed set of store keys and factor ids.
+    /// fixed set of store keys and factor names.
     fn complete(line: &str) -> Vec<String> {
         let keys = ["alpha".to_string(), "beta".to_string()];
         let factors = ["primary".to_string(), "backup".to_string()];

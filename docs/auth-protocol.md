@@ -103,7 +103,9 @@ PolicyMetadata {
 }
 
 Factor {
-    id                : string            // e.g. "pass1", "fido2-main"
+    id                : bytes             // = wrap(DEK, name): the factor's human
+                                          //   name encrypted under the DEK (raw bytes).
+                                          //   Opaque until unlock; the factor↔leaf link.
     kind              : FactorKind        // derivation parameters (below)
     authkek_under_dek : bytes             // = wrap(DEK, auth-KEK_of_this_factor)
 }
@@ -115,7 +117,7 @@ FactorKind =
 PolicyNode =
     | And  [ PolicyNode, … ]              // satisfied iff all children are
     | Or   [ PolicyNode, … ]              // satisfied iff any child is
-    | Leaf { factor : string,            // which factor unlocks this leaf
+    | Leaf { factor : bytes,             // id of the factor that unlocks this leaf
              wrapped_share : bytes }      // = wrap(auth-KEK_of(factor), this leaf's share)
 ```
 
@@ -133,10 +135,20 @@ across saves; only the payload carries a fresh IV per save (see *Save*).
 **The header is authenticated.** The whole leading `header` (`u16(8) ‖
 bincode(PolicyMetadata)` — the policy tree, factor table, KDF params, and every
 wrapped share) is passed as the payload's **associated data**, so the payload's
-HMAC also covers it. The metadata stays cleartext (so the policy can be displayed
-before unlock), but it cannot be altered, downgraded, or spliced onto a different
-payload without the DEK — which only a party that satisfies the policy can
-recover. This adds no bytes to the file; only the tag's input grows.
+HMAC also covers it. The metadata's *structure* stays cleartext (so the unlock
+flow can walk the policy and try each factor before unlock), but it cannot be
+altered, downgraded, or spliced onto a different payload without the DEK — which
+only a party that satisfies the policy can recover. This adds no bytes to the
+file; only the tag's input grows.
+
+Factor **names**, however, are not cleartext: each `Factor.id` is the name
+encrypted under the DEK (`wrap(DEK, name)`, stored as raw bytes), so the file leaks the policy
+*shape* (AND/OR structure, factor count) and each factor's *kind* and KDF params,
+but not the human labels (`recovery`, `work-bank`, …). The id is minted once at
+enrolment and reused wherever the factor is referenced (`Leaf.factor`); being
+inside the AAD-bound header it cannot be tampered or swapped without the DEK. At
+unlock, once the DEK is reconstructed, each id is decrypted back to its name for
+display and management.
 
 ## The auth-KEK bridge
 
@@ -186,13 +198,15 @@ The root yields `Some(DEK)` exactly when the satisfied leaves satisfy the policy
 
 Each operation below names the corresponding `PolicyVault` method.
 
-### CREATE(id, password) — `create`
+### CREATE(name, password) — `create`
 1. `DEK ← random 64 B`.
-2. `auth-KEK ← Argon2id(password, saltᵢ ← random)`.
-3. Append `Factor{ id, kind = Password{salt, params}, authkek_under_dek = wrap(DEK, auth-KEK) }`.
-4. `policy ← Leaf(id)`; `distribute(DEK, policy)` gives the single leaf `share = DEK`;
+2. `id ← wrap(DEK, name)` — the encrypted name as raw bytes (see *Data structures*).
+3. `auth-KEK ← Argon2id(password, saltᵢ ← random)`.
+4. Append `Factor{ id, kind = Password{salt, params}, authkek_under_dek = wrap(DEK, auth-KEK) }`.
+5. `policy ← Leaf(id)`; `distribute(DEK, policy)` gives the single leaf `share = DEK`;
    set its `wrapped_share = wrap(auth-KEK, DEK)`.
-5. The vault holds the DEK in memory (unlocked).
+6. The vault holds the DEK in memory (unlocked); a factor's `name` is decrypted
+   from its `id` on demand (the DEK is all that's needed), never cached.
 
 ### SAVE — `encrypt_payload` + serialize
 Serialize `header = u16(8) ‖ bincode(metadata)`, then write `header ‖ wrap(DEK,
@@ -214,20 +228,24 @@ from the last management operation and is re-serialized byte-for-byte.
    stale header spliced in, the associated data no longer matches and decryption
    fails here, even though step 4 may have reconstructed a DEK. So a downgraded
    file is rejected, not opened (and therefore never re-saved in its weaker form).
+6. The unlocked vault can now decrypt any `factor.id` with the DEK back to its
+   `name` whenever a human label is needed (listing factors, rendering the policy,
+   resolving a name to manage) — done on demand, not eagerly at unlock.
 
 A wrong password produces a wrong `auth-KEK`, so `unwrap` fails the MAC and the
 leaf is treated as unsatisfied — no oracle distinguishes "wrong password" from
 "absent factor".
 
-### ENROLL password(id, password) — `enroll_password`
+### ENROLL password(name, password) — `enroll_password`
 *Requires: an unlocked DEK and the new password only.*
-1. `auth-KEK_new ← Argon2id(password, salt ← random)`.
+1. `id ← wrap(DEK, name)`; `auth-KEK_new ← Argon2id(password, salt ← random)`.
 2. Append `Factor{ id, kind, authkek_under_dek = wrap(DEK, auth-KEK_new) }`.
 3. The policy is unchanged; call SET_POLICY to start using the new factor.
 
 ### SET_POLICY(expr) — `set_policy`
 *Requires: an unlocked DEK only — no passwords.*
-1. Parse `expr` → tree; validate every referenced factor exists.
+1. Parse `expr` (which references factors by **name**) → tree; validate every
+   referenced name exists, then map each leaf's name to its `id`.
 2. Recover all auth-KEKs: `auth-KEKᵢ ← unwrap(DEK, factor.authkek_under_dekᵢ)`.
 3. `distribute(DEK, new_tree)` → a fresh share per leaf.
 4. For each leaf, `wrapped_share = wrap(auth-KEK_of(leaf.factor), share)`; replace
@@ -236,11 +254,12 @@ leaf is treated as unsatisfied — no oracle distinguishes "wrong password" from
 The DEK is unchanged, so the **payload is not re-encrypted**; only the policy and
 its leaf wraps change.
 
-### REMOVE_FACTOR(id) — `remove_factor`
-Refuses if the current policy still references `id` (change the policy first),
-then drops the factor and its `authkek_under_dek`.
+### REMOVE_FACTOR(name) — `remove_factor`
+Resolves `name` to its `id`; refuses if the current policy still references that
+factor (change the policy first), then drops the factor and its
+`authkek_under_dek`.
 
-### CHANGE_PASSWORD(id, new) — *not yet implemented; supported by design*
+### CHANGE_PASSWORD(name, new) — *not yet implemented; supported by design*
 Derive `auth-KEK_new`; the policy and DEK are unchanged, so the factor's shares
 are unchanged — re-wrap only **that factor's** leaves under `auth-KEK_new` and set
 `authkek_under_dek = wrap(DEK, auth-KEK_new)`. The DEK, the payload, and all other
@@ -299,9 +318,10 @@ Unlock outcomes:
 - **`authkek_under_dek` is safe to store.** Without the DEK it is opaque
   authenticated ciphertext; with the DEK the holder already has full access, and
   it never reveals a password (Argon2id is one-way).
-- **The keyslot header is authenticated and bound to the payload.** The cleartext
-  metadata (policy tree, factor table, KDF params, wrapped shares) is the
-  payload's associated data, so the payload's HMAC covers it. Forging an
+- **The keyslot header is authenticated and bound to the payload.** The keyslot
+  metadata (policy tree, factor table, KDF params, wrapped shares — and the
+  DEK-encrypted factor names) is the payload's associated data, so the payload's
+  HMAC covers it. Forging an
   acceptable modification requires the DEK, and recovering the DEK requires
   satisfying the *original* policy — so an attacker who merely holds or can
   rewrite the file cannot tamper with it. This closes a policy-**downgrade**

@@ -121,11 +121,11 @@ fn reconstruct_at(node: &PolicyNode, provided: &[Option<Share>], idx: &mut usize
 #[cfg(test)]
 mod tests {
     use super::{Share, distribute, reconstruct};
-    use crate::auth::{Leaf, PolicyNode};
+    use crate::auth::{FactorId, Leaf, PolicyNode};
 
     fn leaf(name: &str) -> PolicyNode {
         PolicyNode::Leaf(Leaf {
-            factor: name.into(),
+            factor: FactorId(name.as_bytes().to_vec()),
             wrapped_share: Vec::new(),
         })
     }

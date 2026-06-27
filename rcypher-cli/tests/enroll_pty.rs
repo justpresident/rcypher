@@ -23,9 +23,9 @@ const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
 /// Writes a version-8 single-password store with no entries, with insecure Argon2
 /// params so the binary's `--insecure-password` path unlocks it quickly and a
 /// newly enrolled factor derives fast.
-fn create_store(path: &Path, factor_id: &str, password: &str) {
+fn create_store(path: &Path, factor_name: &str, password: &str) {
     let mut store = UnlockedContainer::create_with_params(
-        factor_id,
+        factor_name,
         password,
         SecretStore::new(),
         &Argon2Params::insecure(),
@@ -69,17 +69,21 @@ fn spawn_session(path: &Path) -> PtySession {
     spawn_command(cmd, Some(30_000)).expect("spawn under PTY")
 }
 
-/// True iff `password` unlocks the store at `path` via the factor named `id` and
-/// the payload then decrypts — exercising the public load/unlock path.
-fn unlocks_with(path: &Path, id: &str, password: &str) -> bool {
+/// True iff `password` unlocks the store at `path` and, after unlock, the factor
+/// named `name` is present — exercising the public load/unlock path. (Factor names
+/// are opaque encrypted ids pre-unlock, so the name is verified after unlocking.)
+fn unlocks_with(path: &Path, name: &str, password: &str) -> bool {
     let data = std::fs::read(path).unwrap();
     let Ok(mut locked) = LockedContainer::from_slice_with_params(&data, &Argon2Params::insecure())
     else {
         return false;
     };
-    matches!(locked.try_password(password), Ok(Some(matched)) if matched == id)
-        && locked.can_unlock()
-        && locked.unlock::<SecretStore>().is_ok()
+    if !matches!(locked.try_password(password), Ok(true)) || !locked.can_unlock() {
+        return false;
+    }
+    locked
+        .unlock::<SecretStore>()
+        .is_ok_and(|store| store.factor_names().contains(&name.to_string()))
 }
 
 #[test]
@@ -302,13 +306,13 @@ fn interactive_unlock_prompts_generically_and_loops() {
     p.send_line("totally-wrong-password").unwrap();
     p.exp_string("did not match any factor").unwrap();
 
-    // Either password works in any order; each unlock is reported, and the AND
-    // policy keeps asking until it is satisfied.
+    // Either password works in any order; a match is reported generically (factor
+    // names are hidden until unlock), and the AND policy keeps asking until satisfied.
     p.send_line(P2_PASSWORD).unwrap();
-    p.exp_string("Factor 'p2' unlocked").unwrap();
+    p.exp_string("Factor unlocked").unwrap();
     p.exp_string("More factors are required").unwrap();
     p.send_line(P1_PASSWORD).unwrap();
-    p.exp_string("Factor 'p1' unlocked").unwrap();
+    p.exp_string("Factor unlocked").unwrap();
 
     // Unlocked: the interactive session is live.
     p.send_line("put k v").unwrap();

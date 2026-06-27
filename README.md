@@ -66,14 +66,15 @@ A new store starts with one password factor named `primary` and the policy
 forgotten primary password doesn't lock you out:
 
 In `auth factor add password NAME`, **`NAME` is a label** (shown by `auth factor
-list`, stored unencrypted) — *not* the password; you are prompted for the
-password separately. rcypher refuses to enrol a factor whose name equals its
-password (or whose password duplicates an existing factor's).
+list` once the store is unlocked — it is **encrypted at rest**) — *not* the
+password; you are prompted for the password separately. rcypher refuses to enrol a
+factor whose name equals its password (or whose password duplicates an existing
+factor's).
 
 ```sh
 cypher > auth factor add password recovery   # 'recovery' is the label; the passphrase is prompted
-Enrolling factor 'recovery'. The name is a public label (shown by 'auth factor
-list', stored unencrypted) — not the password; you'll enter the password next.
+Enrolling factor 'recovery'. The name is a label (shown by 'auth factor list' once
+unlocked; encrypted in the store) — not the password; you'll enter the password next.
 New password for factor 'recovery': ********
 Confirm password: ********
 Factor 'recovery' enrolled. It is not yet used by the policy — run
@@ -123,9 +124,9 @@ name itself, the app name, or something like `abc123` — is refused outright, w
 no override. A long passphrase of a few random words is the easiest way to score
 well.
 
-Because the factor name is stored unencrypted, a password may not be too similar
-to its name: it must be at least twice as long as any prefix it shares with the
-name (so `foobar` / `foobar1` is rejected). This also blocks accidentally typing
+A password may not be too similar to its factor name (a weak, guessable choice):
+it must be at least twice as long as any prefix it shares with the name (so
+`foobar` / `foobar1` is rejected). This also blocks accidentally typing
 a password into the name slot.
 
 ### How it works

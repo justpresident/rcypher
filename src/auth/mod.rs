@@ -18,7 +18,7 @@ mod header;
 mod policy;
 mod vault;
 
-pub use factor::FactorKind;
+pub use factor::{FactorId, FactorKind};
 pub use header::VaultHeader;
 pub use vault::{PolicyVault, UnlockSession, check_factor_password};
 // Exposed crate-internally only for the container's tamper/downgrade tests.

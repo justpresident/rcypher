@@ -46,7 +46,7 @@ minor; features and fixes bump the patch).
   Removed `parse_policy_vault`, `serialize_policy_header`, and `ParsedVault`.
 
 ### Security
-- **The version-8 keyslot header is now authenticated.** The cleartext metadata
+- **The version-8 keyslot header is now authenticated.** The keyslot metadata
   (policy tree, factor table, KDF params, and wrapped shares) is bound to the
   encrypted payload as associated data, so its integrity tag also covers the
   policy. This prevents an attacker who can modify the at-rest file from
@@ -54,10 +54,17 @@ minor; features and fixes bump the patch).
   alone (OR replicates the data key to each branch), which previously unlocked
   with a single factor and silently persisted the weakened policy on the next
   save. The on-disk layout is unchanged.
-- A factor's password may not be too similar to its (cleartext) name — it must be
-  at least twice as long as any shared prefix — preventing a password from being
-  exposed as a label, including the mix-up of typing a password where the factor
-  name belongs.
+- **Factor names are encrypted at rest.** Each factor's id is its human name
+  encrypted under the data key, so a version-8 file no longer leaks the labels
+  (`recovery`, `work-bank`, …) to anyone who can read it; the names are recovered
+  and shown only after the store is unlocked. The policy *shape* (AND/OR structure
+  and factor count) and each factor's *kind* and KDF params remain visible, as the
+  unlock flow needs them. Pre-unlock prompts are generic (no names or policy
+  expression). The on-disk layout is unchanged.
+- A factor's password may not be too similar to its name — it must be at least
+  twice as long as any shared prefix — a weak password close to the factor name is
+  a guessable choice, and this also catches the mix-up of typing a password where
+  the factor name belongs.
 - Transient secret-shares and recovered per-factor auth-keys are now held in
   zeroizing buffers throughout the unlock/secret-sharing path, so no share or
   auth-key lingers in memory un-wiped.
