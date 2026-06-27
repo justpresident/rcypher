@@ -24,10 +24,9 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
-use rcypher::{Argon2Params, Cypher, CypherVersion, DataContainer, EncryptionKey};
 use rcypher::{
-    ContainerCodec, FileContainer, FileContainerFormat, FileContainerV7, FileContainerV8,
-    PolicyVault, Secrets, UnlockSession, VaultHeader,
+    Argon2Params, Cypher, CypherVersion, EncryptionKey, LockedContainer, SecretStore,
+    UnlockedContainer,
 };
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 use std::fs::OpenOptions;
@@ -144,7 +143,6 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
         params.prompt.clone(),
         params.insecure_stdout,
         store,
-        get_argon2_params(params),
         params.filename.clone(),
         clock,
     );
@@ -152,48 +150,47 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
     Ok(())
 }
 
-/// Unlocks a store by collecting factor secrets until its access policy is met.
+/// Collects passwords against a locked store until its policy is satisfied.
 ///
 /// Asks for a password in a loop (not per named factor): each entry is tried
 /// against every still-unsatisfied factor, satisfied factors are reported, and
 /// the loop continues until the policy is satisfied. When `--insecure-password`
 /// is set (testing only), that one password is tried once instead of prompting.
-fn unlock_interactively(header: VaultHeader, params: &CliParams) -> Result<PolicyVault> {
-    let mut session = UnlockSession::new(header);
-    if !session.satisfiable_by_passwords() {
+fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result<()> {
+    if !locked.satisfiable_by_password() {
         bail!("this store's policy requires a YubiKey factor, which is not yet supported");
     }
 
     // Non-interactive testing path: one password, which must satisfy on its own.
     if let Some(pw) = params.insecure_password.as_deref() {
-        session.try_password(pw)?;
-        if !session.is_complete() {
+        locked.try_password(pw)?;
+        if !locked.can_unlock() {
             bail!("the provided password does not satisfy the unlock policy");
         }
-        return session.finish();
+        return Ok(());
     }
 
-    while !session.is_complete() {
+    while !locked.can_unlock() {
         let password = prompt_password("Password (empty to cancel)")?;
         if password.is_empty() {
             bail!("unlock cancelled");
         }
 
         let spinner = Spinner::new("Checking", params.quiet);
-        let matched = session.try_password(&password)?;
+        let matched = locked.try_password(&password)?;
         spinner.finish_and_clear();
 
         match matched {
             None => eprintln!("That password did not match any factor — try again."),
             Some(id) => {
                 eprintln!("Factor '{id}' unlocked.");
-                if !session.is_complete() {
+                if !locked.can_unlock() {
                     eprintln!("More factors are required to satisfy the policy.");
                 }
             }
         }
     }
-    session.finish()
+    Ok(())
 }
 
 /// Returns the store password — the one supplied via `--insecure-password`
@@ -209,15 +206,11 @@ fn obtain_store_password(
     )
 }
 
-/// A store opened into memory: the auth keyslots and access policy (a
-/// [`PolicyVault`]) together with the decrypted key-value data
-/// ([`DataContainer`]) they protect. `from_legacy` is true when this was converted
-/// from a legacy (v7) file and is not yet persisted in the current format.
-struct Store {
-    vault: PolicyVault,
-    data: DataContainer,
-    from_legacy: bool,
-}
+/// The opened, unlocked store.
+///
+/// The decrypted key-value [`SecretStore`] behind the version-agnostic container
+/// facade; a legacy file is transparently upgraded by the facade on unlock.
+pub type Store = rcypher::UnlockedContainer<SecretStore>;
 
 /// Opens an existing store into memory. A current-format (v8) file is unlocked
 /// against its access policy; a legacy (v7) file is decrypted and transparently
@@ -225,67 +218,19 @@ struct Store {
 /// re-encrypted under a fresh key) — the file itself is rewritten in the current
 /// format on the next save.
 fn open_existing_store(params: &CliParams, path: &Path, argon2: &Argon2Params) -> Result<Store> {
-    let bytes = std::fs::read(path)?;
-    let container = FileContainer::parse(&bytes)?;
-    // A file whose format isn't the current default is a legacy store: it still
-    // opens, but is upgraded to the default format on the next save.
-    let outdated = container.format() != FileContainerFormat::default();
-    match container {
-        FileContainer::V8(container) => {
-            eprintln!(
-                "Unlock policy for {}: {}",
-                path.display(),
-                container.describe()
-            );
-            let vault = unlock_interactively(container.header().clone(), params)?;
-            let payload = container.decrypt_payload(&vault)?;
-            let data = DataContainer::safe_deserialize(&payload)?;
-            Ok(Store {
-                vault,
-                data,
-                from_legacy: outdated,
-            })
-        }
-        FileContainer::V7(container) => {
-            let store = open_and_convert_legacy(params, path, &container, argon2)?;
-            eprintln!(
-                "Note: '{}' is a legacy store; it will be upgraded to the current format on the \
-                 next write (the original is backed up to {} first).",
-                path.display(),
-                cli::backup_path(path).display()
-            );
-            Ok(store)
-        }
+    let mut locked = LockedContainer::load_with_params(path, argon2)?;
+    eprintln!("Unlock for {}: {}", path.display(), locked.requirement());
+    collect_passwords(&mut locked, params)?;
+    let store = locked.unlock::<SecretStore>()?;
+    if store.was_upgraded() {
+        eprintln!(
+            "Note: '{}' is a legacy store; it will be upgraded to the current format on the \
+             next write (the original is backed up to {} first).",
+            path.display(),
+            rcypher::backup_path(path).display()
+        );
     }
-}
-
-/// Decrypts a legacy (v7) store and converts it in memory: a fresh random DEK, the
-/// unlock password enrolled as the `primary` factor, and every value re-encrypted
-/// under the new key.
-fn open_and_convert_legacy(
-    params: &CliParams,
-    path: &Path,
-    container: &FileContainerV7,
-    argon2: &Argon2Params,
-) -> Result<Store> {
-    let mut password = obtain_store_password(params, path, false)?;
-    let spinner = Spinner::new("Unlocking store", params.quiet);
-    let result = (|| -> Result<Store> {
-        let key = container.unlock(&Secrets::Password(password.clone()), argon2)?;
-        let payload = container.decrypt_payload(&key)?;
-        let mut data = DataContainer::safe_deserialize(&payload)?;
-        let legacy = Cypher::new(key);
-        let vault = PolicyVault::create(cli::DEFAULT_FACTOR_ID, &password, argon2)?;
-        data.reencrypt(&legacy, &vault.cypher())?;
-        Ok(Store {
-            vault,
-            data,
-            from_legacy: true,
-        })
-    })();
-    spinner.finish_and_clear();
-    password.zeroize();
-    result
+    Ok(store)
 }
 
 /// Creates a new store with a single password factor, persisting it empty so the
@@ -304,19 +249,19 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
     }
 
     let spinner = Spinner::new("Deriving encryption key", params.quiet);
-    let vault = PolicyVault::create(cli::DEFAULT_FACTOR_ID, &password, argon2);
+    let store = UnlockedContainer::create_with_params(
+        cli::DEFAULT_FACTOR_ID,
+        &password,
+        SecretStore::new(),
+        argon2,
+    );
     password.zeroize(); // wipe as soon as the key material is derived
     spinner.finish_and_clear();
-    let vault = vault?;
+    let mut store = store?;
 
     // Persist an empty store so the file exists for later unlocks.
-    let empty = DataContainer::new().safe_serialize()?;
-    FileContainerV8::write(&params.filename, &vault, &empty)?;
-    Ok(Store {
-        vault,
-        data: DataContainer::new(),
-        from_legacy: false,
-    })
+    store.save(&params.filename)?;
+    Ok(store)
 }
 
 /// Acquires the store for the interactive session: opens an existing one, or
@@ -547,28 +492,24 @@ fn main() -> Result<()> {
     } else if let Some(update_file) = &params.update_with {
         // Open both stores (each transparently upgraded if legacy), merge the
         // update file into the main one, and persist the main store.
-        let main = open_existing_store(&params, &params.filename, &argon2_params)?;
+        let mut main = open_existing_store(&params, &params.filename, &argon2_params)?;
         let update = open_existing_store(&params, update_file, &argon2_params)?;
 
-        let main_cypher = main.vault.cypher();
-        let update_cypher = update.vault.cypher();
-        let main_vault = main.vault;
-        let mut main_data = main.data;
-        let path = params.filename.clone();
-        let mut backup_pending = main.from_legacy;
-
-        cli::update::run_update_with(
+        // `cypher()` returns owned cyphers, so the data can be borrowed mutably for
+        // the merge; the merged store is persisted once afterwards.
+        let main_cypher = main.cypher();
+        let update_cypher = update.cypher();
+        let changed = cli::update::run_update_with(
             &main_cypher,
             &update_cypher,
-            &mut main_data,
-            &update.data,
+            main.data_mut(),
+            update.data(),
             params.insecure_stdout,
-            |data| {
-                cli::persist_store(&main_vault, data, &path, backup_pending)?;
-                backup_pending = false;
-                Ok(())
-            },
-        )
+        )?;
+        if changed {
+            main.save(&params.filename)?;
+        }
+        Ok(())
     } else {
         let store = acquire_store(&params, &argon2_params)?;
         run_interactive(&params, store, clock)

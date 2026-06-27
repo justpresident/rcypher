@@ -1,14 +1,11 @@
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
-use crate::cli::persist_store;
 use crate::cli::utils::{
     confirm_if_weak_password, copy_to_clipboard, format_timestamp, prompt_new_password,
     secure_print,
 };
 use anyhow::{Result, anyhow, bail};
-use rcypher::{
-    Argon2Params, EncryptedValue, FactorKind, check_factor_password, is_debugger_attached,
-};
+use rcypher::{EncryptedValue, FactorKind, check_factor_password, is_debugger_attached};
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
@@ -22,13 +19,11 @@ use zeroize::Zeroize;
 pub struct InteractiveCli {
     prompt: String,
     insecure_stdout: bool,
-    /// The opened store — the auth keyslots/policy (`PolicyVault`) plus the
-    /// decrypted key-value data — behind one lock shared with the Tab completer,
-    /// which reads keys and factor names from it live. Its `from_legacy` flag is
-    /// the "backup still owed" bit, cleared once the first save rewrites the file
-    /// in the current format.
+    /// The opened, unlocked store ([`UnlockedContainer`](rcypher::UnlockedContainer))
+    /// behind one lock shared with the Tab completer, which reads keys and factor
+    /// names from it live. Saving and the one-time legacy-upgrade backup are the
+    /// store's own responsibility.
     store: Arc<Mutex<crate::Store>>,
-    argon2_params: Argon2Params,
     filename: PathBuf,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
@@ -39,7 +34,6 @@ impl InteractiveCli {
         prompt: String,
         insecure_stdout: bool,
         store: crate::Store,
-        argon2_params: Argon2Params,
         filename: PathBuf,
         clock: crate::SecurityClock,
     ) -> Self {
@@ -47,20 +41,16 @@ impl InteractiveCli {
             prompt,
             insecure_stdout,
             store: Arc::new(Mutex::new(store)),
-            argon2_params,
             filename,
             last_activity: clock.last_activity,
             last_security_check: clock.last_security_check,
         }
     }
 
-    /// Writes the store, backing up the original legacy file on the first save.
-    /// The store's `from_legacy` flag is the "backup still owed" bit; it is
-    /// cleared once the file has been rewritten in the current format.
+    /// Writes the store in the current format. The facade backs up the original
+    /// file to `<path>.bak` on the first save of a legacy store it upgraded.
     fn save(&self, store: &mut crate::Store) -> Result<()> {
-        persist_store(&store.vault, &store.data, &self.filename, store.from_legacy)?;
-        store.from_legacy = false;
-        Ok(())
+        store.save(&self.filename)
     }
 
     pub fn run(self) -> Result<()> {
@@ -185,8 +175,8 @@ impl InteractiveCli {
     }
 
     fn cmd_put(&self, key: &str, value: &str, store: &mut crate::Store) -> Result<()> {
-        let encrypted_value = EncryptedValue::encrypt(&store.vault.cypher(), value)?;
-        store.data.put(key.to_string(), encrypted_value);
+        let encrypted_value = EncryptedValue::encrypt(&store.cypher(), value)?;
+        store.data_mut().put(key.to_string(), encrypted_value);
 
         secure_print(format!("{key} stored"), self.insecure_stdout)?;
 
@@ -195,8 +185,8 @@ impl InteractiveCli {
     }
 
     fn cmd_get(&self, pattern: &str, store: &crate::Store) -> Result<()> {
-        let cypher = store.vault.cypher();
-        match store.data.get(pattern) {
+        let cypher = store.cypher();
+        match store.data().get(pattern) {
             Ok(results) => {
                 let mut found = false;
                 for (key, val) in results {
@@ -216,7 +206,7 @@ impl InteractiveCli {
     }
 
     fn cmd_copy(&self, key: &str, store: &crate::Store) -> Result<()> {
-        match store.data.get(key) {
+        match store.data().get(key) {
             Ok(mut results) => {
                 let first = results.next();
                 let second = results.next();
@@ -234,7 +224,7 @@ impl InteractiveCli {
                     }
                     (Some((_, val)), None) => {
                         // Exactly one result - copy to clipboard
-                        let mut secret = val.decrypt(&store.vault.cypher())?;
+                        let mut secret = val.decrypt(&store.cypher())?;
                         copy_to_clipboard(
                             secret.as_ref(),
                             std::time::Duration::from_millis(CLIPBOARD_TTL_MS),
@@ -249,8 +239,8 @@ impl InteractiveCli {
     }
 
     fn cmd_history(&self, key: &str, store: &crate::Store) -> Result<()> {
-        let cypher = store.vault.cypher();
-        if let Some(entries) = store.data.history(key) {
+        let cypher = store.cypher();
+        if let Some(entries) = store.data().history(key) {
             for entry in entries {
                 let mut secret = entry.value.decrypt(&cypher)?;
                 let output = format!("[{}]: {}", format_timestamp(entry.timestamp), &*secret);
@@ -264,7 +254,7 @@ impl InteractiveCli {
     }
 
     fn cmd_search(&self, pattern: &str, store: &crate::Store) -> Result<()> {
-        match store.data.search(pattern) {
+        match store.data().search(pattern) {
             Ok(keys) => {
                 for key in keys {
                     secure_print(key.to_string(), self.insecure_stdout)?;
@@ -276,7 +266,7 @@ impl InteractiveCli {
     }
 
     fn cmd_delete(&self, key: &str, store: &mut crate::Store) -> Result<()> {
-        if store.data.delete(key) {
+        if store.data_mut().delete(key) {
             secure_print(format!("{key} deleted"), self.insecure_stdout)?;
             self.save(store)?;
         } else {
@@ -306,7 +296,7 @@ impl InteractiveCli {
         let (verb, rest) = split_first_word(args);
         match verb {
             "" | "show" => {
-                let expr = store.vault.policy_expr();
+                let expr = store.policy_expr();
                 secure_print(expr, self.insecure_stdout)
             }
             "set" => {
@@ -352,12 +342,12 @@ impl InteractiveCli {
 
     /// Lists the enrolled factors and their kinds.
     fn list_factors(&self, store: &crate::Store) -> Result<()> {
-        for factor in store.vault.header().factors {
-            let kind = match factor.kind {
+        for (id, kind) in store.factor_kinds() {
+            let kind = match kind {
                 FactorKind::Password { .. } => "password",
                 FactorKind::Yubikey { .. } => "yubikey",
             };
-            secure_print(format!("{} ({kind})", factor.id), self.insecure_stdout)?;
+            secure_print(format!("{id} ({kind})"), self.insecure_stdout)?;
         }
         Ok(())
     }
@@ -386,8 +376,7 @@ impl InteractiveCli {
             bail!("enrollment cancelled (weak password not confirmed)");
         }
 
-        let params = self.argon2_params;
-        store.vault.enroll_password(id, &password, &params)?;
+        store.enroll_password(id, &password)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
         self.save(store)?;
@@ -402,8 +391,8 @@ impl InteractiveCli {
     }
 
     fn set_policy(&self, expr: &str, store: &mut crate::Store) -> Result<()> {
-        store.vault.set_policy(expr)?;
-        let new_expr = store.vault.policy_expr();
+        store.set_policy(expr)?;
+        let new_expr = store.policy_expr();
         self.save(store)?;
         secure_print(format!("Policy: {new_expr}"), self.insecure_stdout)?;
         Ok(())
@@ -411,7 +400,7 @@ impl InteractiveCli {
 
     /// Drops a factor (must not be referenced by the policy).
     fn remove_factor(&self, id: &str, store: &mut crate::Store) -> Result<()> {
-        store.vault.remove_factor(id)?;
+        store.remove_factor(id)?;
         self.save(store)?;
         secure_print(format!("Factor '{id}' removed"), self.insecure_stdout)
     }

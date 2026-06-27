@@ -11,7 +11,7 @@
 use bincode::{Decode, Encode};
 
 use super::factor::Factor;
-use super::policy::{PolicyNode, render_policy};
+use super::policy::PolicyNode;
 
 /// The vault header stored ahead of the DEK-encrypted payload: the enrolled
 /// factors and the access [`PolicyNode`] (whose leaves carry the wrapped shares).
@@ -19,14 +19,4 @@ use super::policy::{PolicyNode, render_policy};
 pub struct VaultHeader {
     pub factors: Vec<Factor>,
     pub policy: PolicyNode,
-}
-
-impl VaultHeader {
-    /// The access policy as a canonical, human-readable expression — e.g.
-    /// `pass1 or (pass2 and yk)`. Lets a reader display the policy before unlock,
-    /// without recovering the DEK.
-    #[must_use]
-    pub fn policy_expr(&self) -> String {
-        render_policy(&self.policy)
-    }
 }

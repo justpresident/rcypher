@@ -7,26 +7,36 @@ use serde::{Deserialize, Serialize};
 
 use crate::constants::{BLOCK_SIZE, BlockBytes, SaltBytes};
 
-/// Version tag for the serialized [`DataContainer`](crate::DataContainer) payload
+/// Reads a two-byte big-endian tag from the front of `data` and converts it to the
+/// enum `T`. The single probe implementation shared by every leading-`u16`-tag
+/// version/format enum, so the "read two bytes, map to a variant" logic lives in
+/// one place.
+pub fn probe_u16_tag<T>(data: &[u8]) -> Result<T>
+where
+    T: TryFrom<u16>,
+    <T as TryFrom<u16>>::Error: std::error::Error + Send + Sync + 'static,
+{
+    let [hi, lo, ..] = data else {
+        bail!("data too short to determine version");
+    };
+    Ok(T::try_from(u16::from_be_bytes([*hi, *lo]))?)
+}
+
+/// Version tag for the serialized [`SecretStore`](crate::SecretStore) payload
 /// (the `storage` feature) — the leading two bytes of the decrypted bytes.
 /// Distinct from [`CypherVersion`], which versions the encryption envelope.
 #[cfg(feature = "storage")]
 #[derive(Clone, Copy, Debug, TryFromPrimitive)]
 #[repr(u16)]
-pub enum DataContainerVersion {
+pub enum SecretStoreVersion {
     Version4 = 4u16,
 }
 
 #[cfg(feature = "storage")]
-impl DataContainerVersion {
-    /// Probes the leading two bytes to determine the data-container version.
+impl SecretStoreVersion {
+    /// Probes the leading two bytes to determine the secret-store version.
     pub fn probe_data(data: &[u8]) -> Result<Self> {
-        if data.len() < 2 {
-            bail!("data too short to determine version");
-        }
-
-        let version = u16::from_be_bytes([data[0], data[1]]);
-        Ok(Self::try_from(version)?)
+        probe_u16_tag(data)
     }
 
     /// The version's two-byte on-disk tag (the leading bytes of the payload).
@@ -38,8 +48,8 @@ impl DataContainerVersion {
 
 /// The AEAD envelope version used *inside* a container.
 ///
-/// The on-disk store-file format (the leading two bytes) lives separately in
-/// [`FileContainerFormat`](crate::container::FileContainerFormat).
+/// The on-disk store-file format (the leading two bytes) is tracked separately by
+/// the container layer's internal `FileContainerFormat`.
 #[derive(Clone, Copy, Debug, TryFromPrimitive, Default, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(u16)]
 pub enum CypherVersion {
@@ -63,12 +73,7 @@ impl CypherVersion {
 
     /// Probes data to determine its encryption version
     pub fn probe_data(data: &[u8]) -> Result<Self> {
-        if data.len() < 2 {
-            bail!("data too short to determine version");
-        }
-
-        let version = u16::from_be_bytes([data[0], data[1]]);
-        Ok(Self::try_from(version)?)
+        probe_u16_tag(data)
     }
 
     /// The version's two-byte on-disk tag (written into the envelope header).

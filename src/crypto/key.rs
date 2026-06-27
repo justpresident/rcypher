@@ -59,16 +59,22 @@ pub struct Argon2Params {
     pub parallelism: u32,
 }
 
+impl Argon2Params {
+    /// Memory cost of the secure default: 64 MiB.
+    const DEFAULT_MEMORY_KIB: u32 = 64 * 1024;
+    /// Time cost (iterations) of the secure default.
+    const DEFAULT_TIME_COST: u32 = 3;
+    /// Parallelism of the secure default.
+    const DEFAULT_PARALLELISM: u32 = 1;
+}
+
 impl Default for Argon2Params {
-    /// Secure default parameters for production use
-    /// - Memory: 64 MB
-    /// - Iterations: 3
-    /// - Parallelism: 1
+    /// Secure default parameters for production use: 64 MiB, 3 iterations, 1 lane.
     fn default() -> Self {
         Self {
-            memory_cost: 65536,
-            time_cost: 3,
-            parallelism: 1,
+            memory_cost: Self::DEFAULT_MEMORY_KIB,
+            time_cost: Self::DEFAULT_TIME_COST,
+            parallelism: Self::DEFAULT_PARALLELISM,
         }
     }
 }

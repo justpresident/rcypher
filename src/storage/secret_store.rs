@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 use super::value::{EncryptedValue, ValueEntry};
 use crate::crypto::Cypher;
 use crate::file_io::{load_encrypted, save_encrypted};
-use crate::version::DataContainerVersion;
+use crate::version::SecretStoreVersion;
 
 /// The decrypted key-value data of a store: each key maps to its full,
 /// timestamp-ordered history of encrypted values.
@@ -19,11 +19,11 @@ use crate::version::DataContainerVersion;
 /// [`safe_deserialize`](Self::safe_deserialize); read or write an encrypted file
 /// with [`load`](Self::load) / [`save`](Self::save).
 #[derive(Debug)]
-pub struct DataContainer {
+pub struct SecretStore {
     data: BTreeMap<String, Vec<ValueEntry>>,
 }
 
-impl DataContainer {
+impl SecretStore {
     pub const fn new() -> Self {
         Self {
             data: BTreeMap::new(),
@@ -136,7 +136,7 @@ impl DataContainer {
             .map(String::as_str))
     }
 
-    /// Loads and decrypts a data container from `path`, or an empty one if the
+    /// Loads and decrypts a secret store from `path`, or an empty one if the
     /// file does not exist.
     pub fn load(cypher: &Cypher, path: &Path) -> Result<Self> {
         if !path.exists() {
@@ -146,13 +146,13 @@ impl DataContainer {
         Self::safe_deserialize(&decrypted)
     }
 
-    /// Serializes, encrypts, and writes this data container to `path`.
+    /// Serializes, encrypts, and writes this secret store to `path`.
     pub fn save(&self, cypher: &Cypher, path: &Path) -> Result<()> {
         let serialized = self.safe_serialize()?;
         save_encrypted(cypher, &serialized, path)
     }
 
-    /// Serializes this data container to the cleartext bytes later encrypted as
+    /// Serializes this secret store to the cleartext bytes later encrypted as
     /// the payload.
     ///
     /// The bytes carry the (cleartext) entry keys, so they are returned in a
@@ -162,7 +162,7 @@ impl DataContainer {
         let mut result = Zeroizing::new(Vec::new());
 
         // Version
-        result.extend_from_slice(&DataContainerVersion::Version4.tag());
+        result.extend_from_slice(&SecretStoreVersion::Version4.tag());
 
         // Count elements
         let count: u32 = u32::try_from(self.data.values().map(Vec::len).sum::<usize>())
@@ -196,8 +196,8 @@ impl DataContainer {
 
     /// Parses the on-disk payload, dispatching on its leading version tag.
     pub fn safe_deserialize(data: &[u8]) -> Result<Self> {
-        match DataContainerVersion::probe_data(data)? {
-            DataContainerVersion::Version4 => Self::from_v4_bytes(data),
+        match SecretStoreVersion::probe_data(data)? {
+            SecretStoreVersion::Version4 => Self::from_v4_bytes(data),
         }
     }
 
@@ -267,8 +267,35 @@ impl DataContainer {
     }
 }
 
-impl Default for DataContainer {
+impl Default for SecretStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl crate::DataContainer for SecretStore {
+    fn encode(&self) -> Result<Zeroizing<Vec<u8>>> {
+        self.safe_serialize()
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self> {
+        Self::safe_deserialize(bytes)
+    }
+
+    /// Each stored value is encrypted under the container's data key, so a key
+    /// change re-encrypts every value across all keys and history.
+    fn rekey(&mut self, from: &Cypher, to: &Cypher) -> Result<()> {
+        self.reencrypt(from, to)
+    }
+
+    /// Decrypts *every* stored value to confirm the data key matches the inner
+    /// encryption — so a partial or wrong re-key surfaces here at unlock rather than
+    /// leaving some values silently undecryptable. Runs once per unlock; an empty
+    /// store has nothing to check.
+    fn verify(&self, cypher: &Cypher) -> Result<()> {
+        for entry in self.data.values().flatten() {
+            entry.value.decrypt(cypher)?;
+        }
+        Ok(())
     }
 }

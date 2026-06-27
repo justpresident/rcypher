@@ -134,8 +134,8 @@ impl Completer for CypherCompleter {
         // not the whole keyset.
         let (start, cands) = {
             let store = self.store.lock().expect("able to take a lock");
-            let factors = store.vault.factor_ids();
-            candidates(line, pos, store.data.keys(), &factors)
+            let factors = store.factor_ids();
+            candidates(line, pos, store.data().keys(), &factors)
         };
         let pairs = cands
             .into_iter()

@@ -39,13 +39,13 @@ fn temp_test_file() -> (TempDir, PathBuf) {
 
 #[test]
 fn test_storage_new() {
-    let storage = DataContainer::new();
+    let storage = SecretStore::new();
     assert_eq!(storage.len(), 0);
 }
 
 #[test]
 fn test_storage_put_get() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
 
@@ -57,7 +57,7 @@ fn test_storage_put_get() {
 
 #[test]
 fn test_storage_put_multiple_values() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key1".to_string(), enc("value2"));
     storage.put("key1".to_string(), enc("value3"));
@@ -77,7 +77,7 @@ fn test_storage_put_multiple_values() {
 
 #[test]
 fn test_storage_get_with_regex() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("test1".to_string(), enc("value1"));
     storage.put("test2".to_string(), enc("value2"));
     storage.put("prod1".to_string(), enc("value3"));
@@ -94,7 +94,7 @@ fn test_storage_get_with_regex() {
 
 #[test]
 fn test_storage_get_no_match() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
 
     let results: Vec<_> = storage.get("nonexistent").unwrap().collect();
@@ -103,7 +103,7 @@ fn test_storage_get_no_match() {
 
 #[test]
 fn test_storage_search() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("user_alice".to_string(), enc("value1"));
     storage.put("user_bob".to_string(), enc("value2"));
     storage.put("admin_charlie".to_string(), enc("value3"));
@@ -119,7 +119,7 @@ fn test_storage_search() {
 
 #[test]
 fn test_storage_delete() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
 
@@ -133,7 +133,7 @@ fn test_storage_delete() {
 #[test]
 fn test_storage_history() {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("v1"));
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -157,20 +157,20 @@ fn test_storage_history() {
 
 #[test]
 fn test_serialize_deserialize_empty() {
-    let storage = DataContainer::new();
+    let storage = SecretStore::new();
     let serialized = storage.safe_serialize().unwrap();
-    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
+    let deserialized = SecretStore::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(deserialized.len(), 0);
 }
 
 #[test]
 fn test_serialize_deserialize_single_entry() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
 
     let serialized = storage.safe_serialize().unwrap();
-    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
+    let deserialized = SecretStore::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(deserialized.len(), 1);
     let entry = &deserialized.history("key1").unwrap()[0];
@@ -179,13 +179,13 @@ fn test_serialize_deserialize_single_entry() {
 
 #[test]
 fn test_serialize_deserialize_multiple_entries() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
     storage.put("key1".to_string(), enc("value1_updated"));
 
     let serialized = storage.safe_serialize().unwrap();
-    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
+    let deserialized = SecretStore::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(deserialized.len(), 2);
     assert_eq!(deserialized.history("key1").unwrap().len(), 2);
@@ -194,12 +194,12 @@ fn test_serialize_deserialize_multiple_entries() {
 
 #[test]
 fn test_serialize_deserialize_unicode() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("ключ".to_string(), enc("значение"));
     storage.put("🔑".to_string(), enc("🎁"));
 
     let serialized = storage.safe_serialize().unwrap();
-    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
+    let deserialized = SecretStore::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(deserialized.len(), 2);
     assert_eq!(
@@ -215,13 +215,13 @@ fn test_serialize_deserialize_unicode() {
 #[test]
 fn test_deserialize_corrupted_data() {
     // Too short
-    let result = DataContainer::safe_deserialize(&[0, 1, 2]);
+    let result = SecretStore::safe_deserialize(&[0, 1, 2]);
     assert!(result.is_err());
 
     // Invalid version
     let mut data = vec![0, 99]; // version 99
     data.extend_from_slice(&[0, 0, 0, 1]); // count = 1
-    let result = DataContainer::safe_deserialize(&data);
+    let result = SecretStore::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -234,14 +234,14 @@ fn test_save_load_roundtrip() {
             .unwrap(),
     );
 
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
     storage.put("key2".to_string(), enc("value2"));
 
     storage.save(&cypher, &path).unwrap();
     assert!(path.exists());
 
-    let loaded = DataContainer::load(&cypher, &path).unwrap();
+    let loaded = SecretStore::load(&cypher, &path).unwrap();
     assert_eq!(loaded.len(), 2);
     assert_eq!(
         loaded.history("key1").unwrap()[0].value.as_bytes(),
@@ -262,7 +262,7 @@ fn test_load_nonexistent_file() {
             .unwrap(),
     );
 
-    let storage = DataContainer::load(&cypher, &path).unwrap();
+    let storage = SecretStore::load(&cypher, &path).unwrap();
     assert_eq!(storage.len(), 0);
 }
 
@@ -278,13 +278,13 @@ fn test_load_with_wrong_password() {
             .unwrap(),
     );
 
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key1".to_string(), enc("value1"));
 
     storage.save(&cypher1, &path).unwrap();
 
     // Should fail or return garbage
-    let result = DataContainer::load(&cypher2, &path);
+    let result = SecretStore::load(&cypher2, &path);
     assert!(result.is_err() || result.unwrap().is_empty());
 }
 
@@ -303,7 +303,7 @@ fn test_reencrypt_rekeys_all_values_and_history() {
     let old = make("old_password");
     let new = make("new_password");
 
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     // A key with two historical versions, plus a second key.
     storage.put_ts(
         "k".to_string(),
@@ -341,7 +341,7 @@ fn test_reencrypt_rekeys_all_values_and_history() {
 
 #[test]
 fn test_storage_ordering() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
 
     // Add keys in random order
     storage.put("zebra".to_string(), enc("z"));
@@ -357,7 +357,7 @@ fn test_storage_ordering() {
 
 #[test]
 fn test_special_characters_in_keys() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("key-with-dash".to_string(), enc("value1"));
     storage.put("key_with_underscore".to_string(), enc("value2"));
     storage.put("key.with.dots".to_string(), enc("value3"));
@@ -384,7 +384,7 @@ fn test_concurrent_operations() {
     use std::sync::{Arc, Mutex};
     use std::thread;
 
-    let storage = Arc::new(Mutex::new(DataContainer::new()));
+    let storage = Arc::new(Mutex::new(SecretStore::new()));
     let mut handles = vec![];
 
     for i in 0..10 {
@@ -414,14 +414,14 @@ fn test_storage_persistence_across_sessions() {
 
     // Session 1: Create and save
     {
-        let mut storage = DataContainer::new();
+        let mut storage = SecretStore::new();
         storage.put("session1_key".to_string(), enc("session1_value"));
         storage.save(&cypher, &path).unwrap();
     }
 
     // Session 2: Load and add
     {
-        let mut storage = DataContainer::load(&cypher, &path).unwrap();
+        let mut storage = SecretStore::load(&cypher, &path).unwrap();
         assert_eq!(storage.len(), 1);
         storage.put("session2_key".to_string(), enc("session2_value"));
         storage.save(&cypher, &path).unwrap();
@@ -429,7 +429,7 @@ fn test_storage_persistence_across_sessions() {
 
     // Session 3: Verify both keys exist
     {
-        let storage = DataContainer::load(&cypher, &path).unwrap();
+        let storage = SecretStore::load(&cypher, &path).unwrap();
         assert_eq!(storage.len(), 2);
         assert!(storage.contains_key("session1_key"));
         assert!(storage.contains_key("session2_key"));
@@ -438,14 +438,14 @@ fn test_storage_persistence_across_sessions() {
 
 #[test]
 fn test_empty_key_value() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put("".to_string(), enc("value"));
     storage.put("key".to_string(), enc(""));
 
     assert_eq!(storage.len(), 2);
 
     let serialized = storage.safe_serialize().unwrap();
-    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
+    let deserialized = SecretStore::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(deserialized.len(), 2);
     assert_eq!(
@@ -460,14 +460,14 @@ fn test_empty_key_value() {
 
 #[test]
 fn test_very_long_key_value() {
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     let long_key = "k".repeat(10000);
     let long_value = "v".repeat(50000);
 
     storage.put(long_key.clone(), enc(long_value.clone()));
 
     let serialized = storage.safe_serialize().unwrap();
-    let deserialized = DataContainer::safe_deserialize(&serialized).unwrap();
+    let deserialized = SecretStore::safe_deserialize(&serialized).unwrap();
 
     assert_eq!(
         deserialized.history(&long_key).unwrap()[0].value.as_bytes(),
@@ -479,8 +479,8 @@ fn test_very_long_key_value() {
 
 #[test]
 fn test_deserialize_too_short_for_version() {
-    // Fewer than 2 bytes — DataContainerVersion::probe_data fails
-    let result = DataContainer::safe_deserialize(&[0x00]);
+    // Fewer than 2 bytes — SecretStoreVersion::probe_data fails
+    let result = SecretStore::safe_deserialize(&[0x00]);
     assert!(result.is_err());
 }
 
@@ -490,7 +490,7 @@ fn test_deserialize_truncated_no_key_len() {
     let mut data = vec![0x00u8, 0x04]; // version 4
     data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
     // no key_len bytes follow
-    let result = DataContainer::safe_deserialize(&data);
+    let result = SecretStore::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -501,7 +501,7 @@ fn test_deserialize_truncated_key_overflow() {
     data.extend_from_slice(&1u32.to_be_bytes()); // count = 1
     data.extend_from_slice(&50u16.to_be_bytes()); // key_len = 50
     data.extend_from_slice(b"abc"); // only 3 bytes of key
-    let result = DataContainer::safe_deserialize(&data);
+    let result = SecretStore::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -513,7 +513,7 @@ fn test_deserialize_truncated_value_len_missing() {
     data.extend_from_slice(&3u16.to_be_bytes()); // key_len = 3
     data.extend_from_slice(b"key"); // key
     data.extend_from_slice(&[0x00, 0x00]); // only 2 of 4 val_len bytes
-    let result = DataContainer::safe_deserialize(&data);
+    let result = SecretStore::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -526,7 +526,7 @@ fn test_deserialize_truncated_value_overflow() {
     data.push(b'k'); // key
     data.extend_from_slice(&100u32.to_be_bytes()); // val_len = 100
     // no value bytes
-    let result = DataContainer::safe_deserialize(&data);
+    let result = SecretStore::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -540,7 +540,7 @@ fn test_deserialize_truncated_timestamp_missing() {
     data.extend_from_slice(&1u32.to_be_bytes()); // val_len = 1
     data.push(b'v'); // value
     data.extend_from_slice(&[0x00, 0x00]); // only 2 of 4 timestamp bytes
-    let result = DataContainer::safe_deserialize(&data);
+    let result = SecretStore::safe_deserialize(&data);
     assert!(result.is_err());
 }
 
@@ -548,7 +548,7 @@ fn test_deserialize_truncated_timestamp_missing() {
 fn test_deserialize_round_trip_via_builder() {
     // Verify the build_v4_entry helper produces parseable data
     let data = build_v4_entry(b"hello", b"world");
-    let storage = DataContainer::safe_deserialize(&data).unwrap();
+    let storage = SecretStore::safe_deserialize(&data).unwrap();
     assert_eq!(storage.len(), 1);
     assert_eq!(
         storage.history("hello").unwrap()[0].value.as_bytes(),
@@ -567,6 +567,6 @@ fn test_encrypted_value_display() {
 
 #[test]
 fn test_storage_history_nonexistent() {
-    let storage = DataContainer::new();
+    let storage = SecretStore::new();
     assert!(storage.history("does_not_exist").is_none());
 }

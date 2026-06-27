@@ -16,20 +16,23 @@ use crate::crypto::Cypher;
 /// never observes a partially written file. This is format-agnostic: bring your
 /// own serialization and store any bytes you like.
 pub fn save_encrypted(cypher: &Cypher, bytes: &[u8], path: &Path) -> Result<()> {
-    // `parent()` is `Some("")` for a bare filename and `None` only for the
-    // filesystem root; in both cases the temp file should land in the current
-    // directory (alongside the destination), so fall back to ".".
+    write_atomic(path, &cypher.encrypt(bytes)?)
+}
+
+/// Atomically writes `bytes` to `path`: a temp file in the same directory, then a
+/// rename, so a crash or concurrent reader never observes a partial file.
+///
+/// `parent()` is `Some("")` for a bare filename and `None` only for the filesystem
+/// root; in both cases the temp file should land in the current directory
+/// (alongside the destination), so fall back to ".".
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     let dir = match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,
         _ => Path::new("."),
     };
     let mut temp = NamedTempFile::new_in(dir)?;
-
-    let encrypted = cypher.encrypt(bytes)?;
-
-    temp.write_all(&encrypted)?;
+    temp.write_all(bytes)?;
     temp.persist(path)?;
-
     Ok(())
 }
 

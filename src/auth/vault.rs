@@ -9,27 +9,20 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, anyhow, bail};
+use subtle::ConstantTimeEq;
 use zeroize::Zeroizing;
 
 use super::factor::{Factor, FactorKind, new_password_kind, password_kek};
 use super::header::VaultHeader;
 use super::policy::{
-    Leaf, PolicyNode, Share, distribute, parse_policy, reconstruct, render_policy, validate_factors,
+    Leaf, PolicyNode, Share, distribute, is_factor_id_char, parse_policy, reconstruct,
+    render_policy, validate_factors,
 };
 use crate::constants::{KEY_MATERIAL_LEN, KeyMaterialBytes};
 use crate::crypto::{
     Argon2Params, Cypher, EncryptionKey, KeyMaterial, cypher_from_material, generate_key_material,
 };
 use crate::version::CypherVersion;
-
-/// A user-supplied secret for one factor, presented at unlock or enroll time.
-/// The password is held in a zeroizing buffer so it is wiped when the secret is
-/// dropped.
-pub enum FactorSecret {
-    Password(Zeroizing<String>),
-    // A YubiKey secret is obtained by interacting with the device (not yet
-    // implemented).
-}
 
 /// An unlocked policy vault: the enrolled factors, the access policy (leaves
 /// carrying wrapped shares), and the recovered data-encryption key.
@@ -70,30 +63,6 @@ impl PolicyVault {
         })
     }
 
-    /// Opens a vault by satisfying its policy with the provided factor secrets.
-    /// Returns an error if the provided factors do not satisfy the unlock policy.
-    pub fn unlock(header: VaultHeader, secrets: &HashMap<String, FactorSecret>) -> Result<Self> {
-        let mut authkeks = HashMap::new();
-        for factor in &header.factors {
-            if let Some(secret) = secrets.get(&factor.id) {
-                authkeks.insert(factor.id.clone(), derive_authkek(&factor.kind, secret)?);
-            }
-        }
-
-        let mut provided = Vec::new();
-        unwrap_leaves(&header.policy, &authkeks, &mut provided);
-
-        let dek_bytes = reconstruct(&header.policy, &provided)
-            .ok_or_else(|| anyhow!("the provided factors do not satisfy the unlock policy"))?;
-        let dek = to_key_material(&dek_bytes)?;
-
-        Ok(Self {
-            factors: header.factors,
-            policy: header.policy,
-            dek,
-        })
-    }
-
     /// Enrolls an additional password factor. The policy is unchanged — call
     /// [`PolicyVault::set_policy`] to start requiring or accepting the new factor.
     pub fn enroll_password(
@@ -117,7 +86,8 @@ impl PolicyVault {
         self.factors.push(Factor {
             id: id.to_string(),
             kind,
-            authkek_under_dek: cypher_from_material(&self.dek, CypherVersion::default())
+            authkek_under_dek: self
+                .dek_cypher()
                 .encrypt_with_aad(authkek.as_slice(), &[])?,
         });
         Ok(())
@@ -133,12 +103,14 @@ impl PolicyVault {
                 continue;
             }
             let candidate = password_kek(password, &factor.kind)?;
-            let Ok(actual) = cypher_from_material(&self.dek, CypherVersion::default())
+            let Ok(actual) = self
+                .dek_cypher()
                 .decrypt_with_aad(&factor.authkek_under_dek, &[])
             else {
                 continue;
             };
-            if candidate.as_slice() == actual.as_slice() {
+            // Both sides are secret 64-byte auth-KEKs; compare in constant time.
+            if bool::from(candidate.as_slice().ct_eq(actual.as_slice())) {
                 return Ok(Some(factor.id.clone()));
             }
         }
@@ -185,6 +157,15 @@ impl PolicyVault {
     #[must_use]
     pub fn factor_ids(&self) -> Vec<String> {
         self.factors.iter().map(|f| f.id.clone()).collect()
+    }
+
+    /// Each enrolled factor's id paired with its kind (for display).
+    #[must_use]
+    pub fn factor_kinds(&self) -> Vec<(String, FactorKind)> {
+        self.factors
+            .iter()
+            .map(|f| (f.id.clone(), f.kind.clone()))
+            .collect()
     }
 
     /// The vault header (factors + policy) — the locked, serializable projection
@@ -238,12 +219,21 @@ impl PolicyVault {
     fn recover_all_authkeks(&self) -> Result<HashMap<String, KeyMaterial>> {
         let mut authkeks = HashMap::new();
         for factor in &self.factors {
-            let bytes = cypher_from_material(&self.dek, CypherVersion::default())
+            let bytes = self
+                .dek_cypher()
                 .decrypt_with_aad(&factor.authkek_under_dek, &[])
                 .map_err(|_| anyhow!("corrupt keyslot for factor '{}'", factor.id))?;
             authkeks.insert(factor.id.clone(), to_key_material(&bytes)?);
         }
         Ok(authkeks)
+    }
+
+    /// A `Cypher` keyed by the DEK for the vault's *internal* key-wrapping — auth-KEKs
+    /// stored under the DEK. Trace detection is deliberately off here (it is enforced
+    /// once at the unlock entry point, not on every internal wrap), which is why this
+    /// differs from [`cypher`](Self::cypher), the trace-checked key for stored data.
+    fn dek_cypher(&self) -> Cypher {
+        cypher_from_material(&self.dek, CypherVersion::default())
     }
 }
 
@@ -307,11 +297,15 @@ impl UnlockSession {
 
         for (id, kind) in candidates {
             let authkek = password_kek(password, &kind)?;
-            let verified = leaf_wrapped_share(&self.policy, &id).is_some_and(|wrapped| {
-                cypher_from_material(&authkek, CypherVersion::default())
-                    .decrypt_with_aad(wrapped, &[])
-                    .is_ok()
-            });
+            let verified = self
+                .policy
+                .leaves()
+                .find(|leaf| leaf.factor == id)
+                .is_some_and(|leaf| {
+                    cypher_from_material(&authkek, CypherVersion::default())
+                        .decrypt_with_aad(&leaf.wrapped_share, &[])
+                        .is_ok()
+                });
             if verified {
                 self.authkeks.insert(id.clone(), authkek);
                 return Ok(Some(id));
@@ -320,11 +314,30 @@ impl UnlockSession {
         Ok(None)
     }
 
+    /// The unlock policy as a canonical expression (a prompt hint shown before any
+    /// factor is supplied).
+    #[must_use]
+    pub fn policy_expr(&self) -> String {
+        render_policy(&self.policy)
+    }
+
     /// Reconstructs the data-encryption key from the gathered factors and returns
     /// the unlocked vault. Errors if the policy is not yet satisfied.
     pub fn finish(self) -> Result<PolicyVault> {
-        let mut provided = Vec::new();
-        unwrap_leaves(&self.policy, &self.authkeks, &mut provided);
+        // For each leaf in canonical order, unwrap its share if we hold the factor's
+        // auth-KEK (and it authenticates), else `None` — exactly what `reconstruct`
+        // consumes.
+        let provided: Vec<Option<Share>> = self
+            .policy
+            .leaves()
+            .map(|leaf| {
+                self.authkeks.get(&leaf.factor).and_then(|kek| {
+                    cypher_from_material(kek, CypherVersion::default())
+                        .decrypt_with_aad(&leaf.wrapped_share, &[])
+                        .ok()
+                })
+            })
+            .collect();
         let dek_bytes = reconstruct(&self.policy, &provided)
             .ok_or_else(|| anyhow!("the provided factors do not satisfy the unlock policy"))?;
         let dek = to_key_material(&dek_bytes)?;
@@ -336,102 +349,29 @@ impl UnlockSession {
     }
 }
 
-/// The first wrapped share in `node` belonging to factor `id`, if any.
-fn leaf_wrapped_share<'a>(node: &'a PolicyNode, id: &str) -> Option<&'a [u8]> {
-    match node {
-        PolicyNode::Leaf(leaf) if leaf.factor == id => Some(leaf.wrapped_share.as_slice()),
-        PolicyNode::Leaf(_) => None,
-        PolicyNode::And(children) | PolicyNode::Or(children) => children
-            .iter()
-            .find_map(|child| leaf_wrapped_share(child, id)),
-    }
-}
-
-fn derive_authkek(kind: &FactorKind, secret: &FactorSecret) -> Result<KeyMaterial> {
-    match (kind, secret) {
-        (FactorKind::Password { .. }, FactorSecret::Password(pw)) => password_kek(pw, kind),
-        (FactorKind::Yubikey { .. }, FactorSecret::Password(_)) => {
-            bail!("YubiKey factors are not yet supported")
-        }
-    }
-}
-
 /// Distributes `dek` across `template` and wraps each leaf's share under its
-/// factor's auth-KEK, returning the policy tree with shares filled in.
+/// factor's auth-KEK, returning the policy tree with shares filled in. Leaves are
+/// visited in [`PolicyNode::leaves`] order, the same order `distribute` produced
+/// the shares in.
 fn distribute_and_wrap(
     template: &PolicyNode,
     dek: &KeyMaterialBytes,
     authkeks: &HashMap<String, KeyMaterial>,
 ) -> Result<PolicyNode> {
     let shares = distribute(dek, template)?;
-    let mut idx = 0;
-    wrap_leaves(template, &shares, &mut idx, authkeks)
-}
-
-fn wrap_leaves(
-    node: &PolicyNode,
-    shares: &[Share],
-    idx: &mut usize,
-    authkeks: &HashMap<String, KeyMaterial>,
-) -> Result<PolicyNode> {
-    match node {
-        PolicyNode::Leaf(leaf) => {
-            let share = shares
-                .get(*idx)
-                .ok_or_else(|| anyhow!("internal error: share/leaf count mismatch"))?;
-            *idx += 1;
-            let kek = authkeks
-                .get(&leaf.factor)
-                .ok_or_else(|| anyhow!("no key material for factor '{}'", leaf.factor))?;
-            Ok(PolicyNode::Leaf(Leaf {
-                factor: leaf.factor.clone(),
-                wrapped_share: cypher_from_material(kek, CypherVersion::default())
-                    .encrypt_with_aad(share, &[])?,
-            }))
-        }
-        PolicyNode::And(children) => Ok(PolicyNode::And(wrap_children(
-            children, shares, idx, authkeks,
-        )?)),
-        PolicyNode::Or(children) => Ok(PolicyNode::Or(wrap_children(
-            children, shares, idx, authkeks,
-        )?)),
+    let mut policy = template.clone();
+    let mut shares = shares.iter();
+    for leaf in policy.leaves_mut() {
+        let share = shares
+            .next()
+            .ok_or_else(|| anyhow!("internal error: share/leaf count mismatch"))?;
+        let kek = authkeks
+            .get(&leaf.factor)
+            .ok_or_else(|| anyhow!("no key material for factor '{}'", leaf.factor))?;
+        leaf.wrapped_share =
+            cypher_from_material(kek, CypherVersion::default()).encrypt_with_aad(share, &[])?;
     }
-}
-
-fn wrap_children(
-    children: &[PolicyNode],
-    shares: &[Share],
-    idx: &mut usize,
-    authkeks: &HashMap<String, KeyMaterial>,
-) -> Result<Vec<PolicyNode>> {
-    children
-        .iter()
-        .map(|child| wrap_leaves(child, shares, idx, authkeks))
-        .collect()
-}
-
-/// Builds the per-leaf `provided` shares: for each leaf in DFS order, unwrap its
-/// share if we hold its factor's auth-KEK (and it authenticates), else `None`.
-fn unwrap_leaves(
-    node: &PolicyNode,
-    authkeks: &HashMap<String, KeyMaterial>,
-    out: &mut Vec<Option<Share>>,
-) {
-    match node {
-        PolicyNode::Leaf(leaf) => {
-            let share = authkeks.get(&leaf.factor).and_then(|kek| {
-                cypher_from_material(kek, CypherVersion::default())
-                    .decrypt_with_aad(&leaf.wrapped_share, &[])
-                    .ok()
-            });
-            out.push(share);
-        }
-        PolicyNode::And(children) | PolicyNode::Or(children) => {
-            for child in children {
-                unwrap_leaves(child, authkeks, out);
-            }
-        }
-    }
+    Ok(policy)
 }
 
 fn to_key_material(bytes: &[u8]) -> Result<KeyMaterial> {
@@ -455,10 +395,7 @@ fn validate_factor_id(id: &str) -> Result<()> {
     if id.eq_ignore_ascii_case("and") || id.eq_ignore_ascii_case("or") {
         bail!("'{id}' is a reserved keyword and cannot be a factor id");
     }
-    if !id
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
+    if !id.chars().all(is_factor_id_char) {
         bail!("factor id '{id}' may contain only letters, digits, '-' and '_'");
     }
     Ok(())
@@ -476,8 +413,7 @@ fn validate_factor_id(id: &str) -> Result<()> {
 /// Validates that `password` is acceptable for a factor named `id`, independent
 /// of any vault — so a caller can check it before doing more work (e.g. a
 /// strength prompt). The name must be well-formed and the password must not be
-/// too similar to it. [`PolicyVault::create`] and [`PolicyVault::enroll_password`]
-/// apply the same check.
+/// too similar to it. Creating a vault and enrolling a factor apply the same check.
 pub fn check_factor_password(id: &str, password: &str) -> Result<()> {
     validate_factor_id(id)?;
     reject_password_resembling_id(id, password)
@@ -510,20 +446,15 @@ mod tests {
         Argon2Params::insecure()
     }
 
-    fn pw(s: &str) -> FactorSecret {
-        FactorSecret::Password(Zeroizing::new(s.to_string()))
-    }
-
-    fn secrets(pairs: &[(&str, &str)]) -> HashMap<String, FactorSecret> {
-        pairs
-            .iter()
-            .map(|(id, p)| ((*id).to_string(), pw(p)))
-            .collect()
-    }
-
-    /// Round-trips a vault through its serialized metadata, then unlocks.
+    /// Round-trips a vault through its serialized header, then unlocks it by
+    /// presenting each provided password to an [`UnlockSession`] (the factor id is
+    /// just a label here — the session matches the password against the factors).
     fn reopen(vault: &PolicyVault, provided: &[(&str, &str)]) -> Result<PolicyVault> {
-        PolicyVault::unlock(vault.header(), &secrets(provided))
+        let mut session = UnlockSession::new(vault.header());
+        for (_id, password) in provided {
+            session.try_password(password)?;
+        }
+        session.finish()
     }
 
     #[test]

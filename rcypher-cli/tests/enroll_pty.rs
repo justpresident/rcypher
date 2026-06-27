@@ -5,19 +5,17 @@
 //! capture them), which the stdin-based `cli_tests` cannot drive. Here the binary
 //! is run under a real pseudo-terminal so the prompts can be answered.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 
 use assert_cmd::cargo;
 use rcypher::{
-    Argon2Params, ContainerCodec, Cypher, CypherVersion, DataContainer, EncryptedValue,
-    EncryptionKey, FactorSecret, FileContainer, FileContainerV8, PolicyVault, Secrets,
+    Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, LockedContainer,
+    SecretStore, UnlockedContainer,
 };
 use rexpect::session::{PtySession, spawn_command};
 use tempfile::TempDir;
-use zeroize::Zeroizing;
 
 // A passphrase zxcvbn rates as strong, so the weak-password prompt is skipped.
 const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
@@ -26,9 +24,14 @@ const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
 /// params so the binary's `--insecure-password` path unlocks it quickly and a
 /// newly enrolled factor derives fast.
 fn create_store(path: &Path, factor_id: &str, password: &str) {
-    let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
-    let payload = DataContainer::new().safe_serialize().unwrap();
-    FileContainerV8::write(path, &vault, &payload).unwrap();
+    let mut store = UnlockedContainer::create_with_params(
+        factor_id,
+        password,
+        SecretStore::new(),
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    store.save(path).unwrap();
 }
 
 /// Writes a legacy version-7 single-password store holding `key`=`value`,
@@ -41,7 +44,7 @@ fn create_legacy_store_with_value(path: &Path, key: &str, value: &str) {
     )
     .unwrap();
     let cypher = Cypher::new(enc_key);
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put(
         key.to_string(),
         EncryptedValue::encrypt(&cypher, value).unwrap(),
@@ -66,21 +69,17 @@ fn spawn_session(path: &Path) -> PtySession {
     spawn_command(cmd, Some(30_000)).expect("spawn under PTY")
 }
 
+/// True iff `password` unlocks the store at `path` via the factor named `id` and
+/// the payload then decrypts — exercising the public load/unlock path.
 fn unlocks_with(path: &Path, id: &str, password: &str) -> bool {
-    let secrets: HashMap<String, FactorSecret> = [(
-        id.to_string(),
-        FactorSecret::Password(Zeroizing::new(password.to_string())),
-    )]
-    .into_iter()
-    .collect();
     let data = std::fs::read(path).unwrap();
-    let Ok(FileContainer::V8(container)) = FileContainer::parse(&data) else {
+    let Ok(mut locked) = LockedContainer::from_slice_with_params(&data, &Argon2Params::insecure())
+    else {
         return false;
     };
-    let Ok(vault) = container.unlock(&Secrets::Factors(secrets), &Argon2Params::insecure()) else {
-        return false;
-    };
-    container.decrypt_payload(&vault).is_ok()
+    matches!(locked.try_password(password), Ok(Some(matched)) if matched == id)
+        && locked.can_unlock()
+        && locked.unlock::<SecretStore>().is_ok()
 }
 
 #[test]
@@ -226,7 +225,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
 
     // Initially a legacy version-7 store (not yet in the version-8 format).
     let head = fs::read(&path).unwrap();
-    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V7.tag());
+    assert_eq!(&head[..2], &[0u8, 7] /* V7 tag */);
 
     let mut p = spawn_session(&path);
 
@@ -249,7 +248,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
     // On disk it is now in the version-8 format, unlockable with the original
     // password (now the 'primary' factor)...
     let head = fs::read(&path).unwrap();
-    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &[0u8, 8] /* V8 tag */);
     assert!(unlocks_with(&path, "primary", "test_password"));
 
     // ...and the untouched original is preserved as a <path>.bak (still v7).
@@ -259,10 +258,7 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
         std::path::PathBuf::from(p)
     };
     assert!(bak.exists(), "expected a .bak backup of the original");
-    assert_eq!(
-        &fs::read(&bak).unwrap()[..2],
-        &rcypher::FileContainerFormat::V7.tag()
-    );
+    assert_eq!(&fs::read(&bak).unwrap()[..2], &[0u8, 7] /* V7 tag */);
 }
 
 const P1_PASSWORD: &str = "alpha-one-vault-secret";
@@ -270,13 +266,16 @@ const P2_PASSWORD: &str = "bravo-two-vault-secret";
 
 /// Writes a version-8 vault requiring BOTH `p1` and `p2` password factors.
 fn create_and_vault(path: &Path) {
-    let mut vault = PolicyVault::create("p1", P1_PASSWORD, &Argon2Params::insecure()).unwrap();
-    vault
-        .enroll_password("p2", P2_PASSWORD, &Argon2Params::insecure())
-        .unwrap();
-    vault.set_policy("p1 and p2").unwrap();
-    let payload = DataContainer::new().safe_serialize().unwrap();
-    FileContainerV8::write(path, &vault, &payload).unwrap();
+    let mut store = UnlockedContainer::create_with_params(
+        "p1",
+        P1_PASSWORD,
+        SecretStore::new(),
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    store.enroll_password("p2", P2_PASSWORD).unwrap();
+    store.set_policy("p1 and p2").unwrap();
+    store.save(path).unwrap();
 }
 
 /// Spawns the binary under a PTY without `--insecure-password`, so the multi-

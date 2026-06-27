@@ -51,6 +51,41 @@ impl PolicyNode {
             Self::Or(children) => children.iter().any(|c| c.is_satisfied_by(available)),
         }
     }
+
+    /// The leaves in left-to-right depth-first order — the one canonical order that
+    /// secret-share distribution, share wrapping/unwrapping, and reconstruction all
+    /// agree on. Centralizing it here keeps that cross-cutting invariant in a single
+    /// place instead of re-encoded by hand at every traversal.
+    pub fn leaves(&self) -> impl Iterator<Item = &Leaf> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            while let Some(node) = stack.pop() {
+                match node {
+                    Self::Leaf(leaf) => return Some(leaf),
+                    // Push children reversed so they pop left-to-right.
+                    Self::And(children) | Self::Or(children) => stack.extend(children.iter().rev()),
+                }
+            }
+            None
+        })
+    }
+
+    /// The leaves, mutably, in the same left-to-right depth-first order as
+    /// [`leaves`](Self::leaves) — for filling in or re-wrapping each leaf's share.
+    pub fn leaves_mut(&mut self) -> impl Iterator<Item = &mut Leaf> {
+        let mut stack = vec![self];
+        std::iter::from_fn(move || {
+            while let Some(node) = stack.pop() {
+                match node {
+                    Self::Leaf(leaf) => return Some(leaf),
+                    Self::And(children) | Self::Or(children) => {
+                        stack.extend(children.iter_mut().rev());
+                    }
+                }
+            }
+            None
+        })
+    }
 }
 
 #[cfg(test)]

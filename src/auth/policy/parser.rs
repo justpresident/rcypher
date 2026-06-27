@@ -15,6 +15,14 @@ use anyhow::{Result, bail};
 
 use super::tree::{Leaf, PolicyNode};
 
+/// The character class a factor id is made of: letters, digits, `-` and `_`. The
+/// single source of truth shared by the tokenizer and the factor-id validator, so
+/// the lexer and the validator can't drift apart.
+#[must_use]
+pub fn is_factor_id_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '-' || c == '_'
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum Token {
     And,
@@ -40,10 +48,10 @@ fn tokenize(input: &str) -> Result<Vec<Token>> {
                 tokens.push(Token::RParen);
                 chars.next();
             }
-            c if c.is_alphanumeric() || c == '-' || c == '_' => {
+            c if is_factor_id_char(c) => {
                 let mut ident = String::new();
                 while let Some(&c) = chars.peek() {
-                    if c.is_alphanumeric() || c == '-' || c == '_' {
+                    if is_factor_id_char(c) {
                         ident.push(c);
                         chars.next();
                     } else {
@@ -159,8 +167,11 @@ fn join(children: &[PolicyNode], sep: &str, parent: &PolicyNode) -> String {
 
 /// Errors if any leaf references a factor name not in `known`.
 pub fn validate_factors(node: &PolicyNode, known: &HashSet<String>) -> Result<()> {
-    let mut unknown = Vec::new();
-    collect_unknown(node, known, &mut unknown);
+    let mut unknown: Vec<String> = node
+        .leaves()
+        .filter(|leaf| !known.contains(&leaf.factor))
+        .map(|leaf| leaf.factor.clone())
+        .collect();
     if unknown.is_empty() {
         Ok(())
     } else {
@@ -173,37 +184,12 @@ pub fn validate_factors(node: &PolicyNode, known: &HashSet<String>) -> Result<()
     }
 }
 
-fn collect_unknown(node: &PolicyNode, known: &HashSet<String>, unknown: &mut Vec<String>) {
-    match node {
-        PolicyNode::Leaf(leaf) => {
-            if !known.contains(&leaf.factor) {
-                unknown.push(leaf.factor.clone());
-            }
-        }
-        PolicyNode::And(children) | PolicyNode::Or(children) => {
-            for child in children {
-                collect_unknown(child, known, unknown);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn names(node: &PolicyNode) -> HashSet<String> {
-        let mut s = HashSet::new();
-        fn walk(n: &PolicyNode, s: &mut HashSet<String>) {
-            match n {
-                PolicyNode::Leaf(l) => {
-                    s.insert(l.factor.clone());
-                }
-                PolicyNode::And(c) | PolicyNode::Or(c) => c.iter().for_each(|x| walk(x, s)),
-            }
-        }
-        walk(node, &mut s);
-        s
+        node.leaves().map(|l| l.factor.clone()).collect()
     }
 
     #[test]

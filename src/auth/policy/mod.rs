@@ -9,6 +9,6 @@ mod parser;
 mod sharing;
 mod tree;
 
-pub use parser::{parse_policy, render_policy, validate_factors};
+pub use parser::{is_factor_id_char, parse_policy, render_policy, validate_factors};
 pub use sharing::{Share, distribute, reconstruct};
 pub use tree::{Leaf, PolicyNode};

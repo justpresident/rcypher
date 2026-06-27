@@ -515,11 +515,16 @@ fn test_encrypt_decrypt_with_output_file() {
 /// store, derived with insecure Argon2 params so the binary's `--insecure-password`
 /// path unlocks it quickly.
 fn create_store(path: &Path, factor_id: &str, password: &str) {
-    use rcypher::{Argon2Params, DataContainer, FileContainerV8, PolicyVault};
+    use rcypher::{Argon2Params, SecretStore, UnlockedContainer};
 
-    let vault = PolicyVault::create(factor_id, password, &Argon2Params::insecure()).unwrap();
-    let payload = DataContainer::new().safe_serialize().unwrap();
-    FileContainerV8::write(path, &vault, &payload).unwrap();
+    let mut store = UnlockedContainer::create_with_params(
+        factor_id,
+        password,
+        SecretStore::new(),
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    store.save(path).unwrap();
 }
 
 #[test]
@@ -532,7 +537,7 @@ fn test_store_put_get_roundtrip() {
 
     // The store must still be in the version-8 format after a save.
     let head = fs::read(&file_path).unwrap();
-    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &[0u8, 8] /* V8 tag */);
 
     // Second run: re-open the rewritten vault and read the values back.
     let lines = run_commands(&file_path, b"get key1\nget key2\n".to_vec());
@@ -569,16 +574,20 @@ fn test_store_wrong_password_fails() {
 /// `main or backup` policy, so the `--insecure-password test_password` path
 /// unlocks it via the "main" factor.
 fn create_multifactor_store(path: &Path) {
-    use rcypher::{Argon2Params, DataContainer, FileContainerV8, PolicyVault};
+    use rcypher::{Argon2Params, SecretStore, UnlockedContainer};
 
-    let mut vault =
-        PolicyVault::create("main", "test_password", &Argon2Params::insecure()).unwrap();
-    vault
-        .enroll_password("backup", "recovery-secret-9", &Argon2Params::insecure())
+    let mut store = UnlockedContainer::create_with_params(
+        "main",
+        "test_password",
+        SecretStore::new(),
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    store
+        .enroll_password("backup", "recovery-secret-9")
         .unwrap();
-    vault.set_policy("main or backup").unwrap();
-    let payload = DataContainer::new().safe_serialize().unwrap();
-    FileContainerV8::write(path, &vault, &payload).unwrap();
+    store.set_policy("main or backup").unwrap();
+    store.save(path).unwrap();
 }
 
 #[test]
@@ -626,7 +635,7 @@ fn test_store_set_policy_and_remove_factor() {
 /// `legacy_key -> legacy_val` entry so conversion can be checked to preserve values.
 fn create_legacy_store(path: &Path) {
     use rcypher::{
-        Argon2Params, Cypher, CypherVersion, DataContainer, EncryptedValue, EncryptionKey,
+        Argon2Params, Cypher, CypherVersion, EncryptedValue, EncryptionKey, SecretStore,
     };
 
     let key = EncryptionKey::from_password_with_params(
@@ -636,7 +645,7 @@ fn create_legacy_store(path: &Path) {
     )
     .unwrap();
     let cypher = Cypher::new(key);
-    let mut storage = DataContainer::new();
+    let mut storage = SecretStore::new();
     storage.put(
         "legacy_key".to_string(),
         EncryptedValue::encrypt(&cypher, "legacy_val").unwrap(),
@@ -652,7 +661,7 @@ fn test_new_store_is_v8() {
     run_commands(&file_path, b"put k v\n".to_vec());
 
     let head = fs::read(&file_path).unwrap();
-    assert_eq!(&head[..2], &rcypher::FileContainerFormat::V8.tag());
+    assert_eq!(&head[..2], &[0u8, 8] /* V8 tag */);
 
     let factors = run_commands_str(&file_path, "auth factor list\n");
     assert!(factors.contains("primary (password)"), "{factors}");
@@ -666,7 +675,7 @@ fn test_legacy_store_auto_converts() {
     // Sanity: the seeded file really is a legacy (v7) container.
     assert_eq!(
         &fs::read(&file_path).unwrap()[..2],
-        &rcypher::FileContainerFormat::V7.tag()
+        &[0u8, 7] /* V7 tag */
     );
 
     // Opening it and writing triggers the transparent upgrade: the original is
@@ -681,12 +690,12 @@ fn test_legacy_store_auto_converts() {
     assert!(bak.exists(), "expected a .bak backup of the original");
     assert_eq!(
         &fs::read(&bak).unwrap()[..2],
-        &rcypher::FileContainerFormat::V7.tag(),
+        &[0u8, 7], /* V7 tag */
         "the backup must be the untouched legacy file"
     );
     assert_eq!(
         &fs::read(&file_path).unwrap()[..2],
-        &rcypher::FileContainerFormat::V8.tag(),
+        &[0u8, 8], /* V8 tag */
         "the upgraded file must be in the v8 format"
     );
 

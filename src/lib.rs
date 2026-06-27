@@ -36,10 +36,21 @@
 //! See `examples/custom_format.rs` for the full round-trip, including the atomic
 //! file helpers [`save_encrypted`] / [`load_encrypted`].
 //!
+//! # Encrypted stores (the high-level API)
+//!
+//! For a complete password- or policy-protected store — multi-factor unlock,
+//! transparent legacy upgrade, and atomic save — use the version-agnostic facade
+//! instead of the raw envelope above. [`LockedContainer`] loads a file of any
+//! on-disk format; you satisfy its lock with passwords and
+//! [`unlock`](LockedContainer::unlock) it into an [`UnlockedContainer<T>`] over your
+//! own [`DataContainer`] payload, which exposes the data, its data-key [`Cypher`], and
+//! lock management. Clients never name a format version, so a future format is
+//! adopted without any client change.
+//!
 //! # Features
 //!
 //! - `storage` *(default)* — rcypher's bundled key-value storage format
-//!   ([`DataContainer`] and friends). Disable with `default-features = false` to depend
+//!   ([`SecretStore`] and friends). Disable with `default-features = false` to depend
 //!   on only the crypto envelope.
 //!
 //! # Anti-debug detection
@@ -74,6 +85,7 @@ mod auth;
 mod constants;
 mod container;
 mod crypto;
+mod data_container;
 mod file_io;
 mod security;
 #[cfg(feature = "storage")]
@@ -81,19 +93,22 @@ mod storage;
 mod version;
 
 // Public re-exports
-pub use auth::{
-    Factor, FactorKind, FactorSecret, Leaf, PolicyNode, PolicyVault, Share, UnlockSession,
-    VaultHeader, check_factor_password, distribute, reconstruct,
-};
-pub use container::{
-    ContainerCodec, FileContainer, FileContainerFormat, FileContainerV7, FileContainerV8, Secrets,
-};
+// The public surface is the version-agnostic facade plus the crypto primitives.
+// The on-disk formats (`FileContainer*`), the keyslot vault (`PolicyVault`,
+// `UnlockSession`, …), and the policy types are internal: a client never names a
+// format version, and a new format is added without touching any client.
+pub use auth::{FactorKind, check_factor_password};
+pub use container::{LockedContainer, UnlockedContainer, backup_path};
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};
+pub use data_container::DataContainer;
 pub use file_io::{load_encrypted, save_encrypted};
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 #[cfg(feature = "storage")]
-pub use storage::{DataContainer, EncryptedValue, ValueEntry};
+pub use storage::{EncryptedValue, SecretStore, ValueEntry};
 pub use version::CypherVersion;
 
-// Re-export for convenience
+// Re-export for convenience. `Zeroizing` appears in public signatures
+// (`DataContainer::encode`, `load_encrypted`), so callers can name those return types
+// without depending on `zeroize` directly.
 pub use anyhow::{Result, bail};
+pub use zeroize::Zeroizing;

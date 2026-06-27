@@ -1,5 +1,5 @@
-mod data;
+mod secret_store;
 mod value;
 
-pub use data::DataContainer;
+pub use secret_store::SecretStore;
 pub use value::{EncryptedValue, ValueEntry};
