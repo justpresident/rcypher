@@ -265,16 +265,16 @@ impl EncryptionKey {
         }
     }
 
-    pub fn as_bytes(&self) -> &KeyBytes {
+    pub(super) fn as_bytes(&self) -> &KeyBytes {
         &self.key
     }
-    pub fn hmac_key(&self) -> &KeyBytes {
+    pub(super) fn hmac_key(&self) -> &KeyBytes {
         &self.hmac_key
     }
-    pub const fn salt(&self) -> &SaltBytes {
+    pub(super) const fn salt(&self) -> &SaltBytes {
         &self.salt
     }
-    pub const fn version(&self) -> CypherVersion {
+    pub(super) const fn version(&self) -> CypherVersion {
         self.version
     }
 }

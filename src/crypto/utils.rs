@@ -6,7 +6,7 @@ use zeroize::Zeroize;
 
 /// A proper ring buffer for efficient block processing
 /// Data wraps around when reaching the end, no data movement required
-pub struct RingBuffer {
+pub(super) struct RingBuffer {
     buffer: Vec<u8>,
     read_pos: usize,  // Position to read from
     write_pos: usize, // Position to write to
@@ -14,7 +14,7 @@ pub struct RingBuffer {
 }
 
 impl RingBuffer {
-    pub fn new(capacity: usize) -> Self {
+    pub(super) fn new(capacity: usize) -> Self {
         Self {
             buffer: vec![0; capacity],
             read_pos: 0,
@@ -24,24 +24,24 @@ impl RingBuffer {
     }
 
     /// Returns the number of bytes available to read
-    pub const fn available(&self) -> usize {
+    pub(super) const fn available(&self) -> usize {
         self.count
     }
 
     /// Returns the buffer capacity
-    pub const fn capacity(&self) -> usize {
+    pub(super) const fn capacity(&self) -> usize {
         self.buffer.len()
     }
 
     /// Returns the number of bytes that can be written
-    pub const fn space_available(&self) -> usize {
+    pub(super) const fn space_available(&self) -> usize {
         self.capacity() - self.count
     }
 
     /// Reads data from reader into the buffer's available space
     /// May perform up to 2 reads if the data wraps around
     /// Returns the number of bytes read, or 0 if EOF
-    pub fn fill_from<R: Read>(&mut self, reader: &mut R) -> io::Result<usize> {
+    pub(super) fn fill_from<R: Read>(&mut self, reader: &mut R) -> io::Result<usize> {
         let space = self.space_available();
         if space == 0 {
             return Ok(0);
@@ -83,7 +83,7 @@ impl RingBuffer {
     /// Reads exactly `buf.len()` bytes into buf
     /// Returns an error if not enough data is available
     /// May copy from two regions if data wraps around
-    pub fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+    pub(super) fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
         if self.available() < buf.len() {
             bail!("Not enough data in ring buffer");
         }
@@ -124,14 +124,14 @@ impl Drop for RingBuffer {
 }
 
 /// A reader wrapper that only reads up to a specified limit
-pub struct LimitedReader<R: Read> {
+pub(super) struct LimitedReader<R: Read> {
     inner: R,
     limit: u64,
     position: u64,
 }
 
 impl<R: Read> LimitedReader<R> {
-    pub const fn new(inner: R, limit: u64) -> Self {
+    pub(super) const fn new(inner: R, limit: u64) -> Self {
         Self {
             inner,
             limit,

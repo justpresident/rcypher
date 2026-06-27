@@ -10,9 +10,9 @@ use hmac::Mac;
 use rand::TryRngCore;
 use zeroize::Zeroizing;
 
-use super::LimitedReader;
 use super::key::EncryptionKey;
 use super::stream_ops::{decrypt_blocks_v7, encrypt_blocks_v7};
+use super::utils::LimitedReader;
 use crate::constants::{
     Aes256CbcDec, Aes256CbcEnc, BLOCK_SIZE, BlockBytes, HMAC_SIZE, HmacSha256, KeyMaterialBytes,
     READ_BUF_SIZE,
@@ -84,7 +84,7 @@ impl Cypher {
         Ok(())
     }
 
-    pub const fn version(&self) -> CypherVersion {
+    pub(crate) const fn version(&self) -> CypherVersion {
         self.key.version()
     }
 
@@ -127,7 +127,7 @@ impl Cypher {
     /// must be supplied when decrypting. An empty `aad` produces a byte-for-byte
     /// identical result to [`Cypher::encrypt`], so existing ciphertexts and the
     /// plain file-encryption path are unaffected.
-    pub fn encrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) fn encrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Vec<u8>> {
         self.check_tracing()?;
 
         match self.key.version() {
@@ -217,7 +217,7 @@ impl Cypher {
     /// Like [`Cypher::decrypt`], but also authenticates `aad` — which must equal
     /// the associated data passed to [`Cypher::encrypt_with_aad`]. Decryption
     /// fails if `aad` does not match, even when the ciphertext itself is intact.
-    pub fn decrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    pub(crate) fn decrypt_with_aad(&self, data: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
         self.check_tracing()?;
 
         match self.key.version() {
