@@ -51,7 +51,7 @@ impl SecretStore {
     /// # Sorting
     /// - Keys are returned in sorted order (guaranteed by `BTreeMap`)
     /// - Returns the latest value for each key (relies on entries being sorted
-    ///   by timestamp during parsing in [`from_v4_bytes`](Self::from_v4_bytes))
+    ///   by timestamp during parsing in `from_v4_bytes`)
     pub fn get(&self, pattern: &str) -> Result<impl Iterator<Item = (&str, &EncryptedValue)> + '_> {
         let re = Regex::new(&format!("^{pattern}$"))?;
         Ok(self
@@ -65,7 +65,7 @@ impl SecretStore {
     ///
     /// # Sorting
     /// Entries are chronological (oldest to newest), guaranteed by the timestamp
-    /// sort in [`from_v4_bytes`](Self::from_v4_bytes).
+    /// sort in `from_v4_bytes`.
     pub fn history(&self, key: &str) -> Option<&[ValueEntry]> {
         self.data.get(key).map(Vec::as_slice)
     }

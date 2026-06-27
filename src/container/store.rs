@@ -175,7 +175,7 @@ impl LockedContainer {
     }
 
     /// Tries a FIDO2 `hmac-secret` output (obtained from the authenticator for one
-    /// of the factors reported by [`factor_kinds`](Self::factor_kinds)) against the
+    /// of the factors reported by [`pending_factor_kinds`](Self::pending_factor_kinds)) against the
     /// still-unsatisfied factors. Returns the id of the FIDO2 factor it satisfied,
     /// or `None`. A legacy single-password store has no FIDO2 factors, so this
     /// returns `None` for one.

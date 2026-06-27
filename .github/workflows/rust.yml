@@ -44,6 +44,10 @@ jobs:
             -D warnings
       - name: Run clippy (core, no default features)
         run: cargo clippy -p rcypher --no-default-features -- -D warnings
+      - name: Build docs (warnings as errors)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --no-deps --all-features
       - name: Check formatting
         run: cargo fmt --all -- --check
 

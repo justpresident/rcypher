@@ -2,7 +2,7 @@
 //! USB-HID (CTAP2).
 //!
 //! Compiled only with the `fido2` feature; the pure FIDO2 KEK and the enroll/unlock
-//! primitives (see [`super::factor`] and [`super::vault`]) need no hardware and are
+//! primitives (in the sibling `factor` and `vault` modules) need no hardware and are
 //! always available.
 //!
 //! This is the one place rcypher talks to a device. Enrollment runs a
