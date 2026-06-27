@@ -1,10 +1,8 @@
 use crate::cli::CLIPBOARD_TTL_MS;
 use crate::cli::completer::CypherCompleter;
-use crate::cli::utils::{
-    confirm_if_weak_password, copy_to_clipboard, format_timestamp, prompt_new_password,
-    secure_print,
-};
+use crate::cli::utils::{copy_to_clipboard, format_timestamp};
 use anyhow::{Result, anyhow, bail};
+use rcypher::cli::{confirm_if_weak_password, prompt_new_password, secure_print};
 use rcypher::{EncryptedValue, FactorKind, check_factor_password, is_debugger_attached};
 use rustyline::CompletionType;
 use rustyline::Config;
@@ -362,7 +360,7 @@ impl InteractiveCli {
         // asking, so we don't try (and fail) to use a PIN that isn't configured.
         let has_pin = rcypher::fido2::device_has_pin()?;
         let pin = if has_pin {
-            Some(crate::cli::utils::prompt_password("Security key PIN")?)
+            Some(rcypher::cli::prompt_password("Security key PIN")?)
         } else {
             secure_print(
                 "This key has no PIN set — the factor will unlock with a touch only. Set a PIN on \

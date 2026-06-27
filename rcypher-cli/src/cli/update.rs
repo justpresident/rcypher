@@ -1,5 +1,6 @@
-use crate::cli::utils::{format_timestamp, secure_print};
+use crate::cli::utils::format_timestamp;
 use anyhow::Result;
+use rcypher::cli::secure_print;
 use rcypher::{Cypher, EncryptedValue, SecretStore};
 use std::io;
 use std::io::Write;

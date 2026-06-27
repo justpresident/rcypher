@@ -1620,11 +1620,13 @@ dependencies = [
  "num_enum",
  "rand",
  "regex",
+ "rpassword",
  "serde",
  "sha2",
  "subtle",
  "tempfile",
  "zeroize",
+ "zxcvbn",
 ]
 
 [[package]]
@@ -1641,11 +1643,9 @@ dependencies = [
  "predicates",
  "rcypher",
  "rexpect",
- "rpassword",
  "rustyline",
  "tempfile",
  "zeroize",
- "zxcvbn",
 ]
 
 [[package]]

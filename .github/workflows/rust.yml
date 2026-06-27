@@ -44,6 +44,10 @@ jobs:
             -D warnings
       - name: Run clippy (core, no default features)
         run: cargo clippy -p rcypher --no-default-features -- -D warnings
+      # Guards the `cli` feature's FIDO2-less path (the `#[cfg(not(feature = "fido2"))]`
+      # branches in the unlock loop), which --all-features doesn't exercise.
+      - name: Run clippy (core, cli feature without fido2)
+        run: cargo clippy -p rcypher --no-default-features --features cli -- -D warnings
       - name: Build docs (warnings as errors)
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -76,7 +80,7 @@ jobs:
 
       - name: Generate coverage
         run: |
-          cargo tarpaulin --out xml --output-dir coverage --all-features --engine llvm --run-types AllTargets --workspace --exclude-files 'tests/*' 'rcypher-cli/tests/*' 'examples/*' 'rcypher-cli/src/cli/utils.rs' 'rcypher-cli/src/cli/completer.rs' --timeout 300
+          cargo tarpaulin --out xml --output-dir coverage --all-features --engine llvm --run-types AllTargets --workspace --exclude-files 'tests/*' 'rcypher-cli/tests/*' 'examples/*' 'rcypher-cli/src/cli/utils.rs' 'rcypher-cli/src/cli/completer.rs' 'src/cli/*' --timeout 300
 
       - name: Extract coverage percentage
         id: coverage

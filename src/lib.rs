@@ -52,6 +52,10 @@
 //! - `storage` *(default)* — rcypher's bundled key-value storage format
 //!   ([`SecretStore`] and friends). Disable with `default-features = false` to depend
 //!   on only the crypto envelope.
+//! - `fido2` — hardware FIDO2 security-key factors (adds the `fido2` device module).
+//! - `cli` — reusable interactive terminal plumbing (adds the `cli` module):
+//!   password prompts, the zxcvbn strength gate, and the policy-unlock prompt loop,
+//!   for building an rcypher-like CLI on top of the library.
 //!
 //! # Anti-debug detection
 //!
@@ -82,6 +86,8 @@
 
 // Module declarations
 mod auth;
+#[cfg(feature = "cli")]
+pub mod cli;
 mod constants;
 mod container;
 mod crypto;

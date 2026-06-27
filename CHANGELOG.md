@@ -38,6 +38,13 @@ minor; features and fixes bump the patch).
   `hmac-secret`, so nothing key-derived touches disk. Built into the CLI by
   default; the opt-in `fido2` feature in the library (a `--no-default-features` CLI
   build omits it, for hosts without the USB-HID build dependencies).
+- **Reusable CLI plumbing (`cli` feature).** The interactive terminal helpers now
+  live in the library behind a `cli` feature (`rcypher::cli`): password/PIN prompts
+  and direct-to-tty secret output, the zxcvbn password-strength gate, and the
+  policy-unlock prompt loop (`prompt_until_unlocked`, with a pluggable
+  `UnlockProgress` for a spinner). Other apps can build an rcypher-like CLI on top;
+  `rcypher-cli` is now a thin shell over it. Pulls `rpassword` + `zxcvbn` only when
+  the feature is enabled.
 - **Password strength check.** Creating a store or enrolling a password factor
   scores the password with zxcvbn (NIST-aligned: guess-resistance and pattern
   detection, no composition rules). A weak password shows a prominent warning

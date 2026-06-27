@@ -19,11 +19,12 @@
 
 mod cli;
 
-use crate::cli::utils::{Spinner, confirm_if_weak_password, get_password, prompt_password};
+use crate::cli::utils::{Spinner, SpinnerProgress};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+use rcypher::cli::{confirm_if_weak_password, get_password};
 use rcypher::{
     Argon2Params, Cypher, CypherVersion, EncryptionKey, LockedContainer, SecretStore,
     UnlockedContainer,
@@ -150,12 +151,12 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
     Ok(())
 }
 
-/// Collects passwords against a locked store until its policy is satisfied.
+/// Drives the locked store to a satisfiable state, ready for `unlock`.
 ///
-/// Drives the interactive unlock loop, prompting only for the factor *types* still
-/// needed: a password while an unsatisfied password factor remains, and/or a FIDO2
-/// security key while an unsatisfied one remains (when support is built in). When
-/// `--insecure-password` is set (testing only), that one password is tried once.
+/// The interactive path delegates to the library's prompt loop
+/// ([`rcypher::cli::prompt_until_unlocked`]), showing a spinner around each Argon2
+/// attempt. With `--insecure-password` (testing only) it instead tries that one
+/// password once and requires it to satisfy the policy on its own.
 fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result<()> {
     // Non-interactive testing path: one password, which must satisfy on its own.
     if let Some(pw) = params.insecure_password.as_deref() {
@@ -166,122 +167,8 @@ fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result
         return Ok(());
     }
 
-    // Without FIDO2 support compiled in, a policy that needs a security key cannot be
-    // satisfied here — say so up front rather than looping.
-    #[cfg(not(feature = "fido2"))]
-    if !locked.satisfiable_by_password() {
-        bail!(
-            "this store's policy requires a FIDO2 security key; rebuild rcypher-cli with \
-             --features fido2"
-        );
-    }
-
-    while !locked.can_unlock() {
-        let needs_password = locked.needs_password();
-        let needs_fido2 = pending_fido2(locked);
-
-        if !needs_password && !needs_fido2 {
-            bail!(
-                "cannot satisfy the unlock policy with the available factors (a required \
-                 security key may need a build with --features fido2)"
-            );
-        }
-
-        // Prompt for a password only while one is still needed.
-        if needs_password {
-            let prompt = if needs_fido2 {
-                "Password (empty to use a security key, or to cancel)"
-            } else {
-                "Password (empty to cancel)"
-            };
-            let password = prompt_password(prompt)?;
-            if !password.is_empty() {
-                let spinner = Spinner::new("Checking", params.quiet);
-                let matched = locked.try_password(&password)?;
-                spinner.finish_and_clear();
-                report_unlocked(matched, locked);
-                continue;
-            }
-            // Empty entry: use a key if one applies, else cancel.
-            if !needs_fido2 {
-                bail!("unlock cancelled");
-            }
-        }
-
-        // A security key is the (or an) option — present it.
-        #[cfg(feature = "fido2")]
-        if !present_fido2_factor(locked)? && !needs_password {
-            // Only a key can unlock and it satisfied nothing; offer a retry or cancel.
-            if !crate::cli::utils::read_tty_confirmation("Try the security key again? [Y/n]: ")? {
-                bail!("unlock cancelled");
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Reports a factor attempt and whether more factors are still needed. Factor names
-/// are hidden until unlock, so a match is reported without naming the factor.
-fn report_unlocked(matched: bool, locked: &LockedContainer) {
-    if matched {
-        eprintln!("Factor unlocked.");
-        if !locked.can_unlock() {
-            eprintln!("More factors are required to satisfy the policy.");
-        }
-    } else {
-        eprintln!("That did not match any factor — try again.");
-    }
-}
-
-/// Whether the lock still needs a FIDO2 security key this build can use.
-#[cfg(feature = "fido2")]
-fn pending_fido2(locked: &LockedContainer) -> bool {
-    locked
-        .pending_factor_kinds()
-        .iter()
-        .any(|kind| matches!(kind, rcypher::FactorKind::Fido2 { .. }))
-}
-#[cfg(not(feature = "fido2"))]
-const fn pending_fido2(_locked: &LockedContainer) -> bool {
-    false
-}
-
-/// Presents each still-pending FIDO2 factor: prompts for a touch (and a PIN if the
-/// factor needs one), reads its `hmac-secret`, and tries it. Returns `true` once a
-/// factor is satisfied.
-#[cfg(feature = "fido2")]
-fn present_fido2_factor(locked: &mut LockedContainer) -> Result<bool> {
-    // `pending_factor_kinds()` is owned, so we can iterate it while mutably trying.
-    for kind in locked.pending_factor_kinds() {
-        let rcypher::FactorKind::Fido2 {
-            credential_id,
-            rp_id,
-            salt,
-            require_pin,
-        } = kind
-        else {
-            continue;
-        };
-
-        eprintln!("Touch your FIDO2 security key…");
-        let pin = if require_pin {
-            Some(prompt_password("Security key PIN")?)
-        } else {
-            None
-        };
-        let pin = pin.as_ref().map(|p| p.as_str());
-        match rcypher::fido2::hmac_secret(&credential_id, &rp_id, &salt, pin) {
-            Ok(secret) => {
-                if locked.try_fido2_secret(&secret)? {
-                    report_unlocked(true, locked);
-                    return Ok(true);
-                }
-                eprintln!("  That key did not match any factor.");
-            }
-            Err(e) => eprintln!("  {e}"),
-        }
-    }
-    Ok(false)
+    let mut progress = SpinnerProgress::new(params.quiet);
+    rcypher::cli::prompt_until_unlocked(locked, &mut progress)
 }
 
 /// Returns the store password — the one supplied via `--insecure-password`
@@ -377,7 +264,7 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
 /// A no-op on the non-interactive `--insecure-password` path.
 #[cfg(feature = "fido2")]
 fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
-    use crate::cli::utils::read_tty_confirmation;
+    use rcypher::cli::read_tty_confirmation;
 
     if params.insecure_password.is_some()
         || !read_tty_confirmation("Enrol a FIDO2 security key as a second factor now? [y/N]: ")?
@@ -388,7 +275,7 @@ fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
     // A PIN is usable only if one is set on the key — detect it rather than asking.
     let has_pin = rcypher::fido2::device_has_pin()?;
     let pin = if has_pin {
-        Some(prompt_password("Security key PIN")?)
+        Some(rcypher::cli::prompt_password("Security key PIN")?)
     } else {
         eprintln!("This key has no PIN set — the factor will unlock with a touch only.");
         None
