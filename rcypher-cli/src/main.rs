@@ -27,6 +27,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
+use nix::sys::termios::{SetArg, Termios, tcgetattr, tcsetattr};
 use rcypher::cli::{SecurePrinter, confirm_if_weak_password, get_password};
 use rcypher::{
     Argon2Params, Cypher, CypherVersion, EncryptionKey, LockedContainer, SecretStore,
@@ -439,7 +440,24 @@ fn arm_alarm_timer() -> Result<AlarmTimer> {
 /// SIGALRM is blocked in the calling thread before the timer is armed, so
 /// every subsequent thread inherits the blocked mask and the signal is
 /// consumed only by the dedicated handler thread via `sigwait`.
-fn start_security_timer(clock: SecurityClock) -> Result<SecurityTimerGuard> {
+/// Restores the terminal to the cooked-mode settings captured at startup.
+///
+/// The security-timer thread exits via `process::exit`, which skips rustyline's
+/// `Editor::Drop` — so without this, a timeout or security trip while at the prompt
+/// would leave the shell in raw mode (no echo, broken line editing). Best-effort
+/// (we're exiting regardless) and a no-op when stdin wasn't a terminal.
+fn restore_terminal(original: Option<&Termios>) {
+    if let Some(termios) = original {
+        let _ = tcsetattr(std::io::stdin(), SetArg::TCSANOW, termios);
+        // Drop to a fresh line so the shell prompt doesn't run into ours.
+        let _ = writeln!(io::stderr());
+    }
+}
+
+fn start_security_timer(
+    clock: SecurityClock,
+    original_termios: Option<Termios>,
+) -> Result<SecurityTimerGuard> {
     let SecurityClock {
         last_activity,
         last_security_check,
@@ -472,6 +490,7 @@ fn start_security_timer(clock: SecurityClock) -> Result<SecurityTimerGuard> {
             // or Ok(Duration::ZERO) if frozen. Both map to zero via
             // unwrap_or_default, and is_zero() catches both cases.
             if now.duration_since(prev_time).unwrap_or_default().is_zero() {
+                restore_terminal(original_termios.as_ref());
                 std::process::exit(1);
             }
             prev_time = now;
@@ -482,11 +501,13 @@ fn start_security_timer(clock: SecurityClock) -> Result<SecurityTimerGuard> {
             last_security_check.store(now_secs, Ordering::Relaxed);
 
             if is_debugger_attached() {
+                restore_terminal(original_termios.as_ref());
                 std::process::exit(1);
             }
 
             let last_secs = last_activity.load(Ordering::Relaxed);
             if last_secs > 0 && now_secs.saturating_sub(last_secs) > cli::STANDBY_TIMEOUT {
+                restore_terminal(original_termios.as_ref());
                 std::process::exit(0);
             }
         }
@@ -512,12 +533,17 @@ fn main() -> Result<()> {
         std::process::exit(1);
     }
 
+    // Capture the terminal's cooked-mode settings before anything enters raw mode,
+    // so the security thread can restore them on a hard `process::exit` (which skips
+    // rustyline's Drop). `None` when stdin isn't a terminal (e.g. piped in tests).
+    let original_termios = tcgetattr(std::io::stdin()).ok();
+
     let clock = SecurityClock {
         last_activity: Arc::new(AtomicU64::new(0)),
         // Initialise to now so the watchdog doesn't fire before the first tick.
         last_security_check: Arc::new(AtomicU64::new(current_unix_secs())),
     };
-    let _security_guard = start_security_timer(clock.clone())?;
+    let _security_guard = start_security_timer(clock.clone(), original_termios)?;
 
     let argon2_params = get_argon2_params(&params);
 
