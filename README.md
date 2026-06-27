@@ -296,11 +296,16 @@ and read those files back. Add the dependency:
 
 ```toml
 [dependencies]
-rcypher = "0.1"
+rcypher = "0.3"
 
 # crypto envelope only, without rcypher's bundled key-value storage format:
-# rcypher = { version = "0.1", default-features = false }
+# rcypher = { version = "0.3", default-features = false }
 ```
+
+Library feature flags: `storage` *(default)* — the bundled key-value store
+(`SecretStore`); `fido2` — hardware FIDO2 security-key factors; `cli` — reusable
+interactive terminal plumbing (password/PIN prompts, the zxcvbn strength gate, and
+the policy-unlock loop) for building an rcypher-like CLI on top of the library.
 
 Bring your own serialization and hand rcypher the bytes:
 
@@ -318,9 +323,15 @@ let plaintext = reopened.decrypt(&blob)?;
 
 The blob is self-contained (`[ header | ciphertext | hmac ]`), so it round-trips
 from memory (`encrypt`/`decrypt` + `EncryptionKey::for_data`) or from disk
-(`save_encrypted`/`load_encrypted` + `EncryptionKey::for_file`). See
-[`examples/custom_format.rs`](examples/custom_format.rs) for a complete example,
-and the **Cryptography Overview** below for the construction details.
+(`save_encrypted`/`load_encrypted` + `EncryptionKey::for_file`).
+
+For a complete **password- or multi-factor-protected store** — not just the raw
+envelope — implement the `DataContainer` trait for your type and use the
+`LockedContainer` / `UnlockedContainer` facade: it owns the lock (a password or an
+AND/OR factor policy), the AEAD envelope, atomic saves, and transparent legacy-file
+upgrades, so a future on-disk format is adopted without any change on your side.
+[`examples/custom_format.rs`](examples/custom_format.rs) demonstrates both levels;
+see the **Cryptography Overview** below for the construction details.
 
 `Cypher` refuses to operate while a debugger is attached by default; for a
 legitimately-traced host process, opt out with `Cypher::with_trace_detection(key, false)`.

@@ -1605,7 +1605,7 @@ dependencies = [
 
 [[package]]
 name = "rcypher"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "aes 0.8.4",
  "anyhow",
@@ -1631,7 +1631,7 @@ dependencies = [
 
 [[package]]
 name = "rcypher-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "arboard",

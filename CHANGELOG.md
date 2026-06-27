@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format is based on
 pre-1.0 [Semantic Versioning](https://semver.org/) (breaking changes bump the
 minor; features and fixes bump the patch).
 
-## [Unreleased]
+## [0.3.0] - 2026-06-27
 
 ### Added
 - **Multi-factor unlock.** A store can now require more than one secret, combined
@@ -61,6 +61,12 @@ minor; features and fixes bump the patch).
   renamed `FileContainerFormat`; the keyslot vault (`PolicyVault`) no longer does
   file I/O (reading/writing a vault file goes through the container layer).
   Removed `parse_policy_vault`, `serialize_policy_header`, and `ParsedVault`.
+
+### Fixed
+- The terminal is restored to normal (cooked) mode when the interactive session
+  exits on the idle timeout or a security trip. Those exits go through the watchdog
+  thread's `process::exit`, which skipped the line editor's terminal cleanup and
+  could leave the shell without echo or working line editing.
 
 ### Security
 - **The version-8 keyslot header is now authenticated.** The keyslot metadata
@@ -142,4 +148,5 @@ minor; features and fixes bump the patch).
   plaintext as ciphertext in debug builds; the latter is replaced by an explicit
   `#[doc(hidden)] from_plaintext_unchecked`.
 
+[0.3.0]: https://github.com/justpresident/rcypher/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/justpresident/rcypher/compare/v0.1.1...v0.2.0

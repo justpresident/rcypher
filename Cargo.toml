@@ -1,6 +1,6 @@
 [package]
 name = "rcypher"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Reusable authenticated encryption (Argon2id + AES-256-CBC + HMAC-SHA256) for password-protected, versioned encrypted storage"
 repository = "https://github.com/justpresident/rcypher"
