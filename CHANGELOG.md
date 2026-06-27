@@ -19,8 +19,9 @@ minor; features and fixes bump the patch).
     you both on open and when the backup is made. A read-only session leaves the
     file unchanged.
   - In-store `auth` commands while unlocked: `auth factor {list, add password
-    NAME, remove NAME}` and `auth policy {show, set EXPR}` (e.g. `p1 or (p2 and
-    yk)`). Enrolling a password rejects one that duplicates an existing factor's.
+    NAME, add fido2 NAME, remove NAME}` and `auth policy {show, set EXPR}` (e.g.
+    `p1 or (p2 and key)`). Enrolling a password rejects one that duplicates an
+    existing factor's.
   - On open, rcypher asks for a password in a loop (you don't pick a factor):
     each entry is matched against the factors and the loop continues until the
     policy is satisfied.
@@ -28,6 +29,15 @@ minor; features and fixes bump the patch).
     monotone-secret-shared across the policy tree; changing the policy or adding
     a factor never re-encrypts stored secrets (the DEK is stable; only the IV
     changes per save). See `docs/auth-protocol.md`.
+- **FIDO2 security-key factor.** A factor can be a hardware authenticator (any
+  FIDO2 key with the `hmac-secret` extension) instead of a password —
+  `auth factor add fido2 NAME`, and a new store offers to enrol one at creation.
+  Touch-vs-PIN is auto-detected from the key (no PIN prompt when none is set), and
+  the verification mode used at enrolment is bound into the factor and replayed at
+  unlock. The factor's key is derived from the authenticator's per-credential
+  `hmac-secret`, so nothing key-derived touches disk. Built into the CLI by
+  default; the opt-in `fido2` feature in the library (a `--no-default-features` CLI
+  build omits it, for hosts without the USB-HID build dependencies).
 - **Password strength check.** Creating a store or enrolling a password factor
   scores the password with zxcvbn (NIST-aligned: guess-resistance and pattern
   detection, no composition rules). A weak password shows a prominent warning

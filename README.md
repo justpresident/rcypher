@@ -105,11 +105,62 @@ FIDO2 security-key factor (any `hmac-secret`-capable authenticator) is built int
 the CLI by default; enrol one with `auth factor add fido2 NAME`. (A
 `--no-default-features` build omits it, for hosts without the USB-HID build deps.)
 
-On open, rcypher prints the policy and asks for a password in a loop — you don't
-pick a factor. Each password you enter is matched against the factors, the ones
-it unlocks are reported, and it keeps asking until the policy is satisfied (an
-empty entry cancels). So for `primary or recovery` one password is enough; for
-`primary and recovery` it asks again until both are given.
+On open, rcypher asks for a password in a loop — you don't pick a factor, and
+because factor names are encrypted until unlock it shows neither the policy nor
+which factors exist. Each password is matched against the factors; a match is
+reported generically (`Factor unlocked.`, plus a note when more are still needed)
+and it keeps asking until the policy is satisfied (an empty entry cancels). So
+`primary or recovery` needs one password; `primary and recovery` asks again until
+both are given.
+
+When the policy includes a security key, the prompt offers it as an option —
+`Password (empty to use a security key, or to cancel)` — and pressing Enter
+switches to the key: rcypher asks you to touch it (and for a PIN, if the key has
+one) and tries the resulting secret. A CLI built `--no-default-features` (without
+FIDO2) that meets a key-only policy says so up front instead of looping.
+
+### Security keys (FIDO2)
+
+A security-key factor is satisfied by a hardware authenticator instead of a typed
+secret. **When you create a store**, rcypher offers to add one straight away:
+
+```sh
+Enrol a FIDO2 security key as a second factor now? [y/N] y
+Touch your FIDO2 security key to enrol it…
+Require BOTH the password and the key to unlock? [y/N] (No = either one) : n
+FIDO2 factor 'key' enrolled; unlock policy is now: primary or key
+```
+
+Answering **yes** to "require both" sets `primary and key` (real two-factor);
+**no** sets `primary or key` (either one opens it).
+
+**From an unlocked store**, enrol one with `auth factor add fido2 NAME`; like any
+new factor it stays unused until a policy references it:
+
+```sh
+cypher > auth factor add fido2 work-key
+Enrolling FIDO2 factor 'work-key'. The name is a label (shown by 'auth factor list'
+once unlocked; encrypted in the store) — not a secret.
+Touch your FIDO2 security key to enrol it…
+Factor 'work-key' enrolled. Reference it in 'auth policy set' to require it.
+
+cypher > auth policy set primary and work-key   # now both are required
+Policy: primary and work-key
+```
+
+**PINs are auto-detected.** rcypher checks whether the authenticator has a PIN set
+and adapts: if it does, you're asked for it (at enrol and at every unlock); if not,
+the factor unlocks with a touch alone — you are never prompted for a PIN that
+isn't configured. The enrolled mode is bound into the factor and replayed at
+unlock, so a key enrolled touch-only stays touch-only even if you later add a PIN
+(that direction is safe). The breaking changes are the reverse: *removing* the PIN
+a factor was enrolled with, or turning on the key's "always require user
+verification" for a touch-only factor, makes the bound secret unreachable and that
+factor can no longer unlock — your data is untouched, but you must open the store
+via another policy branch and re-enrol the key. Keep a strong recovery branch (see
+[Recovery and backup](#recovery-and-backup)) so a key change can never lock you
+out. The full derivation and binding are specified in
+[`docs/auth-protocol.md`](docs/auth-protocol.md).
 
 ### Password strength
 
