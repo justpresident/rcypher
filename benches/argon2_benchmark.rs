@@ -7,7 +7,7 @@ fn benchmark_key_derivation(params: &Argon2Params, iterations: u32) -> std::time
 
     let start = Instant::now();
     for _ in 0..iterations {
-        let _key = EncryptionKey::from_password_with_params(version.clone(), password, params)
+        let _key = EncryptionKey::from_password_with_params(version, password, params)
             .expect("Key derivation failed");
     }
     start.elapsed()

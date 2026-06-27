@@ -83,6 +83,9 @@
     clippy::multiple_crate_versions,
     clippy::missing_panics_doc
 )]
+// Tests are expected to unwrap/expect and fail loudly; the panic-free lints above
+// are about production code, so exempt the test build.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 // Module declarations
 mod auth;

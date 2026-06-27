@@ -290,7 +290,7 @@ mod tests {
     fn test_ptrace_protection() {
         use nix::libc::getppid;
         enable_ptrace_protection().unwrap();
-        let parent_pid = unsafe { getppid() } as u32;
+        let parent_pid = u32::try_from(unsafe { getppid() }).unwrap();
 
         assert_eq!(*(EXPECTED_TRACER_PID.get().unwrap()), parent_pid);
 

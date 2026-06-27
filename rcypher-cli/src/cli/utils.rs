@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn test_format_timestamp() {
-        let ts = 1609459200; // 2021-01-01 00:00:00 UTC
+        let ts = 1_609_459_200; // 2021-01-01 00:00:00 UTC
         let formatted = format_timestamp(ts);
         assert!(formatted.contains("2021"));
         assert!(formatted.contains("01"));

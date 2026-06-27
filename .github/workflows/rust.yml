@@ -40,7 +40,7 @@ jobs:
 
       - name: Run clippy
         run: |
-          cargo clippy --all --all-features -- \
+          cargo clippy --all --all-features --all-targets -- \
             -D warnings
       - name: Run clippy (core, no default features)
         run: cargo clippy -p rcypher --no-default-features -- -D warnings

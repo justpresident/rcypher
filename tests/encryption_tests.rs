@@ -121,7 +121,7 @@ fn test_decrypt_corrupted_data() {
 fn encrypt_decrypt(
     input_path: &Path,
     output_path: &Path,
-    in_between: impl FnOnce() -> (),
+    in_between: impl FnOnce(),
 ) -> Result<Vec<u8>> {
     let cypher = Cypher::new(EncryptionKey::from_password_with_params(
         CypherVersion::V7WithKdf,
@@ -130,14 +130,14 @@ fn encrypt_decrypt(
     )?);
 
     // Encrypt
-    let mut file = fs::File::create(&output_path)?;
-    cypher.encrypt_file(&input_path, &mut file)?;
+    let mut file = fs::File::create(output_path)?;
+    cypher.encrypt_file(input_path, &mut file)?;
 
     in_between();
 
     // Decrypt
     let mut buffer = std::io::Cursor::new(Vec::new());
-    cypher.decrypt_file(&output_path, &mut buffer)?;
+    cypher.decrypt_file(output_path, &mut buffer)?;
     buffer.seek(SeekFrom::Start(0))?;
 
     let mut decrypted = Vec::new();
@@ -209,10 +209,10 @@ fn test_corrupted_file_hmac() {
             .unwrap();
         let mut buf = [0u8; 1];
         file.seek(SeekFrom::End(-1)).unwrap();
-        file.read(&mut buf).unwrap();
+        file.read_exact(&mut buf).unwrap();
         buf[0] += 1;
         file.seek(SeekFrom::End(-1)).unwrap();
-        file.write(&buf).unwrap();
+        file.write_all(&buf).unwrap();
     });
 
     assert!(decrypted.is_err());
@@ -233,7 +233,7 @@ fn test_invalid_file_version() {
             .open(&output_path)
             .unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
-        file.write(&[5u8]).unwrap();
+        file.write_all(&[5u8]).unwrap();
     });
 
     assert!(decrypted.is_err());
@@ -256,10 +256,10 @@ fn test_invalid_file_padding() {
             .unwrap();
         file.seek(SeekFrom::Start(3)).unwrap();
         let mut padding = [0u8; 1];
-        file.read(&mut padding).unwrap();
+        file.read_exact(&mut padding).unwrap();
         padding[0] += 1;
         file.seek(SeekFrom::Start(3)).unwrap();
-        file.write(&padding).unwrap();
+        file.write_all(&padding).unwrap();
     });
 
     assert!(decrypted.is_err());

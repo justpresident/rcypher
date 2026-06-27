@@ -82,7 +82,7 @@ fn run_commands(file_path: &Path, commands: Vec<u8>) -> Vec<String> {
         .arg("--insecure-password")
         .arg("test_password")
         .arg("--insecure-allow-debugging")
-        .arg(&file_path)
+        .arg(file_path)
         .write_stdin(commands)
         .output()
         .unwrap();
