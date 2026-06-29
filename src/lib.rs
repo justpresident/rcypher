@@ -114,7 +114,7 @@ pub use auth::{FactorKind, check_factor_password};
 pub use container::{LockedContainer, UnlockedContainer, backup_path};
 pub use crypto::{Argon2Params, Cypher, EncryptionKey};
 pub use data_container::DataContainer;
-pub use file_io::{load_encrypted, save_encrypted};
+pub use file_io::{load_encrypted, persist_atomically, save_encrypted};
 pub use security::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
 #[cfg(feature = "storage")]
 pub use storage::{EncryptedValue, SecretStore, ValueEntry};

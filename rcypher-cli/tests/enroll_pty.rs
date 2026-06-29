@@ -93,6 +93,83 @@ fn put_history_replays_the_command_without_its_value() {
     p.exp_eof().unwrap();
 }
 
+#[test]
+fn failed_command_is_recorded_and_recallable() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_store(&path, "primary", "test_password");
+
+    let mut p = spawn_session(&path);
+    // A `get` for a missing key fails…
+    p.send_line("get no-such-key").unwrap();
+    p.exp_string("No keys matching 'no-such-key' found")
+        .unwrap();
+    // …but the failed command is still recorded, so Up recalls it for a quick fix.
+    p.send("\x1b[A").unwrap();
+    p.send_line("").unwrap();
+    p.exp_string("No keys matching 'no-such-key' found")
+        .unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+}
+
+#[test]
+fn value_prompt_has_no_history_navigation() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_store(&path, "primary", "test_password");
+
+    let mut p = spawn_session(&path);
+    // Put a command (and its key) into the session history first.
+    p.send_line("put first").unwrap();
+    p.exp_string("echoed; not saved in history").unwrap();
+    p.send_line("first-value").unwrap();
+    p.exp_string("first stored").unwrap();
+
+    // At the value prompt, Up must be a no-op: its editor carries no history, so it
+    // can't recall a previous command line into the value.
+    p.send_line("put second").unwrap();
+    p.exp_string("Value for 'second'").unwrap();
+    p.send("\x1b[A").unwrap();
+    p.send_line("second-value").unwrap();
+    p.exp_string("second stored").unwrap();
+
+    // The stored value is exactly what was typed — Up injected nothing.
+    p.send_line("get second").unwrap();
+    p.exp_string("second: second-value").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+}
+
+#[test]
+fn killed_value_text_does_not_leak_into_a_later_command() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_store(&path, "primary", "test_password");
+
+    let mut p = spawn_session(&path);
+    p.send_line("put secret-key").unwrap();
+    p.exp_string("Value for 'secret-key'").unwrap();
+    // Type a secret, then kill the whole line (Ctrl-U) into the value editor's kill
+    // ring, and submit an empty value.
+    p.send("supersecretvalue").unwrap();
+    p.send_control('u').unwrap();
+    p.send_line("").unwrap();
+    p.exp_string("secret-key stored").unwrap();
+
+    // Back at the main prompt, yank (Ctrl-Y). The session editor's kill ring is
+    // separate from the (now dropped) value editor's, so nothing is pasted: the
+    // command we run is exactly `zzz`, never the killed secret.
+    p.send_control('y').unwrap();
+    p.send_line("zzz").unwrap();
+    p.exp_string("No such command 'zzz'").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+}
+
 /// True iff `password` unlocks the store at `path` and, after unlock, the factor
 /// named `name` is present — exercising the public load/unlock path. (Factor names
 /// are opaque encrypted ids pre-unlock, so the name is verified after unlocking.)

@@ -10,7 +10,14 @@ minor; features and fixes bump the patch).
 ### Changed
 - `put KEY` now reads the value in a separate echoed line-editor prompt. Long
   values remain comfortable to type or paste, while neither the command nor the
-  value is retained in command history.
+  value is retained in command history. The value prompt uses its own editor, so
+  it has no history navigation and the value never enters the session editor's
+  state.
+- Failed interactive commands (e.g. `get` for a missing key) are now kept in
+  history so they can be recalled with Up and corrected. `put` still records only
+  the canonical `put KEY`, never a value.
+- Interactive commands tolerate any run of spaces and tabs between a command and
+  its argument.
 - Unsafe test-only CLI flags are compiled out of release builds.
 
 ### Security
@@ -19,7 +26,11 @@ minor; features and fixes bump the patch).
   the key used for data saved after MFA is enabled or a factor is revoked.
 - Full-file decryption writes through a private `0600` temporary file and only
   atomically replaces the requested destination after successful authentication.
-  Failed decryption leaves an existing destination untouched.
+  Failed decryption leaves an existing destination untouched. A symlinked output
+  is written *through* to its real target rather than replaced by a regular file.
+- All file writes (store saves, backups, and full-file encrypt/decrypt) fsync
+  both the file contents and the directory entry, so a crash leaves either the
+  previous file or the complete new one — never a truncated or empty file.
 - Updated `rand` past RUSTSEC-2026-0097 and added a RustSec audit gate to CI.
 
 ## [0.3.0] - 2026-06-27

@@ -551,6 +551,60 @@ fn failed_decrypt_preserves_existing_output() {
     assert_eq!(fs::read(&output_path).unwrap(), b"keep this");
 }
 
+/// A symlinked `--output` is written *through* to its real target rather than
+/// being replaced by a regular file, and the result is still private (0600).
+#[cfg(unix)]
+#[test]
+fn decrypt_writes_through_a_symlinked_output() {
+    use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, encrypted_path) = temp_test_file();
+    let link_dir = TempDir::new().unwrap();
+    let real_target = link_dir.path().join("real_output");
+    let link_path = link_dir.path().join("link_output");
+    fs::write(&input_path, b"plaintext through a link").unwrap();
+
+    Command::new(cargo::cargo_bin!("rcypher"))
+        .arg("--encrypt")
+        .arg("--insecure-password")
+        .arg("pw")
+        .arg("--insecure-allow-debugging")
+        .arg("--output")
+        .arg(&encrypted_path)
+        .arg(&input_path)
+        .assert()
+        .success();
+
+    fs::write(&real_target, b"stale contents").unwrap();
+    symlink(&real_target, &link_path).unwrap();
+
+    Command::new(cargo::cargo_bin!("rcypher"))
+        .arg("--decrypt")
+        .arg("--insecure-password")
+        .arg("pw")
+        .arg("--insecure-allow-debugging")
+        .arg("--output")
+        .arg(&link_path)
+        .arg(&encrypted_path)
+        .assert()
+        .success();
+
+    // The link is still a link, its target now holds the plaintext, and the
+    // written file is owner-only.
+    assert!(
+        fs::symlink_metadata(&link_path)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read(&real_target).unwrap(), b"plaintext through a link");
+    assert_eq!(
+        fs::metadata(&real_target).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}
+
 // --- Multi-factor store (version 8) --------------------------------------
 
 /// Creates a version-8 single-password store at `path`, holding an empty

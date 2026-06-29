@@ -25,7 +25,6 @@ mod cli;
 use crate::cli::utils::{Spinner, SpinnerProgress};
 use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
-use nix::fcntl::{Flock, FlockArg};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use nix::sys::termios::{SetArg, Termios, tcgetattr, tcsetattr};
 use rcypher::cli::{SecurePrinter, confirm_if_weak_password, get_password};
@@ -34,14 +33,13 @@ use rcypher::{
     UnlockedContainer,
 };
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
-use std::fs::{self, OpenOptions};
+use std::fs;
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tempfile::NamedTempFile;
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
@@ -142,52 +140,67 @@ impl CliParams {
     }
 }
 
-fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
-    let cypher = Cypher::new(key);
-
-    if params.output == "-" {
-        cypher.encrypt_file(&params.filename, &mut io::stdout())?;
-    } else {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&params.output)?;
-        let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
-            Ok(l) => l,
-            Err((_, e)) => bail!(e),
-        };
-        cypher.encrypt_file(&params.filename, &mut *lock)?;
-        lock.flush()?;
-    }
-    Ok(())
+/// The two whole-file transforms the CLI drives through the same output path.
+#[derive(Clone, Copy)]
+enum FileOp {
+    Encrypt,
+    Decrypt,
 }
 
-fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
-    let cypher = Cypher::new(key);
-
-    if params.output == "-" {
-        cypher.decrypt_file(&params.filename, &mut io::stdout())?;
-    } else {
-        let output = Path::new(&params.output);
-        ensure_distinct_files(&params.filename, output)?;
-
-        let dir = match output.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => parent,
-            _ => Path::new("."),
-        };
-        let mut temp = NamedTempFile::new_in(dir)?;
-        set_private_permissions(temp.as_file())?;
-
-        // `decrypt_file` verifies the input HMAC before emitting plaintext. Any
-        // failure drops and removes this private temporary file, leaving an
-        // existing destination untouched.
-        cypher.decrypt_file(&params.filename, temp.as_file_mut())?;
-        temp.as_file_mut().flush()?;
-        temp.as_file().sync_all()?;
-        temp.persist(output)?;
+impl FileOp {
+    /// Streams this transform from `input` into `out`.
+    fn apply(self, cypher: &Cypher, input: &Path, out: &mut impl io::Write) -> Result<()> {
+        match self {
+            Self::Encrypt => cypher.encrypt_file(input, out),
+            Self::Decrypt => cypher.decrypt_file(input, out),
+        }
     }
-    Ok(())
+}
+
+/// Streams a whole-file transform from `params.filename` to `params.output`.
+///
+/// To stdout (`-`) it streams directly. To a real file it resolves a symlinked
+/// destination to its target (so the link is written *through* rather than
+/// replaced), rejects in-place aliasing, then replaces the destination atomically
+/// and durably via a private `0600` temp (see `persist_atomically`). The temp is
+/// only renamed into place after the transform fully succeeds, so a wrong password
+/// or tampered input — which `decrypt_file` detects before emitting any plaintext —
+/// discards the temp and leaves an existing destination untouched.
+fn run_file_transform(params: &CliParams, key: EncryptionKey, op: FileOp) -> Result<()> {
+    let cypher = Cypher::new(key);
+    let input = params.filename.as_path();
+    if params.output == "-" {
+        op.apply(&cypher, input, &mut io::stdout())
+    } else {
+        let output = resolve_symlinks(Path::new(&params.output))?;
+        ensure_distinct_files(input, &output)?;
+        rcypher::persist_atomically(&output, |file| op.apply(&cypher, input, file))
+    }
+}
+
+/// Follows a chain of symbolic links at `path`, returning the real path it points
+/// at (which need not exist yet). A non-symlink — existing or not — is returned
+/// unchanged, so a fresh output file is written where the user asked while a
+/// symlinked destination is written *through* to its target.
+fn resolve_symlinks(path: &Path) -> Result<PathBuf> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        match fs::symlink_metadata(&current) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                let target = fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(parent) if target.is_relative() => parent.join(target),
+                    _ => target,
+                };
+            }
+            _ => return Ok(current),
+        }
+    }
+    bail!(
+        "too many levels of symbolic links resolving '{}'",
+        path.display()
+    );
 }
 
 /// Rejects an in-place decrypt, including aliases through symlinks or hard links.
@@ -214,15 +227,6 @@ fn ensure_distinct_files(input: &Path, output: &Path) -> Result<()> {
         bail!("input and output refer to the same file");
     }
 
-    Ok(())
-}
-
-fn set_private_permissions(file: &fs::File) -> Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-    }
     Ok(())
 }
 
@@ -638,12 +642,12 @@ fn main() -> Result<()> {
             &argon2_params,
         )?;
         password.zeroize(); // wipe eagerly, before the (slower) encryption runs
-        run_encrypt(&params, key)
+        run_file_transform(&params, key, FileOp::Encrypt)
     } else if params.decrypt {
         let mut password = obtain_store_password(&params, &params.filename, false)?;
         let key = EncryptionKey::for_file_with_params(&password, &params.filename, &argon2_params)?;
         password.zeroize(); // wipe eagerly, before the (slower) decryption runs
-        run_decrypt(&params, key)
+        run_file_transform(&params, key, FileOp::Decrypt)
     } else if let Some(update_file) = &params.update_with {
         // Open both stores (each transparently upgraded if legacy), merge the
         // update file into the main one, and persist the main store.

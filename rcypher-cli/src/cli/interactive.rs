@@ -6,6 +6,7 @@ use rcypher::cli::{SecurePrinter, confirm_if_weak_password, prompt_new_password}
 use rcypher::{EncryptedValue, FactorKind, check_factor_password, is_debugger_attached};
 use rustyline::CompletionType;
 use rustyline::Config;
+use rustyline::DefaultEditor;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
 use rustyline::history::DefaultHistory;
@@ -24,14 +25,34 @@ enum CommandControl {
 
 struct ProcessedCommand {
     control: CommandControl,
+    /// Sanitized text to store in command history, or `None` to record nothing.
+    /// Unknown commands and malformed `put` input are never recorded, because they
+    /// may carry an inline secret value.
     history_entry: Option<String>,
+    /// The command's execution result, surfaced to the user by the caller. A
+    /// command that fails is still recorded in history (when `history_entry` is
+    /// set), so the user can recall it with Up and correct the mistake.
+    outcome: Result<()>,
 }
 
 impl ProcessedCommand {
-    fn recorded(history_entry: impl Into<String>) -> Self {
+    /// A command that ran and should be recallable from history, whether it
+    /// succeeded or failed.
+    fn recorded(history_entry: impl Into<String>, outcome: Result<()>) -> Self {
         Self {
             control: CommandControl::Continue,
             history_entry: Some(history_entry.into()),
+            outcome,
+        }
+    }
+
+    /// A command whose input must never be stored in history (an unknown command,
+    /// or a malformed `put` that may contain an inline value).
+    const fn unrecorded(outcome: Result<()>) -> Self {
+        Self {
+            control: CommandControl::Continue,
+            history_entry: None,
+            outcome,
         }
     }
 
@@ -39,6 +60,7 @@ impl ProcessedCommand {
         Self {
             control: CommandControl::Exit,
             history_entry: None,
+            outcome: Ok(()),
         }
     }
 }
@@ -156,109 +178,102 @@ impl InteractiveCli {
         Ok(())
     }
 
-    /// Dispatches one line and records the command's own sanitized history entry.
-    /// The REPL loop deliberately knows nothing about individual commands.
+    /// Dispatches one line, records the command's own sanitized history entry, and
+    /// prints any failure. The REPL loop deliberately knows nothing about
+    /// individual commands; each command owns both its history representation and
+    /// whether a failure is still worth recalling.
     fn process_line(&self, line: &str, rl: &mut InteractiveEditor) -> Result<CommandControl> {
         rl.clear_screen()?;
         let ProcessedCommand {
             control,
             history_entry,
-        } = self.process_cmd(line, rl)?;
+            outcome,
+        } = self.process_cmd(line);
         if let Some(entry) = history_entry {
             rl.add_history_entry(entry)?;
+        }
+        if let Err(err) = outcome {
+            println!("{err}");
         }
         Ok(control)
     }
 
-    fn process_cmd(&self, line: &str, rl: &mut InteractiveEditor) -> Result<ProcessedCommand> {
+    /// Arguments are split on runs of arbitrary whitespace (any mix of spaces and
+    /// tabs counts as a single delimiter), so every command tolerates sloppy
+    /// spacing. A failed *known* command is recorded in history so it can be
+    /// recalled and fixed; unknown commands and malformed `put` input are not,
+    /// since either could carry an inline secret value.
+    fn process_cmd(&self, line: &str) -> ProcessedCommand {
         let (cmd, args) = split_first_word(line);
-        let parts: Vec<&str> = line.splitn(3, ' ').collect();
         match cmd {
-            "put" => {
-                let (key, trailing) = split_first_word(args);
-                if key.is_empty() || !trailing.is_empty() {
-                    bail!("syntax: put KEY (the value is prompted separately)");
-                }
-                let Some(value) = self.prompt_put_value(key, rl)? else {
-                    return Ok(ProcessedCommand::exit());
-                };
-                let mut store = self.store.lock().expect("able to lock store");
-                self.cmd_put(key, &value, &mut store)?;
-                drop(store);
-                Ok(ProcessedCommand::recorded(format!("put {key}")))
-            }
-            "get" => {
-                if parts.len() < 2 {
-                    bail!("syntax: get REGEXP");
-                }
-                let store = self.store.lock().expect("able to lock store");
-                self.cmd_get(parts[1], &store)?;
-                Ok(ProcessedCommand::recorded(line))
-            }
-            "copy" => {
-                if parts.len() < 2 {
-                    bail!("syntax: copy KEY");
-                }
-                let store = self.store.lock().expect("able to lock store");
-                self.cmd_copy(parts[1], &store)?;
-                Ok(ProcessedCommand::recorded(line))
-            }
-            "history" => {
-                if parts.len() < 2 {
-                    bail!("syntax: history KEY");
-                }
-                let store = self.store.lock().expect("able to lock store");
-                self.cmd_history(parts[1], &store)?;
-                Ok(ProcessedCommand::recorded(line))
-            }
+            "put" => self.put_command(args),
+            "get" => first_word(args).map_or_else(
+                || ProcessedCommand::recorded(line, Err(anyhow!("syntax: get REGEXP"))),
+                |pattern| {
+                    let store = self.store.lock().expect("able to lock store");
+                    ProcessedCommand::recorded(line, self.cmd_get(pattern, &store))
+                },
+            ),
+            "copy" => first_word(args).map_or_else(
+                || ProcessedCommand::recorded(line, Err(anyhow!("syntax: copy KEY"))),
+                |key| {
+                    let store = self.store.lock().expect("able to lock store");
+                    ProcessedCommand::recorded(line, self.cmd_copy(key, &store))
+                },
+            ),
+            "history" => first_word(args).map_or_else(
+                || ProcessedCommand::recorded(line, Err(anyhow!("syntax: history KEY"))),
+                |key| {
+                    let store = self.store.lock().expect("able to lock store");
+                    ProcessedCommand::recorded(line, self.cmd_history(key, &store))
+                },
+            ),
             "search" => {
-                let pattern = if parts.len() > 1 { parts[1] } else { "" };
+                let pattern = first_word(args).unwrap_or("");
                 let store = self.store.lock().expect("able to lock store");
-                self.cmd_search(pattern, &store)?;
-                Ok(ProcessedCommand::recorded(line))
+                ProcessedCommand::recorded(line, self.cmd_search(pattern, &store))
             }
-            "del" | "rm" => {
-                if parts.len() < 2 {
-                    bail!("syntax: del KEY");
-                }
-                let mut store = self.store.lock().expect("able to lock store");
-                self.cmd_delete(parts[1], &mut store)?;
-                Ok(ProcessedCommand::recorded(line))
-            }
+            "del" | "rm" => first_word(args).map_or_else(
+                || ProcessedCommand::recorded(line, Err(anyhow!("syntax: del KEY"))),
+                |key| {
+                    let mut store = self.store.lock().expect("able to lock store");
+                    ProcessedCommand::recorded(line, self.cmd_delete(key, &mut store))
+                },
+            ),
             "auth" => {
                 let mut store = self.store.lock().expect("able to lock store");
-                self.cmd_auth(line, &mut store)?;
-                Ok(ProcessedCommand::recorded(line))
+                ProcessedCommand::recorded(line, self.cmd_auth(line, &mut store))
             }
             "help" => {
                 print_help();
-                Ok(ProcessedCommand::recorded(line))
+                ProcessedCommand::recorded(line, Ok(()))
             }
-            _ => {
-                bail!("No such command '{cmd}'\n");
-            }
+            _ => ProcessedCommand::unrecorded(Err(anyhow!("No such command '{cmd}'\n"))),
         }
     }
 
-    /// Reads a value with normal line editing and visible echo. Temporarily
-    /// removing the helper keeps the value out of completion and history state.
-    /// EOF exits the session; an interrupt cancels only this command.
-    fn prompt_put_value(
-        &self,
-        key: &str,
-        rl: &mut InteractiveEditor,
-    ) -> Result<Option<Zeroizing<String>>> {
-        rl.set_helper(None);
-        let value = rl.readline(&format!(
-            "Value for '{key}' (echoed; not saved in history): "
-        ));
-        rl.set_helper(Some(CypherCompleter::new(Arc::clone(&self.store))));
-
-        match value {
-            Ok(value) => Ok(Some(Zeroizing::new(value))),
-            Err(ReadlineError::Interrupted) => bail!("Put cancelled"),
-            Err(ReadlineError::Eof) => Ok(None),
-            Err(err) => bail!("Error reading value: {err:?}"),
+    /// Parses `put KEY`, prompts for the value on its own editor, and stores it.
+    /// Only the canonical `put KEY` is ever recorded in history — never the value,
+    /// and never the raw line of a malformed `put` that might carry an inline value.
+    fn put_command(&self, args: &str) -> ProcessedCommand {
+        let (key, trailing) = split_first_word(args);
+        if key.is_empty() || !trailing.is_empty() {
+            return ProcessedCommand::unrecorded(Err(anyhow!(
+                "syntax: put KEY (the value is prompted separately)"
+            )));
+        }
+        let history = format!("put {key}");
+        match prompt_put_value(key) {
+            // EOF at the value prompt ends the session; nothing to record.
+            Ok(None) => ProcessedCommand::exit(),
+            Ok(Some(value)) => {
+                let mut store = self.store.lock().expect("able to lock store");
+                let outcome = self.cmd_put(key, &value, &mut store);
+                drop(store);
+                ProcessedCommand::recorded(history, outcome)
+            }
+            // A cancel or read error still recalls `put KEY` (the key is not secret).
+            Err(err) => ProcessedCommand::recorded(history, Err(err)),
         }
     }
 
@@ -540,6 +555,28 @@ impl InteractiveCli {
         store.remove_factor(name)?;
         self.save(store)?;
         self.printer.print(format!("Factor '{name}' removed"))
+    }
+}
+
+/// Reads a `put` value on a dedicated, throwaway line editor with visible echo.
+///
+/// Using its own editor — with an empty history and its own kill ring — keeps the
+/// secret out of the session editor's state entirely: it can't be recalled with
+/// Up/Down and no killed fragment can later be yanked into another command. The
+/// editor and whatever buffers rustyline keeps are dropped as soon as the value is
+/// read. Returns `Ok(None)` on EOF (the caller ends the session); an interrupt
+/// cancels just this command.
+fn prompt_put_value(key: &str) -> Result<Option<Zeroizing<String>>> {
+    let config = Config::builder().auto_add_history(false).build();
+    let mut value_rl: DefaultEditor = Editor::with_config(config)?;
+    let value = value_rl.readline(&format!(
+        "Value for '{key}' (echoed; not saved in history): "
+    ));
+    match value {
+        Ok(value) => Ok(Some(Zeroizing::new(value))),
+        Err(ReadlineError::Interrupted) => bail!("Put cancelled"),
+        Err(ReadlineError::Eof) => Ok(None),
+        Err(err) => bail!("Error reading value: {err:?}"),
     }
 }
 
