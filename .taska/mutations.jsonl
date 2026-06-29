@@ -146,3 +146,5 @@
 {"seq":146,"timestamp":"2026-06-29T17:30:33.241108689Z","op":"Append","task_id":"security-secret-entry","notes":" Final consistency refactor: remove unnecessary PutCommand and make put match arm follow the same parse/call-handler/return-history structure as other commands."}
 {"seq":147,"timestamp":"2026-06-29T17:33:47.265908487Z","op":"Update","task_id":"security-secret-entry","status":"closed"}
 {"seq":148,"timestamp":"2026-06-29T17:33:47.265909489Z","op":"Append","task_id":"security-secret-entry","notes":" Removed PutCommand. The put arm now follows the same structure as other arms: parse, prompt, invoke Result<()> cmd_put, and return canonical history. Added PTY regression proving history replays put KEY rather than the value."}
+{"seq":149,"timestamp":"2026-06-29T20:47:11.537036341Z","op":"Update","task_id":"yk-release-030","status":"closed"}
+{"seq":150,"timestamp":"2026-06-29T20:47:11.537037056Z","op":"Append","task_id":"yk-release-030","notes":" Released 0.3.0 on 2026-06-28: rcypher and rcypher-cli published per docs/crate_release_process.md and release.yml built the binaries."}
