@@ -15,9 +15,11 @@ password envelope.
 - Unlock a vault when, and only when, a satisfying set of factors is presented,
   for any monotone boolean policy (any nesting of AND/OR over factors).
 - Manage factors and the policy from an unlocked vault **without re-presenting
-  every factor**, and **without re-encrypting the stored data**.
-- Keep rcypher's existing at-rest guarantees: a stable per-vault data key, a fresh
-  IV on every save, authenticated encryption, and zeroization of key material.
+  every factor**.
+- Rotate the data key whenever the active policy changes, so a weaker historical
+  snapshot cannot recover the key used by current or future saves.
+- Keep rcypher's existing at-rest guarantees: a fresh IV on every save,
+  authenticated encryption, and zeroization of key material.
 
 ## Notation and primitives
 
@@ -53,7 +55,7 @@ All key material is **64 bytes = a 32-byte AES-256 key ‖ a 32-byte HMAC key**.
 
 | Key | Obtained from | Role |
 |---|---|---|
-| **DEK** (data-encryption key) | fresh random bytes at vault creation | encrypts the stored payload; the secret the policy protects |
+| **DEK** (data-encryption key) | fresh random bytes at vault creation and every policy change | encrypts the stored payload; the secret the policy protects |
 | **auth-KEKᵢ** (one per factor) | password: `Argon2id(passwordᵢ, saltᵢ)`; FIDO2: `HKDF-SHA256(hmac-secret output, info)` (no extract salt — the output is already a uniform PRF value) | wraps that factor's policy-leaf shares |
 | **shareⱼ** (one per policy leaf) | the DEK, secret-shared down the policy | reconstructs the DEK when enough leaves are unwrapped |
 
@@ -211,9 +213,10 @@ Each operation below names the corresponding `PolicyVault` method.
 ### SAVE — `encrypt_payload` + serialize
 Serialize `header = u16(8) ‖ bincode(metadata)`, then write `header ‖ wrap(DEK,
 serialize(store), aad = header)`. The payload's `wrap` uses a fresh IV, so each
-save is fresh, unlinkable ciphertext under the **same** DEK, and binds that save's
-exact `header` as associated data. The metadata (keyslots + policy) is unchanged
-from the last management operation and is re-serialized byte-for-byte.
+save is fresh, unlinkable ciphertext under the DEK current at that save, and binds
+that save's exact `header` as associated data. The DEK remains stable between
+policy changes; `SET_POLICY` rotates it. The metadata (keyslots + policy) is
+unchanged from the last management operation and is re-serialized byte-for-byte.
 
 ### UNLOCK(secrets) — `unlock` + `decrypt_payload`
 1. Parse the file → `header` + `metadata` + encrypted payload.
@@ -245,26 +248,32 @@ leaf is treated as unsatisfied — no oracle distinguishes "wrong password" from
 ### SET_POLICY(expr) — `set_policy`
 *Requires: an unlocked DEK only — no passwords.*
 1. Parse `expr` (which references factors by **name**) → tree; validate every
-   referenced name exists, then map each leaf's name to its `id`.
-2. Recover all auth-KEKs: `auth-KEKᵢ ← unwrap(DEK, factor.authkek_under_dekᵢ)`.
-3. `distribute(DEK, new_tree)` → a fresh share per leaf.
-4. For each leaf, `wrapped_share = wrap(auth-KEK_of(leaf.factor), share)`; replace
-   the policy.
+   referenced name exists.
+2. Recover every factor name and auth-KEK under `DEK_old`.
+3. Generate `DEK_new`; re-encrypt every factor id and `authkek_under_dek` bridge
+   under it.
+4. Resolve the expression to the new opaque ids and
+   `distribute(DEK_new, new_tree)` → a fresh share per leaf.
+5. Wrap every share under its factor's unchanged auth-KEK.
+6. Clone the encoded data container, re-key all inner encrypted values from
+   `DEK_old` to `DEK_new`, and verify the clone under `DEK_new`.
+7. Commit the new vault and data together only after every prior step succeeds;
+   the next save encrypts the payload under `DEK_new`.
 
-The DEK is unchanged, so the **payload is not re-encrypted**; only the policy and
-its leaf wraps change.
+This rotation prevents a holder of an older, weaker-policy snapshot from using
+that snapshot to recover the key protecting later data.
 
 ### REMOVE_FACTOR(name) — `remove_factor`
 Resolves `name` to its `id`; refuses if the current policy still references that
 factor (change the policy first), then drops the factor and its
-`authkek_under_dek`.
+`authkek_under_dek`. The required preceding policy change has already rotated the
+DEK. Removing an enrolled-but-never-used factor needs no additional rotation.
 
 ### CHANGE_PASSWORD(name, new) — *not yet implemented; supported by design*
-Derive `auth-KEK_new`; the policy and DEK are unchanged, so the factor's shares
-are unchanged — re-wrap only **that factor's** leaves under `auth-KEK_new` and set
-`authkek_under_dek = wrap(DEK, auth-KEK_new)`. The DEK, the payload, and all other
-factors are untouched: a password change costs one keyslot re-wrap, never a vault
-re-encryption.
+Derive `auth-KEK_new`, then perform the same DEK rotation as `SET_POLICY` while
+wrapping that factor's new shares under `auth-KEK_new`. Rotation is necessary for
+revocation: otherwise an old snapshot plus the old password would still reveal
+the current data key.
 
 ## Worked example: `p1 OR (p2 AND p3)`, DEK = `D`
 
@@ -294,10 +303,10 @@ Unlock outcomes:
 
 ## Security properties and limitations
 
-- **Stable key, fresh IV per save.** The DEK is generated once and reused for the
-  vault's life; every save re-encrypts the payload under it with a fresh IV. The
-  data key is never re-derived per save (the original design never did this
-  either — the password is zeroized after the one-time derivation).
+- **Policy changes rotate the key; ordinary saves use fresh IVs.** The DEK is
+  stable between policy changes, and every save uses a fresh IV. `SET_POLICY`
+  generates a new DEK and re-keys the store, preventing a weaker historical
+  snapshot from decrypting data saved under the new policy.
 - **At-rest cost against a password is unchanged.** An attacker with the file must
   still break Argon2id on a keyslot to recover an `auth-KEK`. The envelope/DEK
   layer adds no shortcut.
@@ -329,10 +338,9 @@ Unlock outcomes:
   branch, so without this binding an attacker could strip the policy down to the
   original `p1` leaf, get the victim to unlock with `p1` alone, and have the
   weakened policy persist on the next save.
-- **No rekeying on password change** (LUKS-style, intentional): changing or
-  removing a factor re-wraps keyslots but does not rotate the DEK or re-encrypt
-  the data. True rekeying (new DEK + re-encrypt) is deliberately *not* performed,
-  to avoid decrypting and re-encrypting on every credential change.
+- **Revocation requires rekeying.** Policy changes rotate the DEK and re-encrypt
+  the data even though this is more expensive than a keyslot-only update. Without
+  that cost, an old snapshot would remain a path to every future save.
 - **Anti-debug.** Internal `wrap`/`unwrap` operations do not each run the
   debugger check; it is enforced once at the unlock entry point (and continuously
   by the watchdog), so the keyslot operations are not a per-call oracle for it.

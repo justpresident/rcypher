@@ -102,10 +102,10 @@ fn test_commands() {
     let (_dir, file_path) = temp_test_file();
 
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 val1\n");
-    commands.extend_from_slice(b"put key1 val_new\n");
-    commands.extend_from_slice(b"put key2 val2\n");
-    commands.extend_from_slice(b"put kkey3 val2\n");
+    commands.extend_from_slice(b"put key1\nval1\n");
+    commands.extend_from_slice(b"put key1\nval_new\n");
+    commands.extend_from_slice(b"put key2\nval2\n");
+    commands.extend_from_slice(b"put kkey3\nval2\n");
 
     let _ = run_commands(&file_path, commands);
 
@@ -142,14 +142,14 @@ fn test_update_with_no_conflicts() {
 
     // Create main storage with some entries
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
-    commands.extend_from_slice(b"put key2 value2\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
+    commands.extend_from_slice(b"put key2\nvalue2\n");
     let _ = run_commands(&main_path, commands);
 
     // Create update storage with same entries
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
-    commands.extend_from_slice(b"put key2 value2\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
+    commands.extend_from_slice(b"put key2\nvalue2\n");
     let _ = run_commands(&update_path, commands);
 
     // Run update-with
@@ -177,14 +177,14 @@ fn test_update_with_new_keys() {
 
     // Create main storage
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
     let _ = run_commands(&main_path, commands);
 
     // Create update storage with additional keys
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
-    commands.extend_from_slice(b"put key2 value2\n");
-    commands.extend_from_slice(b"put key3 value3\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
+    commands.extend_from_slice(b"put key2\nvalue2\n");
+    commands.extend_from_slice(b"put key3\nvalue3\n");
     let _ = run_commands(&update_path, commands);
 
     // Run update-with and auto-apply
@@ -224,8 +224,8 @@ fn test_update_with_conflicts() {
 
     // Create main storage
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 old_value\n");
-    commands.extend_from_slice(b"put key2 value2\n");
+    commands.extend_from_slice(b"put key1\nold_value\n");
+    commands.extend_from_slice(b"put key2\nvalue2\n");
     let _ = run_commands(&main_path, commands);
 
     // Wait a bit to ensure different timestamp
@@ -233,8 +233,8 @@ fn test_update_with_conflicts() {
 
     // Create update storage with conflicting value
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 new_value\n");
-    commands.extend_from_slice(b"put key2 value2\n");
+    commands.extend_from_slice(b"put key1\nnew_value\n");
+    commands.extend_from_slice(b"put key2\nvalue2\n");
     let _ = run_commands(&update_path, commands);
 
     // Run update-with
@@ -271,14 +271,14 @@ fn test_update_with_interactive_mode() {
 
     // Create main storage
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
     let _ = run_commands(&main_path, commands);
 
     // Create update storage with new keys
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
-    commands.extend_from_slice(b"put key2 accept_this\n");
-    commands.extend_from_slice(b"put key3 reject_this\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
+    commands.extend_from_slice(b"put key2\naccept_this\n");
+    commands.extend_from_slice(b"put key3\nreject_this\n");
     let _ = run_commands(&update_path, commands);
 
     // Run update-with in interactive mode: choose interactive, accept first, reject second
@@ -322,13 +322,13 @@ fn test_update_with_cancel() {
 
     // Create main storage
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
     let _ = run_commands(&main_path, commands);
 
     // Create update storage with new key
     let mut commands = Vec::new();
-    commands.extend_from_slice(b"put key1 value1\n");
-    commands.extend_from_slice(b"put key2 value2\n");
+    commands.extend_from_slice(b"put key1\nvalue1\n");
+    commands.extend_from_slice(b"put key2\nvalue2\n");
     let _ = run_commands(&update_path, commands);
 
     // Run update-with and cancel
@@ -402,7 +402,7 @@ fn test_del_nonexistent_key() {
 #[test]
 fn test_rm_alias() {
     let (_dir, file_path) = temp_test_file();
-    let output = run_commands_str(&file_path, "put mykey myval\nrm mykey\nget mykey\n");
+    let output = run_commands_str(&file_path, "put mykey\nmyval\nrm mykey\nget mykey\n");
     assert!(
         output.contains("mykey stored")
             || output.contains("mykey deleted")
@@ -416,7 +416,7 @@ fn test_search_command() {
     // populate
     run_commands(
         &file_path,
-        b"put search_key1 v1\nput search_key2 v2\nput other_key v3\n".to_vec(),
+        b"put search_key1\nv1\nput search_key2\nv2\nput other_key\nv3\n".to_vec(),
     );
 
     let output = run_commands_str(&file_path, "search search_key\n");
@@ -430,7 +430,7 @@ fn test_search_command() {
 #[test]
 fn test_copy_single_match() {
     let (_dir, file_path) = temp_test_file();
-    run_commands(&file_path, b"put copy_single_key secret_value\n".to_vec());
+    run_commands(&file_path, b"put copy_single_key\nsecret_value\n".to_vec());
 
     // copy should succeed (clipboard may not work in CI but the command should not error out)
     let output = run_commands_str(&file_path, "copy copy_single_key\n");
@@ -450,7 +450,7 @@ fn test_copy_multiple_matches() {
     let (_dir, file_path) = temp_test_file();
     run_commands(
         &file_path,
-        b"put multi_key_1 val1\nput multi_key_2 val2\n".to_vec(),
+        b"put multi_key_1\nval1\nput multi_key_2\nval2\n".to_vec(),
     );
     let output = run_commands_str(&file_path, "copy multi_key_.*\n");
     assert!(
@@ -461,8 +461,8 @@ fn test_copy_multiple_matches() {
 #[test]
 fn test_put_syntax_error() {
     let (_dir, file_path) = temp_test_file();
-    let output = run_commands_str(&file_path, "put only_key\n");
-    assert!(output.contains("syntax") || output.contains("put KEY VAL"));
+    let output = run_commands_str(&file_path, "put only_key inline_value\n");
+    assert!(output.contains("syntax") || output.contains("prompted separately"));
 }
 
 #[test]
@@ -507,6 +507,48 @@ fn test_encrypt_decrypt_with_output_file() {
 
     let result = fs::read(&decrypted_path).unwrap();
     assert_eq!(result, test_data);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        assert_eq!(
+            fs::metadata(&decrypted_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn failed_decrypt_preserves_existing_output() {
+    let (_dir, input_path) = temp_test_file();
+    let (_dir2, encrypted_path) = temp_test_file();
+    let (_dir3, output_path) = temp_test_file();
+    fs::write(&input_path, b"secret input").unwrap();
+
+    Command::new(cargo::cargo_bin!("rcypher"))
+        .arg("--encrypt")
+        .arg("--insecure-password")
+        .arg("right-password")
+        .arg("--insecure-allow-debugging")
+        .arg("--output")
+        .arg(&encrypted_path)
+        .arg(&input_path)
+        .assert()
+        .success();
+
+    fs::write(&output_path, b"keep this").unwrap();
+    Command::new(cargo::cargo_bin!("rcypher"))
+        .arg("--decrypt")
+        .arg("--insecure-password")
+        .arg("wrong-password")
+        .arg("--insecure-allow-debugging")
+        .arg("--output")
+        .arg(&output_path)
+        .arg(&encrypted_path)
+        .assert()
+        .failure();
+
+    assert_eq!(fs::read(&output_path).unwrap(), b"keep this");
 }
 
 // --- Multi-factor store (version 8) --------------------------------------
@@ -533,7 +575,7 @@ fn test_store_put_get_roundtrip() {
     create_store(&file_path, "main", "test_password");
 
     // First run: unlock via the password factor, store two keys, save back.
-    run_commands(&file_path, b"put key1 val1\nput key2 val2\n".to_vec());
+    run_commands(&file_path, b"put key1\nval1\nput key2\nval2\n".to_vec());
 
     // The store must still be in the version-8 format after a save.
     let head = fs::read(&file_path).unwrap();
@@ -658,7 +700,7 @@ fn test_new_store_is_v8() {
     let (_dir, file_path) = temp_test_file();
     // A store created through the normal flow now uses the version-8 format with
     // a single "password" factor.
-    run_commands(&file_path, b"put k v\n".to_vec());
+    run_commands(&file_path, b"put k\nv\n".to_vec());
 
     let head = fs::read(&file_path).unwrap();
     assert_eq!(&head[..2], &[0u8, 8] /* V8 tag */);
@@ -680,7 +722,7 @@ fn test_legacy_store_auto_converts() {
 
     // Opening it and writing triggers the transparent upgrade: the original is
     // backed up to <path>.bak and the file is rewritten in the current (v8) format.
-    run_commands(&file_path, b"put k v\n".to_vec());
+    run_commands(&file_path, b"put k\nv\n".to_vec());
 
     let bak = {
         let mut p = file_path.clone().into_os_string();

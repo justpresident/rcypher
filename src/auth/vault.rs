@@ -172,24 +172,69 @@ impl PolicyVault {
     }
 
     /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and fido2)`),
-    /// re-distributing the DEK across the new tree. Recovers every factor's
-    /// auth-KEK from the DEK, so only an unlocked vault is required.
+    /// rotating the DEK and re-distributing the new key across the new tree.
+    ///
+    /// Rotation is required for revocation: without it, an older snapshot protected
+    /// by a weaker policy would reveal the same DEK used by all future snapshots.
+    /// The container facade uses [`rotated_with_policy`](Self::rotated_with_policy)
+    /// directly so it can re-key its payload before committing the new vault.
+    #[cfg(test)]
     pub fn set_policy(&mut self, expr: &str) -> Result<()> {
+        *self = self.rotated_with_policy(expr)?;
+        Ok(())
+    }
+
+    /// Builds the vault produced by changing to `expr`, with a fresh DEK.
+    ///
+    /// The current vault is left untouched on every error. Factor names and
+    /// auth-KEK bridges are re-encrypted under the new DEK, then fresh policy
+    /// shares are distributed under the new opaque factor ids.
+    pub(crate) fn rotated_with_policy(&self, expr: &str) -> Result<Self> {
         let parsed = parse_policy(expr)?;
-        let known: HashSet<String> = self
+        let names: Vec<String> = self
             .factors
             .iter()
-            .map(|f| self.name_for_id(&f.id))
-            .collect();
+            .map(|f| decrypt_factor_name(&self.dek_cypher(), &f.id))
+            .collect::<Result<_>>()?;
+        let known: HashSet<String> = names.iter().cloned().collect();
         validate_factors(&parsed, &known)?;
-        // The parser produced name leaves; resolve them to opaque factor ids.
+
+        let mut old_authkeks = self.recover_all_authkeks()?;
+        let dek = generate_key_material()?;
+        let dek_cypher = cypher_from_material(&dek, CypherVersion::default());
+        let mut factors = Vec::with_capacity(self.factors.len());
+        let mut ids_by_name = HashMap::with_capacity(self.factors.len());
+        let mut authkeks = HashMap::with_capacity(self.factors.len());
+
+        for (factor, name) in self.factors.iter().zip(names) {
+            let authkek = old_authkeks
+                .remove(&factor.id)
+                .ok_or_else(|| anyhow!("missing auth-KEK for factor '{name}'"))?;
+            let id = encrypt_factor_name(&dek_cypher, &name)?;
+            factors.push(Factor {
+                id: id.clone(),
+                kind: factor.kind.clone(),
+                authkek_under_dek: dek_cypher.encrypt_with_aad(authkek.as_slice(), &[])?,
+            });
+            ids_by_name.insert(name, id.clone());
+            authkeks.insert(id, authkek);
+        }
+
+        // The parser produced name leaves; resolve them to the freshly encrypted
+        // factor ids before sharing the new DEK across the policy.
         let template = parsed.resolve(&|name| {
-            self.id_for_name(name)
+            ids_by_name
+                .get(name)
+                .cloned()
                 .ok_or_else(|| anyhow!("unknown factor '{name}'"))
         })?;
-        let authkeks = self.recover_all_authkeks()?;
-        self.policy = distribute_and_wrap(&template, &self.dek, &authkeks)?;
-        Ok(())
+        let policy = distribute_and_wrap(&template, &dek, &authkeks)?;
+
+        Ok(Self {
+            factors,
+            policy,
+            dek,
+        })
     }
 
     /// The current policy as a canonical, human-readable expression (names restored).

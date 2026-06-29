@@ -34,13 +34,14 @@ use rcypher::{
     UnlockedContainer,
 };
 use rcypher::{disable_core_dumps, enable_ptrace_protection, is_debugger_attached};
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tempfile::NamedTempFile;
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Parser)]
@@ -72,16 +73,19 @@ struct CliParams {
 
     /// Don't prompt for password, use the one provided in a parameter.
     /// This is only for automated testing
+    #[cfg(debug_assertions)]
     #[arg(long, hide(true))]
     insecure_password: Option<String>,
 
     /// Use stdout to output secrets.
     /// This is only for automated testing
+    #[cfg(debug_assertions)]
     #[arg(long, action, default_value_t = false, hide(true))]
     insecure_stdout: bool,
 
     /// Allow debuggers to attach (disables ptrace protection).
     /// This is only for automated testing
+    #[cfg(debug_assertions)]
     #[arg(long, action, default_value_t = false, hide(true))]
     insecure_allow_debugging: bool,
 
@@ -99,6 +103,43 @@ struct CliParams {
 
     /// File to encrypt/decrypt or use as a store
     filename: PathBuf,
+}
+
+impl CliParams {
+    /// Test-only password supplied on the command line. Release builds have no
+    /// corresponding Clap argument and always return `None` here.
+    fn insecure_password(&self) -> Option<&str> {
+        #[cfg(debug_assertions)]
+        {
+            self.insecure_password.as_deref()
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            None
+        }
+    }
+
+    const fn insecure_stdout(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.insecure_stdout
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
+
+    const fn insecure_allow_debugging(&self) -> bool {
+        #[cfg(debug_assertions)]
+        {
+            self.insecure_allow_debugging
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            false
+        }
+    }
 }
 
 fn run_encrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
@@ -128,17 +169,59 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
     if params.output == "-" {
         cypher.decrypt_file(&params.filename, &mut io::stdout())?;
     } else {
-        let file = OpenOptions::new()
-            .create(true)
-            .truncate(true)
-            .write(true)
-            .open(&params.output)?;
-        let mut lock = match Flock::lock(file, FlockArg::LockExclusive) {
-            Ok(l) => l,
-            Err((_, e)) => bail!(e),
+        let output = Path::new(&params.output);
+        ensure_distinct_files(&params.filename, output)?;
+
+        let dir = match output.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent,
+            _ => Path::new("."),
         };
-        cypher.decrypt_file(&params.filename, &mut *lock)?;
-        lock.flush()?;
+        let mut temp = NamedTempFile::new_in(dir)?;
+        set_private_permissions(temp.as_file())?;
+
+        // `decrypt_file` verifies the input HMAC before emitting plaintext. Any
+        // failure drops and removes this private temporary file, leaving an
+        // existing destination untouched.
+        cypher.decrypt_file(&params.filename, temp.as_file_mut())?;
+        temp.as_file_mut().flush()?;
+        temp.as_file().sync_all()?;
+        temp.persist(output)?;
+    }
+    Ok(())
+}
+
+/// Rejects an in-place decrypt, including aliases through symlinks or hard links.
+fn ensure_distinct_files(input: &Path, output: &Path) -> Result<()> {
+    if input == output {
+        bail!("input and output must be different files");
+    }
+    if !output.exists() {
+        return Ok(());
+    }
+
+    let input_meta = fs::metadata(input)?;
+    let output_meta = fs::metadata(output)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        if input_meta.dev() == output_meta.dev() && input_meta.ino() == output_meta.ino() {
+            bail!("input and output refer to the same file");
+        }
+    }
+    #[cfg(not(unix))]
+    if fs::canonicalize(input)? == fs::canonicalize(output)? {
+        bail!("input and output refer to the same file");
+    }
+
+    Ok(())
+}
+
+fn set_private_permissions(file: &fs::File) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
     }
     Ok(())
 }
@@ -146,7 +229,7 @@ fn run_decrypt(params: &CliParams, key: EncryptionKey) -> Result<()> {
 fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Result<()> {
     let interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
-        params.insecure_stdout,
+        params.insecure_stdout(),
         store,
         params.filename.clone(),
         clock,
@@ -163,7 +246,7 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
 /// password once and requires it to satisfy the policy on its own.
 fn collect_passwords(locked: &mut LockedContainer, params: &CliParams) -> Result<()> {
     // Non-interactive testing path: one password, which must satisfy on its own.
-    if let Some(pw) = params.insecure_password.as_deref() {
+    if let Some(pw) = params.insecure_password() {
         locked.try_password(pw)?;
         if !locked.can_unlock() {
             bail!("the provided password does not satisfy the unlock policy");
@@ -182,9 +265,9 @@ fn obtain_store_password(
     path: &Path,
     confirm: bool,
 ) -> Result<Zeroizing<String>> {
-    params.insecure_password.as_ref().map_or_else(
+    params.insecure_password().map_or_else(
         || get_password(path, confirm),
-        |pw| Ok(Zeroizing::new(pw.clone())),
+        |pw| Ok(Zeroizing::new(pw.to_owned())),
     )
 }
 
@@ -236,7 +319,7 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
 
     // Strength-check an interactively chosen password (skip in the test-only
     // `--insecure-password` path, which is non-interactive).
-    if params.insecure_password.is_none()
+    if params.insecure_password().is_none()
         && !confirm_if_weak_password(&password, &[cli::DEFAULT_FACTOR_NAME, "rcypher"])?
     {
         bail!("store creation cancelled (weak password not confirmed)");
@@ -270,7 +353,7 @@ fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
 fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
     use rcypher::cli::read_tty_confirmation;
 
-    if params.insecure_password.is_some()
+    if params.insecure_password().is_some()
         || !read_tty_confirmation("Enrol a FIDO2 security key as a second factor now? [y/N]: ")?
     {
         return Ok(());
@@ -325,7 +408,7 @@ fn acquire_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
 /// When --insecure-password is used (for testing), returns minimal parameters to speed up tests.
 /// Otherwise returns secure default parameters for production use.
 fn get_argon2_params(params: &CliParams) -> Argon2Params {
-    if params.insecure_password.is_some() {
+    if params.insecure_password().is_some() {
         Argon2Params::insecure()
     } else {
         Argon2Params::default()
@@ -523,7 +606,7 @@ fn main() -> Result<()> {
     let params = CliParams::parse();
 
     // Enable ptrace self-protection to prevent debuggers from attaching
-    if !params.insecure_allow_debugging
+    if !params.insecure_allow_debugging()
         && let Err(_) = enable_ptrace_protection()
     {
         std::process::exit(1);
@@ -576,7 +659,7 @@ fn main() -> Result<()> {
             &update_cypher,
             main.data_mut(),
             update.data(),
-            SecurePrinter::new(params.insecure_stdout),
+            SecurePrinter::new(params.insecure_stdout()),
         )?;
         if changed {
             main.save(&params.filename)?;

@@ -340,6 +340,48 @@ fn test_reencrypt_rekeys_all_values_and_history() {
 }
 
 #[test]
+fn test_policy_change_rekeys_stored_values_and_history() {
+    let mut container = UnlockedContainer::create_with_params(
+        "primary",
+        "alpha-vault-pass",
+        SecretStore::new(),
+        &Argon2Params::insecure(),
+    )
+    .unwrap();
+    let old_cypher = container.cypher();
+    container.data_mut().put_ts(
+        "key".to_string(),
+        EncryptedValue::encrypt(&old_cypher, "old value").unwrap(),
+        100,
+    );
+    container.data_mut().put_ts(
+        "key".to_string(),
+        EncryptedValue::encrypt(&old_cypher, "new value").unwrap(),
+        200,
+    );
+
+    container
+        .enroll_password("second", "bravo-vault-pass")
+        .unwrap();
+    container.set_policy("primary and second").unwrap();
+
+    let new_cypher = container.cypher();
+    let history = container.data().history("key").unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|entry| entry.value.decrypt(&new_cypher).unwrap().to_string())
+            .collect::<Vec<_>>(),
+        ["old value", "new value"]
+    );
+    assert!(
+        history
+            .iter()
+            .all(|entry| entry.value.decrypt(&old_cypher).is_err())
+    );
+}
+
+#[test]
 fn test_storage_ordering() {
     let mut storage = SecretStore::new();
 

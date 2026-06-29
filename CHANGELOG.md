@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format is based on
 pre-1.0 [Semantic Versioning](https://semver.org/) (breaking changes bump the
 minor; features and fixes bump the patch).
 
+## [Unreleased]
+
+### Changed
+- `put KEY` now reads the value in a separate echoed line-editor prompt. Long
+  values remain comfortable to type or paste, while neither the command nor the
+  value is retained in command history.
+- Unsafe test-only CLI flags are compiled out of release builds.
+
+### Security
+- Changing an access policy now rotates the DEK and re-keys the store before the
+  new policy is committed. A weaker historical snapshot can no longer recover
+  the key used for data saved after MFA is enabled or a factor is revoked.
+- Full-file decryption writes through a private `0600` temporary file and only
+  atomically replaces the requested destination after successful authentication.
+  Failed decryption leaves an existing destination untouched.
+- Updated `rand` past RUSTSEC-2026-0097 and added a RustSec audit gate to CI.
+
 ## [0.3.0] - 2026-06-27
 
 ### Added

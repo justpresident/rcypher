@@ -8,11 +8,40 @@ use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::Editor;
 use rustyline::error::ReadlineError;
+use rustyline::history::DefaultHistory;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
+
+type InteractiveEditor = Editor<CypherCompleter, DefaultHistory>;
+
+enum CommandControl {
+    Continue,
+    Exit,
+}
+
+struct ProcessedCommand {
+    control: CommandControl,
+    history_entry: Option<String>,
+}
+
+impl ProcessedCommand {
+    fn recorded(history_entry: impl Into<String>) -> Self {
+        Self {
+            control: CommandControl::Continue,
+            history_entry: Some(history_entry.into()),
+        }
+    }
+
+    const fn exit() -> Self {
+        Self {
+            control: CommandControl::Exit,
+            history_entry: None,
+        }
+    }
+}
 
 pub struct InteractiveCli {
     prompt: String,
@@ -54,7 +83,8 @@ impl InteractiveCli {
     pub fn run(self) -> Result<()> {
         let config = Config::builder()
             .completion_type(CompletionType::List)
-            .auto_add_history(true)
+            // Commands provide their own sanitized history representation.
+            .auto_add_history(false)
             .history_ignore_space(true)
             .history_ignore_dups(true)?
             .max_history_size(5)?
@@ -63,7 +93,7 @@ impl InteractiveCli {
         // The completer shares the same locked store, so Tab completion reads the
         // current keys and factor names directly.
         let completer = CypherCompleter::new(Arc::clone(&self.store));
-        let mut rl = Editor::with_config(config)?;
+        let mut rl: InteractiveEditor = Editor::with_config(config)?;
         rl.set_helper(Some(completer));
 
         // Signal to the security timer that idle timeout tracking has started
@@ -92,16 +122,20 @@ impl InteractiveCli {
                 Ok(mut input_line) => {
                     let line = input_line.trim();
                     if line.is_empty() {
+                        input_line.zeroize();
                         continue;
                     }
 
-                    rl.clear_screen()?;
-
-                    if let Err(err) = self.process_cmd(line) {
-                        println!("{err}");
-                    } else {
-                        self.last_activity
-                            .store(current_unix_secs(), Ordering::Relaxed);
+                    match self.process_line(line, &mut rl) {
+                        Ok(CommandControl::Continue) => {
+                            self.last_activity
+                                .store(current_unix_secs(), Ordering::Relaxed);
+                        }
+                        Ok(CommandControl::Exit) => {
+                            input_line.zeroize();
+                            break;
+                        }
+                        Err(err) => println!("{err}"),
                     }
 
                     input_line.zeroize();
@@ -122,53 +156,109 @@ impl InteractiveCli {
         Ok(())
     }
 
-    fn process_cmd(&self, line: &str) -> Result<()> {
+    /// Dispatches one line and records the command's own sanitized history entry.
+    /// The REPL loop deliberately knows nothing about individual commands.
+    fn process_line(&self, line: &str, rl: &mut InteractiveEditor) -> Result<CommandControl> {
+        rl.clear_screen()?;
+        let ProcessedCommand {
+            control,
+            history_entry,
+        } = self.process_cmd(line, rl)?;
+        if let Some(entry) = history_entry {
+            rl.add_history_entry(entry)?;
+        }
+        Ok(control)
+    }
+
+    fn process_cmd(&self, line: &str, rl: &mut InteractiveEditor) -> Result<ProcessedCommand> {
+        let (cmd, args) = split_first_word(line);
         let parts: Vec<&str> = line.splitn(3, ' ').collect();
-        let cmd = parts[0];
-        let mut store = self.store.lock().expect("able to lock store");
         match cmd {
             "put" => {
-                if parts.len() < 3 {
-                    bail!("syntax: put KEY VAL");
+                let (key, trailing) = split_first_word(args);
+                if key.is_empty() || !trailing.is_empty() {
+                    bail!("syntax: put KEY (the value is prompted separately)");
                 }
-                self.cmd_put(parts[1], parts[2], &mut store)
+                let Some(value) = self.prompt_put_value(key, rl)? else {
+                    return Ok(ProcessedCommand::exit());
+                };
+                let mut store = self.store.lock().expect("able to lock store");
+                self.cmd_put(key, &value, &mut store)?;
+                drop(store);
+                Ok(ProcessedCommand::recorded(format!("put {key}")))
             }
             "get" => {
                 if parts.len() < 2 {
                     bail!("syntax: get REGEXP");
                 }
-                self.cmd_get(parts[1], &store)
+                let store = self.store.lock().expect("able to lock store");
+                self.cmd_get(parts[1], &store)?;
+                Ok(ProcessedCommand::recorded(line))
             }
             "copy" => {
                 if parts.len() < 2 {
                     bail!("syntax: copy KEY");
                 }
-                self.cmd_copy(parts[1], &store)
+                let store = self.store.lock().expect("able to lock store");
+                self.cmd_copy(parts[1], &store)?;
+                Ok(ProcessedCommand::recorded(line))
             }
             "history" => {
                 if parts.len() < 2 {
                     bail!("syntax: history KEY");
                 }
-                self.cmd_history(parts[1], &store)
+                let store = self.store.lock().expect("able to lock store");
+                self.cmd_history(parts[1], &store)?;
+                Ok(ProcessedCommand::recorded(line))
             }
             "search" => {
                 let pattern = if parts.len() > 1 { parts[1] } else { "" };
-                self.cmd_search(pattern, &store)
+                let store = self.store.lock().expect("able to lock store");
+                self.cmd_search(pattern, &store)?;
+                Ok(ProcessedCommand::recorded(line))
             }
             "del" | "rm" => {
                 if parts.len() < 2 {
                     bail!("syntax: del KEY");
                 }
-                self.cmd_delete(parts[1], &mut store)
+                let mut store = self.store.lock().expect("able to lock store");
+                self.cmd_delete(parts[1], &mut store)?;
+                Ok(ProcessedCommand::recorded(line))
             }
-            "auth" => self.cmd_auth(line, &mut store),
+            "auth" => {
+                let mut store = self.store.lock().expect("able to lock store");
+                self.cmd_auth(line, &mut store)?;
+                Ok(ProcessedCommand::recorded(line))
+            }
             "help" => {
                 print_help();
-                Ok(())
+                Ok(ProcessedCommand::recorded(line))
             }
             _ => {
                 bail!("No such command '{cmd}'\n");
             }
+        }
+    }
+
+    /// Reads a value with normal line editing and visible echo. Temporarily
+    /// removing the helper keeps the value out of completion and history state.
+    /// EOF exits the session; an interrupt cancels only this command.
+    fn prompt_put_value(
+        &self,
+        key: &str,
+        rl: &mut InteractiveEditor,
+    ) -> Result<Option<Zeroizing<String>>> {
+        rl.set_helper(None);
+        let value = rl.readline(&format!(
+            "Value for '{key}' (echoed; not saved in history): "
+        ));
+        rl.set_helper(Some(CypherCompleter::new(Arc::clone(&self.store))));
+
+        match value {
+            Ok(value) => Ok(Some(Zeroizing::new(value))),
+            Err(ReadlineError::Interrupted) => bail!("Put cancelled"),
+            Err(ReadlineError::Eof) => Ok(None),
+            Err(err) => bail!("Error reading value: {err:?}"),
         }
     }
 
@@ -479,7 +569,7 @@ fn clear_screen() {
 
 fn print_help() {
     println!("USER COMMANDS:");
-    println!("  put KEY VAL     - Store a key-value pair");
+    println!("  put KEY         - Store a value (prompted with echo, excluded from history)");
     println!("  get REGEXP      - Get values for keys matching regexp");
     println!("  copy KEY        - Copy key value into system clipboard");
     println!("  history KEY     - Show history of changes for a key");

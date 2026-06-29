@@ -369,8 +369,25 @@ impl<T: DataContainer> UnlockedContainer<T> {
     }
 
     /// Sets the access policy from an expression (e.g. `pass1 or (pass2 and fido2)`).
+    ///
+    /// This rotates the data-encryption key before installing the new policy, so a
+    /// weaker historical snapshot cannot recover the key used by this or future
+    /// saves. The data is cloned through its encoded form, re-keyed, and verified
+    /// before either the data or vault is replaced, leaving this container unchanged
+    /// if any step fails.
     pub fn set_policy(&mut self, expr: &str) -> Result<()> {
-        self.vault.set_policy(expr)
+        let next_vault = self.vault.rotated_with_policy(expr)?;
+        let old_cypher = self.vault.cypher();
+        let new_cypher = next_vault.cypher();
+
+        let encoded = self.data.encode()?;
+        let mut next_data = T::decode(&encoded)?;
+        next_data.rekey(&old_cypher, &new_cypher)?;
+        next_data.verify(&new_cypher)?;
+
+        self.data = next_data;
+        self.vault = next_vault;
+        Ok(())
     }
 
     /// Removes a factor. Fails if the current policy still references it.
@@ -613,5 +630,45 @@ mod tests {
         // The DEK still reconstructs from `primary` alone, but the payload was
         // bound to the original `primary OR p2` header — so the open fails.
         assert!(try_open(&tampered, "p1pass").is_err());
+    }
+
+    #[test]
+    fn policy_change_rotates_dek_against_old_snapshots() {
+        let mut store = new_store("alpha-vault-pass", "current data");
+        let old_bytes = store.to_vec().unwrap();
+
+        store.enroll_password("second", "bravo-vault-pass").unwrap();
+        store.set_policy("primary and second").unwrap();
+        let current_bytes = store.to_vec().unwrap();
+
+        // Recover the old vault exactly as an attacker with the historical
+        // password-only snapshot could.
+        let mut old_locked = open(&old_bytes);
+        assert!(old_locked.try_password("alpha-vault-pass").unwrap());
+        let old = old_locked.unlock::<Text>().unwrap();
+
+        // The old DEK must not authenticate the current payload, even when the
+        // attacker supplies the current file's exact authenticated header as AAD.
+        let parsed = FileContainerV8::parse(&current_bytes).unwrap();
+        let payload_offset = current_bytes.len() - parsed.payload().len();
+        assert!(
+            old.vault
+                .decrypt_payload(
+                    parsed.payload(),
+                    &current_bytes[..payload_offset],
+                    CypherVersion::default(),
+                )
+                .is_err()
+        );
+
+        // The new policy and both factors still unlock the rotated vault.
+        let mut current_locked = open(&current_bytes);
+        assert!(current_locked.try_password("alpha-vault-pass").unwrap());
+        assert!(!current_locked.can_unlock());
+        assert!(current_locked.try_password("bravo-vault-pass").unwrap());
+        assert_eq!(
+            current_locked.unlock::<Text>().unwrap().data().0,
+            "current data"
+        );
     }
 }

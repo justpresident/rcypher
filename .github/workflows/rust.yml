@@ -23,6 +23,16 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+
+      # Bincode is explicitly tracked for a versioned format migration in the
+      # local task `bincode-migration`. Ignore only that advisory while failing
+      # on every other warning category (including future unmaintained/unsound
+      # dependencies) and on vulnerabilities.
+      - name: Audit dependencies
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
+
       # The `fido2` feature (on by default for rcypher-cli, and pulled in by
       # `--all-features`) builds hidapi, which needs libudev + pkg-config.
       - name: Install FIDO2 build deps

@@ -69,6 +69,30 @@ fn spawn_session(path: &Path) -> PtySession {
     spawn_command(cmd, Some(30_000)).expect("spawn under PTY")
 }
 
+#[test]
+fn put_history_replays_the_command_without_its_value() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("vault");
+    create_store(&path, "primary", "test_password");
+
+    let mut p = spawn_session(&path);
+    p.send_line("put account").unwrap();
+    p.exp_string("echoed; not saved in history").unwrap();
+    p.send_line("first-value").unwrap();
+    p.exp_string("account stored").unwrap();
+
+    // Up recalls the sanitized command. If the value were retained instead,
+    // executing the recalled line would not produce another value prompt.
+    p.send("\x1b[A").unwrap();
+    p.send_line("").unwrap();
+    p.exp_string("Value for 'account'").unwrap();
+    p.send_line("second-value").unwrap();
+    p.exp_string("account stored").unwrap();
+
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+}
+
 /// True iff `password` unlocks the store at `path` and, after unlock, the factor
 /// named `name` is present — exercising the public load/unlock path. (Factor names
 /// are opaque encrypted ids pre-unlock, so the name is verified after unlocking.)
@@ -239,7 +263,9 @@ fn legacy_store_auto_converts_and_backs_up_on_write() {
     // The first write triggers the upgrade: rewrites the file as v8 and backs up
     // the original. The pre-existing value survives the re-encryption, and auth
     // commands work because the converted store carries a real multi-factor policy in memory.
-    p.send_line("put x y").unwrap();
+    p.send_line("put x").unwrap();
+    p.exp_string("echoed; not saved in history").unwrap();
+    p.send_line("y").unwrap();
     p.exp_string("x stored").unwrap();
     p.send_line("auth factor list").unwrap();
     p.exp_string("primary (password)").unwrap();
@@ -315,7 +341,9 @@ fn interactive_unlock_prompts_generically_and_loops() {
     p.exp_string("Factor unlocked").unwrap();
 
     // Unlocked: the interactive session is live.
-    p.send_line("put k v").unwrap();
+    p.send_line("put k").unwrap();
+    p.exp_string("echoed; not saved in history").unwrap();
+    p.send_line("v").unwrap();
     p.exp_string("k stored").unwrap();
     p.send_line("get k").unwrap();
     p.exp_string("k: v").unwrap();

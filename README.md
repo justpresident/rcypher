@@ -25,7 +25,7 @@ $ rcypher secrets.db
 Enter Password for secrets.db:
 cypher > help
 USER COMMANDS:
-  put KEY VAL     - Store a key-value pair
+  put KEY         - Store a value (prompted with echo, excluded from history)
   get REGEXP      - Get values for keys matching regexp
   copy KEY        - Copy key value into system clipboard
   history KEY     - Show history of changes for a key
@@ -49,6 +49,11 @@ Secrets are:
 * never printed to stdout
 
 * written directly to the terminal (TTY)
+
+`put KEY` asks for the value on a separate, visibly echoed line-editor prompt.
+This keeps long values easy to type, edit, or paste while excluding both the
+`put` command and its value from command history. Because input is intentionally
+visible, avoid entering a value where someone can watch the terminal.
 
 New stores support **multi-factor unlock** (see below); legacy single-password
 stores still open with their password and are upgraded to the current format
@@ -186,9 +191,11 @@ The store payload is encrypted under a random **data-encryption key (DEK)**. The
 DEK is split across the policy tree using monotone secret sharing — an `or`
 replicates the secret to each branch, an `and` XOR-splits it — and each leaf's
 share is wrapped under that factor's key. Recovering the DEK therefore requires
-satisfying the policy. Changing the policy or adding a factor never re-encrypts
-your secrets: the DEK is stable for the life of the store, and only fresh random
-IVs change on each save. The full construction is specified in
+satisfying the policy. Enrolling an unused factor only adds its keyslot, but
+changing the active policy rotates the DEK and re-encrypts the store. Rotation
+means an older snapshot protected by a weaker policy cannot reveal the key used
+by the current vault. Saves that do not change policy keep the current DEK and use
+fresh random IVs. The full construction is specified in
 [`docs/auth-protocol.md`](docs/auth-protocol.md).
 
 ### Recovery and backup
