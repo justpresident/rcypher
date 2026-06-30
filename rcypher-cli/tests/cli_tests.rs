@@ -613,7 +613,7 @@ fn decrypt_writes_through_a_symlinked_output() {
 fn create_store(path: &Path, factor_name: &str, password: &str) {
     use rcypher::{Argon2Params, SecretStore, UnlockedContainer};
 
-    let mut store = UnlockedContainer::create_with_params(
+    let mut store = UnlockedContainer::create_with_password(
         factor_name,
         password,
         SecretStore::new(),
@@ -672,7 +672,7 @@ fn test_store_wrong_password_fails() {
 fn create_multifactor_store(path: &Path) {
     use rcypher::{Argon2Params, SecretStore, UnlockedContainer};
 
-    let mut store = UnlockedContainer::create_with_params(
+    let mut store = UnlockedContainer::create_with_password(
         "main",
         "test_password",
         SecretStore::new(),
@@ -680,7 +680,7 @@ fn create_multifactor_store(path: &Path) {
     )
     .unwrap();
     store
-        .enroll_password("backup", "recovery-secret-9")
+        .enroll_password("backup", "recovery-secret-9", &Argon2Params::insecure())
         .unwrap();
     store.set_policy("main or backup").unwrap();
     store.save(path).unwrap();

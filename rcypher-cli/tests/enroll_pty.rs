@@ -24,7 +24,7 @@ const STRONG_PASSWORD: &str = "Vermilion-Trombone-Glacier-Quartz-581";
 /// params so the binary's `--insecure-password` path unlocks it quickly and a
 /// newly enrolled factor derives fast.
 fn create_store(path: &Path, factor_name: &str, password: &str) {
-    let mut store = UnlockedContainer::create_with_params(
+    let mut store = UnlockedContainer::create_with_password(
         factor_name,
         password,
         SecretStore::new(),
@@ -168,6 +168,43 @@ fn killed_value_text_does_not_leak_into_a_later_command() {
 
     p.send_control('d').unwrap();
     p.exp_eof().unwrap();
+}
+
+/// Creating a store with no `--insecure-password` runs the library's interactive
+/// new-store flow: the FIDO2 offer (this build has the feature), then a prompted
+/// primary password, then a live session.
+#[cfg(feature = "fido2")]
+#[test]
+fn interactive_create_prompts_then_opens_a_session() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("fresh-vault");
+
+    let mut cmd = Command::new(cargo::cargo_bin!("rcypher"));
+    cmd.args(["--quiet", "--insecure-stdout", "--insecure-allow-debugging"]);
+    cmd.arg(&path);
+    cmd.env("TERM", "xterm");
+    let mut p = spawn_command(cmd, Some(30_000)).expect("spawn under PTY");
+
+    // The password is prompted first (a strong one skips the weak-password gate)…
+    p.exp_string("New password for primary").unwrap();
+    p.send_line(STRONG_PASSWORD).unwrap();
+    p.exp_string("Confirm password").unwrap();
+    p.send_line(STRONG_PASSWORD).unwrap();
+    // …then the library offers a key, which we decline (no device here anyway).
+    p.exp_string("Enrol a FIDO2 security key").unwrap();
+    p.send_line("n").unwrap();
+
+    // A single factor needs no policy prompt — the session is live.
+    p.send_line("put k").unwrap();
+    p.exp_string("echoed; not saved in history").unwrap();
+    p.send_line("v").unwrap();
+    p.exp_string("k stored").unwrap();
+    p.send_control('d').unwrap();
+    p.exp_eof().unwrap();
+
+    // The store now exists in the current (v8) format.
+    let head = fs::read(&path).unwrap();
+    assert_eq!(&head[..2], &[0u8, 8]);
 }
 
 /// True iff `password` unlocks the store at `path` and, after unlock, the factor
@@ -373,14 +410,16 @@ const P2_PASSWORD: &str = "bravo-two-vault-secret";
 
 /// Writes a version-8 vault requiring BOTH `p1` and `p2` password factors.
 fn create_and_vault(path: &Path) {
-    let mut store = UnlockedContainer::create_with_params(
+    let mut store = UnlockedContainer::create_with_password(
         "p1",
         P1_PASSWORD,
         SecretStore::new(),
         &Argon2Params::insecure(),
     )
     .unwrap();
-    store.enroll_password("p2", P2_PASSWORD).unwrap();
+    store
+        .enroll_password("p2", P2_PASSWORD, &Argon2Params::insecure())
+        .unwrap();
     store.set_policy("p1 and p2").unwrap();
     store.save(path).unwrap();
 }

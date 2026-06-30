@@ -341,7 +341,7 @@ fn test_reencrypt_rekeys_all_values_and_history() {
 
 #[test]
 fn test_policy_change_rekeys_stored_values_and_history() {
-    let mut container = UnlockedContainer::create_with_params(
+    let mut container = UnlockedContainer::create_with_password(
         "primary",
         "alpha-vault-pass",
         SecretStore::new(),
@@ -361,7 +361,7 @@ fn test_policy_change_rekeys_stored_values_and_history() {
     );
 
     container
-        .enroll_password("second", "bravo-vault-pass")
+        .enroll_password("second", "bravo-vault-pass", &Argon2Params::insecure())
         .unwrap();
     container.set_policy("primary and second").unwrap();
 

@@ -3,7 +3,9 @@ use crate::cli::completer::CypherCompleter;
 use crate::cli::utils::{copy_to_clipboard, format_timestamp};
 use anyhow::{Result, anyhow, bail};
 use rcypher::cli::{SecurePrinter, confirm_if_weak_password, prompt_new_password};
-use rcypher::{EncryptedValue, FactorKind, check_factor_password, is_debugger_attached};
+use rcypher::{
+    Argon2Params, EncryptedValue, FactorKind, check_factor_password, is_debugger_attached,
+};
 use rustyline::CompletionType;
 use rustyline::Config;
 use rustyline::DefaultEditor;
@@ -74,6 +76,9 @@ pub struct InteractiveCli {
     /// store's own responsibility.
     store: Arc<Mutex<crate::Store>>,
     filename: PathBuf,
+    /// Argon2 cost for password factors enrolled during the session (`auth factor
+    /// add password`); each password factor carries its own cost.
+    argon2: Argon2Params,
     last_activity: Arc<AtomicU64>,
     last_security_check: Arc<AtomicU64>,
 }
@@ -82,6 +87,7 @@ impl InteractiveCli {
     pub fn new(
         prompt: String,
         insecure_stdout: bool,
+        argon2: Argon2Params,
         store: crate::Store,
         filename: PathBuf,
         clock: crate::SecurityClock,
@@ -91,6 +97,7 @@ impl InteractiveCli {
             printer: SecurePrinter::new(insecure_stdout),
             store: Arc::new(Mutex::new(store)),
             filename,
+            argon2,
             last_activity: clock.last_activity,
             last_security_check: clock.last_security_check,
         }
@@ -122,7 +129,6 @@ impl InteractiveCli {
         self.last_activity
             .store(current_unix_secs(), Ordering::Relaxed);
 
-        rl.clear_screen()?;
         loop {
             if is_debugger_attached() {
                 bail!("Debugger detected");
@@ -472,12 +478,14 @@ impl InteractiveCli {
         };
         self.printer
             .print("Touch your FIDO2 security key to enrol it…")?;
-        let cred =
-            rcypher::fido2::enroll(crate::cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
+        let cred = rcypher::fido2::enroll(
+            rcypher::fido2::DEFAULT_RP_ID,
+            pin.as_ref().map(|p| p.as_str()),
+        )?;
         store.enroll_fido2(
             name,
             cred.credential_id,
-            crate::cli::FIDO2_RP_ID.to_string(),
+            rcypher::fido2::DEFAULT_RP_ID.to_string(),
             cred.salt,
             has_pin,
             &cred.raw_hmac_secret,
@@ -531,7 +539,7 @@ impl InteractiveCli {
             bail!("enrollment cancelled (weak password not confirmed)");
         }
 
-        store.enroll_password(name, &password)?;
+        store.enroll_password(name, &password, &self.argon2)?;
         password.zeroize(); // wipe as soon as the factor's key material is derived
 
         self.save(store)?;

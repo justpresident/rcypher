@@ -7,6 +7,17 @@ minor; features and fixes bump the patch).
 
 ## [Unreleased]
 
+### Added
+- `cli::prompt_until_initialized` — a reusable interactive new-store flow (the
+  creation-side counterpart to `prompt_until_unlocked`). A caller declares which
+  factors to enrol via `NewStoreConfig`/`InitFactor`/`InitFactorKind`; the flow
+  prompts for each and lets the user choose the unlock policy, returning a ready
+  unlocked container.
+- `UnlockedContainer::create_with_fido2` bootstraps a store directly from a FIDO2
+  security key, so a key-only (password-less) store can be created.
+- `fido2::DEFAULT_RP_ID`, rcypher's default relying-party id, so tools built on the
+  library interoperate without inventing their own.
+
 ### Changed
 - `put KEY` now reads the value in a separate echoed line-editor prompt. Long
   values remain comfortable to type or paste, while neither the command nor the
@@ -19,6 +30,10 @@ minor; features and fixes bump the patch).
 - Interactive commands tolerate any run of spaces and tabs between a command and
   its argument.
 - Unsafe test-only CLI flags are compiled out of release builds.
+- **API (breaking):** `UnlockedContainer::create_with_params` is renamed to
+  `create_with_password` (paired with the new `create_with_fido2`), and
+  `UnlockedContainer::enroll_password` now takes the Argon2 cost as an argument —
+  Argon2 parameters belong to a password factor rather than the container.
 
 ### Security
 - Changing an access policy now rotates the DEK and re-keys the store before the

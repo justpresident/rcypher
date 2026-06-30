@@ -30,6 +30,14 @@ use zeroize::Zeroizing;
 
 use crate::constants::{HMAC_SECRET_LEN, HmacSecretBytes, SALT_SIZE, SaltBytes};
 
+/// rcypher's default FIDO2 relying-party id, bound into enrolled credentials and
+/// replayed at unlock.
+///
+/// Tools built on the library are encouraged to use this rather than inventing
+/// their own rp id, so a key enrolled by one rcypher-based tool unlocks in another.
+/// It is stored in each factor, so it must stay stable across versions.
+pub const DEFAULT_RP_ID: &str = "rcypher";
+
 /// A FIDO2 credential enrolled for an rcypher factor, plus the `hmac-secret` it
 /// currently yields.
 ///

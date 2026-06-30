@@ -12,11 +12,15 @@
 //! - [`prompt_until_unlocked`]: the policy-unlock prompt loop over a
 //!   [`LockedContainer`](crate::LockedContainer), with a pluggable
 //!   [`UnlockProgress`] (a spinner, or [`NoProgress`]).
+//! - [`prompt_until_initialized`]: the creation-side counterpart — enrol the
+//!   factors named in a [`NewStoreConfig`] and return a fresh unlocked container.
 
+mod init;
 mod prompt;
 mod strength;
 mod unlock;
 
+pub use init::{InitFactor, InitFactorKind, NewStoreConfig, prompt_until_initialized};
 pub use prompt::{
     SecurePrinter, get_password, prompt_new_password, prompt_password, read_tty_confirmation,
 };

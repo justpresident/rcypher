@@ -20,8 +20,8 @@
 use anyhow::Result;
 use bincode::{Decode, Encode};
 use rcypher::{
-    Cypher, CypherVersion, DataContainer, EncryptionKey, LockedContainer, UnlockedContainer,
-    Zeroizing, load_encrypted, save_encrypted,
+    Argon2Params, Cypher, CypherVersion, DataContainer, EncryptionKey, LockedContainer,
+    UnlockedContainer, Zeroizing, load_encrypted, save_encrypted,
 };
 
 // An application-defined record. Any serialization works — here we use bincode,
@@ -119,10 +119,14 @@ fn multi_factor_store(secret: &AppSecret, password: &str, dir: &std::path::Path)
 
     // Create a store holding the secret, locked by a `primary` password factor,
     // then add a `recovery` password and accept EITHER one — a backup way in that
-    // doesn't lock you out if the primary password is lost. Adding a factor or
-    // changing the policy never re-encrypts the payload (the data key is stable).
+    // doesn't lock you out if the primary password is lost. Each password factor
+    // carries its own Argon2 cost; changing the policy rotates the data key.
     let mut store = UnlockedContainer::create("primary", password, secret.clone())?;
-    store.enroll_password("recovery", "another-strong-passphrase-42")?;
+    store.enroll_password(
+        "recovery",
+        "another-strong-passphrase-42",
+        &Argon2Params::default(),
+    )?;
     store.set_policy("primary or recovery")?;
     store.save(&path)?;
     println!("  saved; unlock policy = {}", store.policy_expr());

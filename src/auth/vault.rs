@@ -43,7 +43,7 @@ impl PolicyVault {
     /// Creates a new vault protected by a single password factor; the initial
     /// policy is just that factor. Enroll more factors and refine the policy with
     /// [`PolicyVault::enroll_password`] and [`PolicyVault::set_policy`].
-    pub fn create(name: &str, password: &str, params: &Argon2Params) -> Result<Self> {
+    pub fn create_with_password(name: &str, password: &str, params: &Argon2Params) -> Result<Self> {
         check_factor_password(name, password)?;
         let dek = generate_key_material()?;
         let dek_cypher = cypher_from_material(&dek, CypherVersion::default());
@@ -54,6 +54,53 @@ impl PolicyVault {
         let factor = Factor {
             id: id.clone(),
             kind,
+            authkek_under_dek: dek_cypher.encrypt_with_aad(authkek.as_slice(), &[])?,
+        };
+
+        let template = PolicyNode::Leaf(Leaf {
+            factor: id.clone(),
+            wrapped_share: Vec::new(),
+        });
+        let authkeks = HashMap::from([(id, authkek)]);
+        let policy = distribute_and_wrap(&template, &dek, &authkeks)?;
+
+        Ok(Self {
+            factors: vec![factor],
+            policy,
+            dek,
+        })
+    }
+
+    /// Creates a new vault protected by a single FIDO2 factor; the initial policy is
+    /// just that factor. The caller supplies a freshly enrolled credential and its
+    /// current `hmac-secret` output (both from [`crate::fido2`]).
+    ///
+    /// The password-free counterpart to
+    /// [`create_with_password`](Self::create_with_password); add more factors and
+    /// refine the policy with [`enroll_password`](Self::enroll_password) /
+    /// [`enroll_fido2`](Self::enroll_fido2) and [`set_policy`](Self::set_policy).
+    pub fn create_with_fido2(
+        name: &str,
+        credential_id: Vec<u8>,
+        rp_id: String,
+        salt: SaltBytes,
+        require_pin: bool,
+        raw_hmac_secret: &HmacSecretBytes,
+    ) -> Result<Self> {
+        validate_factor_name(name)?;
+        let dek = generate_key_material()?;
+        let dek_cypher = cypher_from_material(&dek, CypherVersion::default());
+
+        let authkek = fido2_kek(raw_hmac_secret)?;
+        let id = encrypt_factor_name(&dek_cypher, name)?;
+        let factor = Factor {
+            id: id.clone(),
+            kind: FactorKind::Fido2 {
+                credential_id,
+                rp_id,
+                salt,
+                require_pin,
+            },
             authkek_under_dek: dek_cypher.encrypt_with_aad(authkek.as_slice(), &[])?,
         };
 
@@ -643,7 +690,7 @@ mod tests {
 
     #[test]
     fn single_password_unlock_and_payload() {
-        let vault = PolicyVault::create("p1", "hunter2", &params()).unwrap();
+        let vault = PolicyVault::create_with_password("p1", "hunter2", &params()).unwrap();
         let blob = vault
             .encrypt_payload(b"top secret", &[], CypherVersion::default())
             .unwrap();
@@ -663,7 +710,7 @@ mod tests {
     #[test]
     fn or_and_policy() {
         // p1 OR (p2 AND p3)
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         vault.enroll_password("p2", "two", &params()).unwrap();
         vault.enroll_password("p3", "three", &params()).unwrap();
         vault.set_policy("p1 or (p2 and p3)").unwrap();
@@ -678,7 +725,7 @@ mod tests {
 
     #[test]
     fn payload_decrypts_via_either_branch() {
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         vault.enroll_password("fido2", "two", &params()).unwrap();
         vault.set_policy("p1 or fido2").unwrap();
         let blob = vault
@@ -705,7 +752,7 @@ mod tests {
 
     #[test]
     fn tightening_policy_to_and_takes_effect() {
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         vault.enroll_password("p2", "two", &params()).unwrap();
         vault.set_policy("p1 and p2").unwrap();
 
@@ -715,7 +762,7 @@ mod tests {
 
     #[test]
     fn remove_factor_rules() {
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         vault.enroll_password("p2", "two", &params()).unwrap();
         vault.set_policy("p1 or p2").unwrap();
 
@@ -727,16 +774,17 @@ mod tests {
 
     #[test]
     fn rejects_bad_factor_names_and_dupes() {
-        assert!(PolicyVault::create("and", "x", &params()).is_err());
-        assert!(PolicyVault::create("a b", "x", &params()).is_err());
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        assert!(PolicyVault::create_with_password("and", "x", &params()).is_err());
+        assert!(PolicyVault::create_with_password("a b", "x", &params()).is_err());
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         assert!(vault.enroll_password("p1", "x", &params()).is_err());
         assert!(vault.set_policy("p1 or missing").is_err()); // unknown factor
     }
 
     #[test]
     fn rejects_duplicate_password_on_enroll() {
-        let mut vault = PolicyVault::create("p1", "alpha-secret-1", &params()).unwrap();
+        let mut vault =
+            PolicyVault::create_with_password("p1", "alpha-secret-1", &params()).unwrap();
         // The same password as an existing factor is refused.
         assert!(
             vault
@@ -755,9 +803,9 @@ mod tests {
     fn rejects_password_resembling_factor_name() {
         // Equal name and password (a full shared prefix) is rejected — the footgun
         // of typing a password into the name slot and repeating it.
-        assert!(PolicyVault::create("hunter2", "hunter2", &params()).is_err());
+        assert!(PolicyVault::create_with_password("hunter2", "hunter2", &params()).is_err());
 
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         // A shared prefix longer than half the password length is rejected.
         assert!(
             vault
@@ -810,7 +858,7 @@ mod tests {
     #[test]
     fn fido2_factor_unlocks_via_or_branch() {
         let secret = fido2_secret(42);
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         enroll_fido2(&mut vault, "key", &secret);
         vault.set_policy("p1 or key").unwrap();
         let blob = vault
@@ -838,9 +886,46 @@ mod tests {
     }
 
     #[test]
+    fn create_with_fido2_bootstraps_a_key_only_vault() {
+        let secret = fido2_secret(9);
+        let vault = PolicyVault::create_with_fido2(
+            "key",
+            vec![7, 7, 7],
+            "rcypher".into(),
+            SaltBytes::default(),
+            false,
+            &secret,
+        )
+        .unwrap();
+        // The sole factor is the key; the initial policy is just that key.
+        assert_eq!(vault.policy_expr(), "key");
+
+        let blob = vault
+            .encrypt_payload(b"data", &[], CypherVersion::default())
+            .unwrap();
+
+        // The key's secret alone reconstructs the fresh DEK.
+        let mut session = UnlockSession::new(vault.header());
+        assert!(session.try_fido2_secret(&secret).unwrap());
+        let reopened = session.finish().unwrap();
+        assert_eq!(
+            reopened
+                .decrypt_payload(&blob, &[], CypherVersion::default())
+                .unwrap()
+                .as_slice(),
+            b"data"
+        );
+        assert!(reopened.factor_names().contains(&"key".to_string()));
+
+        // A different secret matches nothing.
+        let mut session = UnlockSession::new(vault.header());
+        assert!(!session.try_fido2_secret(&fido2_secret(10)).unwrap());
+    }
+
+    #[test]
     fn and_policy_needs_both_password_and_fido2() {
         let secret = fido2_secret(7);
-        let mut vault = PolicyVault::create("p1", "one", &params()).unwrap();
+        let mut vault = PolicyVault::create_with_password("p1", "one", &params()).unwrap();
         enroll_fido2(&mut vault, "key", &secret);
         vault.set_policy("p1 and key").unwrap();
 
@@ -861,7 +946,8 @@ mod tests {
     fn factor_names_are_encrypted_in_the_header() {
         // A distinctive name + a recognizable substring inside the policy.
         let mut vault =
-            PolicyVault::create("secret-bank", "a-strong-passphrase", &params()).unwrap();
+            PolicyVault::create_with_password("secret-bank", "a-strong-passphrase", &params())
+                .unwrap();
         vault
             .enroll_password("recovery-stash", "another-strong-one", &params())
             .unwrap();

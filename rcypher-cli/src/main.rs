@@ -27,7 +27,7 @@ use anyhow::{Result, bail};
 use clap::{ArgGroup, Parser};
 use nix::sys::signal::{SigSet, SigmaskHow, Signal, pthread_sigmask};
 use nix::sys::termios::{SetArg, Termios, tcgetattr, tcsetattr};
-use rcypher::cli::{SecurePrinter, confirm_if_weak_password, get_password};
+use rcypher::cli::{SecurePrinter, get_password};
 use rcypher::{
     Argon2Params, Cypher, CypherVersion, EncryptionKey, LockedContainer, SecretStore,
     UnlockedContainer,
@@ -234,6 +234,7 @@ fn run_interactive(params: &CliParams, store: Store, clock: SecurityClock) -> Re
     let interactive_cli = cli::InteractiveCli::new(
         params.prompt.clone(),
         params.insecure_stdout(),
+        get_argon2_params(params),
         store,
         params.filename.clone(),
         clock,
@@ -314,88 +315,66 @@ fn open_existing_store(params: &CliParams, path: &Path, argon2: &Argon2Params) -
     Ok(store)
 }
 
-/// Creates a new store with a single password factor, persisting it empty so the
-/// file exists for later unlocks.
+/// Creates a new store and persists it so the file exists for later unlocks.
+///
+/// The non-interactive `--insecure-password` test path creates a single password
+/// factor directly. Otherwise the library's [`prompt_until_initialized`] drives the
+/// interactive flow: a `primary` password plus, if the user opts in here, a FIDO2
+/// key — with the unlock policy chosen by the user.
+///
+/// [`prompt_until_initialized`]: rcypher::cli::prompt_until_initialized
 fn create_store(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
-    // The password is held in a zeroizing buffer, wiped on drop — including the
-    // early returns from the strength check below.
-    let mut password = obtain_store_password(params, &params.filename, true)?;
-
-    // Strength-check an interactively chosen password (skip in the test-only
-    // `--insecure-password` path, which is non-interactive).
-    if params.insecure_password().is_none()
-        && !confirm_if_weak_password(&password, &[cli::DEFAULT_FACTOR_NAME, "rcypher"])?
-    {
-        bail!("store creation cancelled (weak password not confirmed)");
+    // Non-interactive test path: create directly from the supplied password, with
+    // no prompts, strength gate, or FIDO2 offer.
+    if let Some(pw) = params.insecure_password() {
+        let mut store = UnlockedContainer::create_with_password(
+            cli::DEFAULT_FACTOR_NAME,
+            pw,
+            SecretStore::new(),
+            argon2,
+        )?;
+        store.save(&params.filename)?;
+        return Ok(store);
     }
-
-    let spinner = Spinner::new("Deriving encryption key", params.quiet);
-    let store = UnlockedContainer::create_with_params(
-        cli::DEFAULT_FACTOR_NAME,
-        &password,
-        SecretStore::new(),
-        argon2,
-    );
-    password.zeroize(); // wipe as soon as the key material is derived
-    spinner.finish_and_clear();
-    let mut store = store?;
-
-    // Persist an empty store so the file exists for later unlocks.
-    store.save(&params.filename)?;
-
-    // Offer to add a FIDO2 security key as a second factor right away.
-    #[cfg(feature = "fido2")]
-    offer_fido2_enrollment(&mut store, params)?;
-
-    Ok(store)
+    create_store_interactively(params, argon2)
 }
 
-/// On a fresh interactive store, offers to enrol a FIDO2 security key and choose
-/// whether it is required alongside the password (AND) or an alternative to it (OR).
-/// A no-op on the non-interactive `--insecure-password` path.
-#[cfg(feature = "fido2")]
-fn offer_fido2_enrollment(store: &mut Store, params: &CliParams) -> Result<()> {
-    use rcypher::cli::read_tty_confirmation;
+/// The interactive new-store path: a `primary` password and (where the `fido2`
+/// feature is built in) the offer of a security key, with the unlock policy chosen
+/// by the user — all driven by the library's
+/// [`prompt_until_initialized`](rcypher::cli::prompt_until_initialized), which
+/// prompts for the password first and then offers the key.
+fn create_store_interactively(params: &CliParams, argon2: &Argon2Params) -> Result<Store> {
+    use rcypher::cli::{InitFactor, InitFactorKind};
 
-    if params.insecure_password().is_some()
-        || !read_tty_confirmation("Enrol a FIDO2 security key as a second factor now? [y/N]: ")?
-    {
-        return Ok(());
-    }
-
-    // A PIN is usable only if one is set on the key — detect it rather than asking.
-    let has_pin = rcypher::fido2::device_has_pin()?;
-    let pin = if has_pin {
-        Some(rcypher::cli::prompt_password("Security key PIN")?)
-    } else {
-        eprintln!("This key has no PIN set — the factor will unlock with a touch only.");
-        None
+    let password_factor = InitFactor {
+        kind: InitFactorKind::Password,
+        name: cli::DEFAULT_FACTOR_NAME,
     };
-    eprintln!("Touch your FIDO2 security key to enrol it…");
-    let cred = rcypher::fido2::enroll(cli::FIDO2_RP_ID, pin.as_ref().map(|p| p.as_str()))?;
+    // List the candidate factors; the library prompts for the password, then offers
+    // the key (declined or a missing device simply yields a password-only store).
+    #[cfg(feature = "fido2")]
+    let factors = vec![
+        password_factor,
+        InitFactor {
+            kind: InitFactorKind::Fido2,
+            name: cli::FIDO2_FACTOR_NAME,
+        },
+    ];
+    #[cfg(not(feature = "fido2"))]
+    let factors = vec![password_factor];
 
-    let factor_name = "key";
-    store.enroll_fido2(
-        factor_name,
-        cred.credential_id,
-        cli::FIDO2_RP_ID.to_string(),
-        cred.salt,
-        has_pin,
-        &cred.raw_hmac_secret,
-    )?;
-
-    let both = read_tty_confirmation(
-        "Require BOTH the password and the key to unlock? [y/N] (No = either one) : ",
-    )?;
-    let policy = if both {
-        format!("{} and {factor_name}", cli::DEFAULT_FACTOR_NAME)
-    } else {
-        format!("{} or {factor_name}", cli::DEFAULT_FACTOR_NAME)
+    // `fido2_rp_id: None` uses rcypher's default rp id, so a key enrolled here
+    // interoperates with `auth factor add fido2`.
+    let config = rcypher::cli::NewStoreConfig {
+        factors: &factors,
+        fido2_rp_id: None,
     };
-    store.set_policy(&policy)?;
+    let mut progress = SpinnerProgress::new(params.quiet);
+    let mut store =
+        rcypher::cli::prompt_until_initialized(SecretStore::new(), &config, argon2, &mut progress)?;
     store.save(&params.filename)?;
-    eprintln!("FIDO2 factor '{factor_name}' enrolled; unlock policy is now: {policy}");
-    Ok(())
+    Ok(store)
 }
 
 /// Acquires the store for the interactive session: opens an existing one, or

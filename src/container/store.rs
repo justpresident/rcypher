@@ -221,7 +221,6 @@ impl LockedContainer {
                 Ok(UnlockedContainer {
                     vault,
                     data,
-                    argon2: self.argon2,
                     provenance: Provenance::Fresh,
                 })
             }
@@ -232,13 +231,13 @@ impl LockedContainer {
                 let old_cypher = Cypher::new(key);
                 let payload = old_cypher.decrypt(&self.bytes)?;
                 let mut data = T::decode(&payload)?;
-                let vault = PolicyVault::create(PRIMARY_FACTOR, &password, &self.argon2)?;
+                let vault =
+                    PolicyVault::create_with_password(PRIMARY_FACTOR, &password, &self.argon2)?;
                 data.rekey(&old_cypher, &vault.cypher())?;
                 data.verify(&vault.cypher())?;
                 Ok(UnlockedContainer {
                     vault,
                     data,
-                    argon2: self.argon2,
                     // Keep the exact pre-upgrade bytes so the first save backs them
                     // up regardless of the save path.
                     provenance: Provenance::UpgradedPendingBackup(self.bytes),
@@ -256,7 +255,6 @@ impl LockedContainer {
 pub struct UnlockedContainer<T> {
     vault: PolicyVault,
     data: T,
-    argon2: Argon2Params,
     provenance: Provenance,
 }
 
@@ -278,20 +276,49 @@ impl<T: DataContainer> UnlockedContainer<T> {
     /// `data`. Uses secure default Argon2 parameters; [`save`](Self::save) writes
     /// it in the current format.
     pub fn create(factor_name: &str, password: &str, data: T) -> Result<Self> {
-        Self::create_with_params(factor_name, password, data, &Argon2Params::default())
+        Self::create_with_password(factor_name, password, data, &Argon2Params::default())
     }
 
-    /// Like [`create`](Self::create) with explicit Argon2 cost parameters.
-    pub fn create_with_params(
+    /// Like [`create`](Self::create) with an explicit Argon2 cost for the password
+    /// factor.
+    pub fn create_with_password(
         factor_name: &str,
         password: &str,
         data: T,
         argon2: &Argon2Params,
     ) -> Result<Self> {
         Ok(Self {
-            vault: PolicyVault::create(factor_name, password, argon2)?,
+            vault: PolicyVault::create_with_password(factor_name, password, argon2)?,
             data,
-            argon2: *argon2,
+            provenance: Provenance::Fresh,
+        })
+    }
+
+    /// Creates a new store whose sole factor is a FIDO2 security key — the
+    /// password-free counterpart to
+    /// [`create_with_password`](Self::create_with_password). The caller supplies a
+    /// freshly enrolled credential and its current `hmac-secret` (both from
+    /// `rcypher::fido2`). A password factor enrolled later carries its own Argon2
+    /// cost (see [`enroll_password`](Self::enroll_password)).
+    pub fn create_with_fido2(
+        factor_name: &str,
+        credential_id: Vec<u8>,
+        rp_id: String,
+        salt: SaltBytes,
+        require_pin: bool,
+        raw_hmac_secret: &HmacSecretBytes,
+        data: T,
+    ) -> Result<Self> {
+        Ok(Self {
+            vault: PolicyVault::create_with_fido2(
+                factor_name,
+                credential_id,
+                rp_id,
+                salt,
+                require_pin,
+                raw_hmac_secret,
+            )?,
+            data,
             provenance: Provenance::Fresh,
         })
     }
@@ -341,9 +368,14 @@ impl<T: DataContainer> UnlockedContainer<T> {
         self.vault.factor_kinds()
     }
 
-    /// Enrolls an additional password factor (using the load-time Argon2 params).
-    pub fn enroll_password(&mut self, name: &str, password: &str) -> Result<()> {
-        self.vault.enroll_password(name, password, &self.argon2)
+    /// Enrolls an additional password factor with the given Argon2 cost.
+    pub fn enroll_password(
+        &mut self,
+        name: &str,
+        password: &str,
+        argon2: &Argon2Params,
+    ) -> Result<()> {
+        self.vault.enroll_password(name, password, argon2)
     }
 
     /// Enrolls a FIDO2 security-key factor from a just-enrolled credential and its
@@ -458,7 +490,7 @@ mod tests {
     }
 
     fn new_store(password: &str, text: &str) -> UnlockedContainer<Text> {
-        UnlockedContainer::create_with_params("primary", password, Text(text.into()), &params())
+        UnlockedContainer::create_with_password("primary", password, Text(text.into()), &params())
             .unwrap()
     }
 
@@ -497,7 +529,7 @@ mod tests {
     #[test]
     fn enroll_and_multifactor_policy() {
         let mut store = new_store("p1pass", "d");
-        store.enroll_password("p2", "p2pass").unwrap();
+        store.enroll_password("p2", "p2pass", &params()).unwrap();
         store.set_policy("primary or p2").unwrap();
         let bytes = store.to_vec().unwrap();
 
@@ -548,6 +580,31 @@ mod tests {
         // A legacy-style lock (no FIDO2 factors) yields no match and empty kinds.
         let mut pw_only = open(&new_store("only", "x").to_vec().unwrap());
         assert!(!pw_only.try_fido2_secret(&secret).unwrap());
+    }
+
+    #[test]
+    fn create_with_fido2_makes_a_key_only_store() {
+        let secret = [9u8; crate::constants::HMAC_SECRET_LEN];
+        let store = UnlockedContainer::<Text>::create_with_fido2(
+            "key",
+            vec![1, 2, 3],
+            "rcypher".into(),
+            crate::constants::SaltBytes::default(),
+            false,
+            &secret,
+            Text("d".into()),
+        )
+        .unwrap();
+        assert_eq!(store.policy_expr(), "key");
+        let bytes = store.to_vec().unwrap();
+
+        // No password can unlock a key-only store; the key's secret alone does.
+        let mut locked = open(&bytes);
+        assert!(!locked.try_password("anything").unwrap());
+        assert!(!locked.can_unlock());
+        assert!(locked.try_fido2_secret(&secret).unwrap());
+        assert!(locked.can_unlock());
+        assert_eq!(locked.unlock::<Text>().unwrap().data().0, "d");
     }
 
     #[test]
@@ -604,7 +661,7 @@ mod tests {
 
         // primary OR p2: either password unlocks (OR replicates the DEK).
         let mut store = new_store("p1pass", "secret");
-        store.enroll_password("p2", "p2pass").unwrap();
+        store.enroll_password("p2", "p2pass", &params()).unwrap();
         store.set_policy("primary or p2").unwrap();
         let bytes = store.to_vec().unwrap();
         assert!(try_open(&bytes, "p1pass").is_ok());
@@ -637,7 +694,9 @@ mod tests {
         let mut store = new_store("alpha-vault-pass", "current data");
         let old_bytes = store.to_vec().unwrap();
 
-        store.enroll_password("second", "bravo-vault-pass").unwrap();
+        store
+            .enroll_password("second", "bravo-vault-pass", &params())
+            .unwrap();
         store.set_policy("primary and second").unwrap();
         let current_bytes = store.to_vec().unwrap();
 
