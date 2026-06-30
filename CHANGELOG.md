@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format is based on
 pre-1.0 [Semantic Versioning](https://semver.org/) (breaking changes bump the
 minor; features and fixes bump the patch).
 
-## [Unreleased]
+## [0.4.0] - 2026-06-30
 
 ### Added
 - `cli::prompt_until_initialized` — a reusable interactive new-store flow (the

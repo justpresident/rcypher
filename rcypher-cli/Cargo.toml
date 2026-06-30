@@ -1,6 +1,6 @@
 [package]
 name = "rcypher-cli"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "A CLI for secure password management, built on the rcypher encryption library"
 repository = "https://github.com/justpresident/rcypher"
@@ -24,7 +24,7 @@ fido2 = ["rcypher/fido2"]
 [dependencies]
 # Interactive plumbing (prompts, strength gate, unlock loop) comes from the lib's
 # `cli` feature; this crate is a thin shell over it.
-rcypher = { path = "..", version = "0.3.0", features = ["storage", "cli"] }
+rcypher = { path = "..", version = "0.4.0", features = ["storage", "cli"] }
 anyhow = "1.0"
 arboard = "3"
 chrono = "0.4"
