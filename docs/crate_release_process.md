@@ -15,6 +15,12 @@ overwrite or re-upload that version. Everything below the publish step exists to
 make sure the artifact is correct *before* it goes out. The two crates share one
 version number — bump them in lockstep.
 
+The mechanical publish half (steps 8 and 10–14: dry-run, tag, push, publish both
+crates, GitHub release) is automated by **`scripts/release.sh`**: do the review,
+validation gate, changelog, and version bump below, commit them as the
+`Release vX.Y.Z` commit, then run the script. The steps below document what it
+does — and the manual fallback if you'd rather drive it by hand.
+
 ## Pre-flight
 
 0. Be on `main`, up to date, with a clean working tree and CI green on the last
